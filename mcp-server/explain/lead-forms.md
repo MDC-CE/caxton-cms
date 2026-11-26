@@ -189,13 +189,14 @@ conversion_name: event_order
 
 ## Campaign context + ledger fields (added by code, not YAML)
 
-Every submit (`/api/leads` and `/api/leads/webhook-delivery`) is enriched server-side before `buildLeadPayload`:
+Every submit (`POST /api/leads/webhook-delivery`) is enriched server-side before `buildLeadPayload`:
 
 | Key | When | Meaning |
 |---|---|---|
 | `submission_id` | always | Per-submit id (client UUID, server fallback). Not the authored `event_id`. Also on the GTM conversion push. |
 | `is_test` | always (boolean) | Staff session (`X-Debug-Token`) or email matching `ads-config.yml` → `test_email_patterns` (legacy `settings.yml` → `ads.test_email_patterns` until migration 004 runs). Still delivered; excluded from Ads reports. |
 | `test_reason` | only when `is_test` | `staff_session` \| `email_pattern` |
+| `is_staff` | always (boolean) | `true` only for `test_reason: staff_session` (server-verified staff session). Email-pattern test leads are `is_test: true`, `is_staff: false`. Every GTM dataLayer push also carries `is_staff` (browser staff token), so GTM can skip conversion tags or set GA4 `traffic_type: internal`. |
 | `is_repeat` | always (boolean) | Same browser + same `conversion_name` within 24h. Still delivered; counted as a submission, not a lead. |
 | `repeat_of_submission_id` | only when `is_repeat` | First submission in the window. |
 | `gclid` `fbclid` `msclkid` `ttclid` `li_fat_id` … | when present | Per-platform click ids (`ppc_tracking_id` kept for back-compat). |
@@ -204,7 +205,7 @@ Every submit (`/api/leads` and `/api/leads/webhook-delivery`) is enriched server
 | `landing_url` / `conversion_url` | always | First page in this browser / page where the form was sent. |
 | `first_paid_landing_*` / `last_paid_landing_*` | when a paid visit was seen (≤30 days) | URL + ISO time. |
 | `ad_platform` | paid/unclear visits | `meta` \| `google` \| … |
-| `page_experiment_id` / `page_variant` | page has an active version test | Variant from the versioning cookie. |
+| `experiment_id` / `variant` | visitor saw a page test this visit | Same names as GTM conversion pushes. First test seen this visit (form body `page_experiment_id`, else cookie `4g_visit_exp`: 30 min, cross-tab), accepted only when it matches the visitor's assignment in `4g_versioning_v2`; otherwise both are omitted (body values with these names are dropped). `variant` is a variant slug or `default` (live page during the test). Leads before 2026-10-27 used `page_experiment_id` / `page_variant`. Id format `contentType:slug:locale@YYYY-MM-DD` (run start; no `@date` on tests started before run dates). Leads before the A/B tracking fix used a buggy split (Default's share went to the first variant). |
 | `consent_state` | always | `granted` \| `denied` \| `unset` (tracking banner). |
 | `channel` `first_channel` `channel_landing_path` `referrer_host` | sent by current pages (session `entry_channel`) | Ledger-only: saved on `lead_submissions` (plus `last_organic_channel`, `country`, `traffic_status`), **stripped before the CRM**. Rules → topic `ads` (Lead channel). |
 
@@ -215,6 +216,48 @@ Every submit (`/api/leads` and `/api/leads/webhook-delivery`) is enriched server
 - Internal UTMs (`utm_source` = this host or its parent domain, e.g. `4geeks.com` on `4geeks.com`) are now ignored by the visitor session: they no longer replace stored campaign tags or click ids. Other org sites still count as ordinary referrals.
 - Lead counts by channel, source / medium, page, experiment or product: `get_leads_breakdown` (topic `ads` → Leads breakdown).
 - Same-site links with `utm_*` in content YAML raise `INTERNAL_LINK_HAS_UTM` (validator `internal-link-utm`, warning): they restart the GA4 session and overwrite the visitor's real source, so paid visits and leads can be credited to the wrong source. Links to other domains (including the org's other sites) are not flagged.
+
+## Product / persona on leads and events
+
+Every event and lead carries the page funnel's products / personas (topic `product` → Tracking short keys).
+
+| Destination | Values |
+|---|---|
+| dataLayer / GA4 (`product`, `persona`, `product_persona`, `funnel_stage`, `content_key`, `tracking_truncated`) | **Short codes** (`aie`, `cc`, `aie:cc`), comma-joined, cut at a whole code to 100 chars (keeps the funnel's first codes), then **sorted** so the same audience is always the same string. Only once the site's tracking switch is on. |
+| Lead body → CRM webhook + ledger (`product`, `persona`, `product_persona`) | **Full ids** (`ai-engineering`, `the-career-changer`), sorted, never cut, always sent. Ledger stores `product` / `persona` (since launch) and `product_persona` (since pipeline migration 42); older rows null. |
+
+- Reading values back: split with `parseTrackingList` / `decodeTrackingCodes` / `decodeTrackingPairs` (`shared/tracking-context.ts`); never group by the raw string. GA4 data sent before sorting (2026-10-25) can hold the same set in two orders. Persona full ids can repeat across products: use `product_persona` pairs for the product; a shared id without a pair has no product (never guessed).
+
+- Default: the page funnel (`effectiveBindings`; program page includes itself). `funnel.products: all` → `all`; content page without funnel → `none`.
+- CTA YAML passes that id triple with `{{ entry.funnel_products_encoded_ids }}` (URI-encoded JSON; program, landing, and page). `{{ funnel.products }}` is the stored list, not that string. Form hidden `product`/`persona` overrides do not change either token.
+- Override per form with hidden fields (no schema change — `fields` accepts extra keys; also inside `form_overrides[].fields`):
+
+```yaml
+fields:
+  product: { visible: false, default: ai-flex }        # full id (preferred) or short code
+  persona: { visible: false, default: the-explorer }   # optional
+```
+
+- Product override without persona → only the personas the page funnel binds to those products (`"all"` page → none; no funnel → `none`).
+- Invalid overrides are **sent as written** (never corrected). Diagnostics (`forms` validator) warns: `FORM_UNKNOWN_TRACKING_PRODUCT`, `FORM_UNKNOWN_TRACKING_PERSONA`, `FORM_TRACKING_PERSONA_PRODUCT_MISMATCH`, `FORM_TRACKING_OVERRIDE_USES_CODE` (codes work; full id preferred).
+- Non-effects: `item_id` / `program_id` (ecommerce product resolution) and CRM `program` / `course` are unchanged.
+
+## Consent checkboxes (mandatory rule)
+
+Every lead form must show at least one checkbox visitors must tick. Effective consent = form `consent` + conversion event `consent` defaults (form wins per key) + site Default (`settings.yml` → `consent.fallback`).
+
+| Shown on the form | Mandatory |
+|---|---|
+| `general` (and/or `marketing`) | General and Marketing are each mandatory whenever shown; both shown → both mandatory (validator warning `FORM_TWO_REQUIRED_CONSENTS`) |
+| neither, custom consent `consent.<field>: true` (with copy) | first custom consent (Settings order) |
+| none of the above | the site Default appears and is mandatory |
+| none + site has no Default | nothing → `FORM_NO_REQUIRED_CONSENT` (error) + publish blocked |
+
+- SMS, Email and WhatsApp are **always optional** and never count. `marketing: true` hides the separate Email / WhatsApp checkboxes (their CRM values follow the Marketing checkbox).
+- `sms_usa_only: true`: SMS shows only for US visitors by two-letter `country_code` — the location the visitor picked, else the detected session location; a location with unknown country (`XX`, e.g. `remote`) falls through to the visitor's geo `country_code`.
+- Publish gate (`publish_draft`, `promote_variant`, staff publish, live `replace_all_sections`): refuses `consent_no_mandatory_checkbox` with `consent_forms[].property_path` and `fix_field_path` (`sections.N.<form>.consent.general`); `form_overrides` that switch `conversion_name` are checked as their own variant. Draft saves never block. A site with no Default adds warning `site_no_default_consent` to every publish; validator raises `SITE_NO_DEFAULT_CONSENT` (error).
+- Non-effects: values sent to the CRM are unchanged (`consent_general` is sent as-is; General does **not** set marketing consent). Enforcement is browser-only (the server accepts leads without consent). Agents cannot change the site Default (staff Settings).
+- Rule: `resolveConsentRequirement` in `shared/consent-settings.ts`; per-form check `shared/formConsentCheck.ts`; gate `server/consent-gate.ts`; validator `scripts/validation/validators/forms.ts`.
 
 ## Paths
 

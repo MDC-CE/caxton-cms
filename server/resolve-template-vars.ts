@@ -1,6 +1,6 @@
 /**
  * Multi-bag template resolution for public content delivery.
- * Order: {{ single.* }} → {{ meta.* }} → {{ seo.* }} → {{ param.* }} → optional site vars (brand.* / global.* / reserved.*).
+ * Order: {{ single.* }} → {{ meta.* }} → {{ seo.* }} → {{ param.* }} → {{ funnel.* }} → optional site vars (brand.* / global.* / reserved.*).
  *
  * Site vars default to skipped (`skipSiteVars: true`) so React `SectionRenderer`
  * can resolve them (and preserve `{{ }}` in edit mode). Pass `skipSiteVars: false`
@@ -176,6 +176,10 @@ export interface ResolveAllTemplateVarsOptions {
   seo?: Record<string, unknown>;
   /** Unified URL path + querystring params (path wins). */
   param?: Record<string, unknown>;
+  /** Page funnel block, same lookup as meta. Defaults to `data.funnel`. */
+  funnel?: unknown;
+  /** Route content type. Kept for callers; funnel tokens read the page funnel block. */
+  contentType?: string;
   contentRoot?: string;
   context?: VariableContext;
   /**
@@ -193,7 +197,7 @@ export interface ResolveAllTemplateVarsOptions {
  */
 type NamespaceStep =
   | { kind: "single"; bag: Record<string, unknown> }
-  | { kind: "bag"; prefix: "meta" | "seo" | "param"; bag: Record<string, unknown> };
+  | { kind: "bag"; prefix: "meta" | "seo" | "param" | "funnel"; bag: Record<string, unknown> };
 
 function mentionsNamespace(str: string, step: NamespaceStep): boolean {
   if (step.kind === "single") {
@@ -295,6 +299,13 @@ export function resolveAllTemplateVars(
 
   if (opts.param && Object.keys(opts.param).length > 0) {
     steps.push({ kind: "bag", prefix: "param", bag: opts.param });
+  }
+
+  const funnelSource =
+    opts.funnel !== undefined ? asRecord(opts.funnel) : page ? asRecord(page.funnel) : undefined;
+  const funnelBag = funnelSource ? asRecord(walkNamespaces(funnelSource, steps, 0)) : undefined;
+  if (funnelBag && Object.keys(funnelBag).length > 0) {
+    steps.push({ kind: "bag", prefix: "funnel", bag: funnelBag });
   }
 
   let result = steps.length > 0 ? walkNamespaces(data, steps, 0) : data;

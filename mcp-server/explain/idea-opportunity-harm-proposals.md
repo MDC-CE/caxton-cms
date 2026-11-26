@@ -11,7 +11,9 @@ Default-on review situation for every `kind: idea` proposal. Situation id: `idea
 **SEO target (SEO-monitored types):** also set `idea_seo_target` `{ main_keyword, cluster: join | hub | standalone }` before accept (`set_idea_seo_target`). Score it: keyword matches the brief's search claim (not a broader head term); join hub is live, same locale, and on-topic (`list_seo_clusters` / `list_seo_cluster_entries`); hub-mode members are real live posts; standalone only for `fast_decay_news` / `broken_url` with a credible reason. Weak fit → `add_blocker` naming the better hub. Freezes at accept; seeded into the new draft. Refusal codes: proposals hub (`explain_site` topic `proposals`, no subtopic).
 
 If this page ships and gets almost no visits for 90 days, what did we break?  
-If the honest answer is “hub links, crawl, freshness SLA, and another thin URL,” do not accept.
+If the honest answer is “crawl, freshness SLA, and another thin URL,” do not accept.
+
+**Hub link at go-live:** every accepted idea gets a link from its hub when the page goes live — that link is how the page gets discovered and indexed fast. A page that does not deserve a hub link does not deserve accept. The implementing author files a second edits proposal on the hub (`review_situations: ["internal_links"]`, `applies_after_proposal_id` = the page's proposal); apply is refused until the page is live. The kill criterion says what happens to that link: if the page is retired, remove it from the hub.
 
 ---
 
@@ -35,10 +37,11 @@ Then: if the page can be mediocre and still tax the site, do not accept. Dilutio
 | Situation | Action |
 |---|---|
 | Harm is low and the brief is complete | `accept` + `next_step` (min 20) + `accepted_entry`. Do not say the page is live. |
-| Idea might be fine; research or kill line missing | `add_blocker`: what is wrong, what fixed looks like, why it matters (min 80). |
+| Idea might be fine; research, kill line, or the existing file it depends on (`media_id` + `src`) missing | `add_blocker`: what is wrong, what fixed looks like, why it matters (min 80). |
 | Idea itself is the harm (spam, dupe, official-catalog clone we will lose) | `reject` or `close` park. Reject is rare and terminal. |
 | Better as a refresh of an existing slug | `close` `tracked_elsewhere` naming that slug. |
 | Wrong vehicle (funnel / SERP / hub-links-only on live pages) | `close` and tell author to refile as **edits** with the right situation. |
+| Brief is a procedure: if/then branches, a precondition only a person can check, or tasks for staff | `close` `other` and tell author to refile as **notes**. Do not `add_blocker` asking someone to run the precondition. |
 
 Open blockers block accept. Reviewer cannot `revise_entries` on an idea (no ops). Incomplete briefs still **create** — fix via blocker, not create refuse.
 
@@ -55,6 +58,9 @@ Use `kind: idea` for a new URL, net-new public page, or structural brief (includ
 | Add hub links only | edits + `internal_links` |
 | Refresh facts on an existing slug | idea or edits **on that slug**, not a third URL |
 | “We noticed dupes” | notes naming the slugs |
+| A check or task only a person can do (Search Console inspect, request indexing, find where a bad link comes from) | notes with the check and what each result means |
+
+**One change per idea.** An idea pitches one site change the reviewer can accept or close as written. Decide with the data you can read. If the decision depends on something you cannot check (stale Search Console cache, analytics UI), file **notes** asking a person for it — never an idea with “do X only if Y” branches.
 
 ---
 
@@ -71,10 +77,10 @@ Skip is allowed. Unavailable tools stay listed with `available: false`. **Skip n
 
 ## Harm types (short)
 
-- **Dilution** — new slug with no retrieval evidence; unpaid hub links; dead inventory forever
+- **Dilution** — new slug with no retrieval evidence; dead inventory forever (no kill criterion)
 - **Freshness** — `refresh_tier: fast` without owner + recrawl trigger
 - **Cannibal** — same angle as an existing spoke; unjustified EN+ES doubling
-- **False claims / endorsement** — named third parties without primary sources
+- **False claims / endorsement** — named third parties without primary sources. A sourced row in an evidence database (`review_context.evidence` status `sourced`, e.g. a press mention with its article link) counts as the source; `no_evidence` / `unverified` names → add_blocker (explain_site topic `local_databases`, Evidence databases)
 - **Spam / brand** — generic listicle, padded FAQ, invented figures
 - **Unachievable SERP** — official-domain queries a roundup cannot beat
 - **Ops load** — competing locks; every later pass scores two more locales
@@ -85,7 +91,7 @@ Skip is allowed. Unavailable tools stay listed with `available: false`. **Skip n
 
 ### Fail — marketplace spoke with no query proof
 
-New EN/ES URLs, fast tier, pillar links, no volume/SERP. Reviewer: blocker (evidence, owner, link budget) or close.
+New EN/ES URLs, fast tier, no volume/SERP. Reviewer: blocker (evidence, owner, kill criterion) or close. The pillar link is not the problem — the missing evidence is.
 
 ### Pass — refresh existing news spoke
 
@@ -99,16 +105,23 @@ Dilution may improve, but short visit loss needs evidence the **hub** is low-val
 
 Cannibal + retrieval split. Notes to merge, not a fourth idea.
 
+### Fail — broken-URL redirect “only after Search Console confirms”
+
+Brief: inspect the target in Search Console; if indexed, redirect; if not, open another idea; meanwhile find the bad link. That is four steps with a branch and two staff tasks, not one change. Reviewer: `close` `other`, refile as notes. Author should have decided from the cached `get_entry_seo` `search_engines` read (Soft 404 → no redirect) or filed notes asking for a fresh inspect.
+
 ---
 
 ## Author checklist (rationale)
 
 - [ ] Target page type named in `related_entries` (content type key, not a tag); its `get_content_type_info` strategy read and the brief fits it
+- [ ] One site change, no if/then branches or tasks for staff (those are notes)
 - [ ] One-sentence 90-day goal (cite / rank / assist)
+- [ ] Page built around an existing file (PDF lead magnet, video, image): its gallery `media_id` and public `src` URL, so staff and the reviewer can open it
 - [ ] Evidence for the job (search proof, or demand label + its proof, or non-search reason in the summary)
 - [ ] Named siblings and why this is not them
 - [ ] One locale unless both have demand
-- [ ] Kill criterion; link budget (default zero hub links)
+- [ ] Kill criterion, including removing the hub link if the page is retired
+- [ ] Hub link plan: which hub links the page at go-live (chained `internal_links` proposal)
 - [ ] If this ships and gets ~0 visits, we have not broken the pillar
 - [ ] Demand label when needed: `anticipated_demand` | `fast_decay_news` | `broken_url`
 

@@ -2,12 +2,14 @@ import fs from "fs";
 import { getDefaultContentFolder, getDefaultContentRoot } from "./site-config";
 import path from "path";
 import yaml from "js-yaml";
-import { escapeObjectVars, unescapeYamlDump } from "@shared/templateVars";
+import { escapeObjectVars, unescapeYamlDump, CorruptedTemplateValueError } from "@shared/templateVars";
+import { dumpContentYaml, loadContentYamlObject } from "./content-yaml";
 import { typeUsesSharedTemplate } from "@shared/sharedLayoutPaths";
 import { entryBagFieldPathFromVarName, getLegacySingleVarWriteError } from "@shared/entryTemplateVars";
 import { getConsentKeyError } from "@shared/consentLegacyKeys";
 import { deleteAtPath } from "@shared/object-path";
 import { isCommonField } from "@shared/field-scope";
+import { isSlug, SLUG_FORMAT_HINT } from "@shared/slug";
 import {
   wipeSectionOnDuplicate,
   wipeDocumentSectionsOnDuplicate,
@@ -28,6 +30,7 @@ import {
   listLiveLocales,
 } from "./draft-entry";
 import { runInternalLinkGate } from "./internal-link-gate";
+import { runConsentGate } from "./consent-gate";
 import type { BrokenInternalLink, InternalLinkWarning } from "@shared/internalLinkGate";
 import {
   clampSchemaOrgSectionsLeading,
@@ -49,11 +52,7 @@ function getDefaultContentRootName(): string {
   }
 }
 
-function safeYamlDump(obj: unknown, opts?: yaml.DumpOptions): string {
-  const { escaped, map } = escapeObjectVars(obj);
-  const dumped = yaml.dump(escaped, opts);
-  return unescapeYamlDump(dumped, map);
-}
+const safeYamlDump = (obj: unknown, opts?: yaml.DumpOptions): string => dumpContentYaml(obj, opts);
 import type { EditOperation } from "@shared/schema";
 import { normalizeLocale, getSupportedLocales, getDefaultLocale } from "./settings";
 import { markFileAsModified } from "./sync-state";
@@ -61,6 +60,7 @@ import { emitClusterHubPathRewriteStarted, emitEntryDeleted } from "./content-ev
 import { getContentWriteContext } from "./write-context";
 import { buildEntryKey } from "../scripts/validation/shared/entryKey";
 import { contentIndex, ContentIndex } from "./content-index";
+import { entryRefFailureMessage, resolveEntryRef } from "./entry-ref";
 import { deepMerge } from "./utils/deepMerge";
 import { mergeSingleTemplate, extractVariableFields, TEMPLATE_EXPR_RE } from "./database-single-loader";
 import { getDatabaseName, getLookupKey, getFieldMapping, isValidType, getAllTypes, getFolder, getContentTypeConfig, listExtraUrlPatternParams, detectUrlParamValueShape, formatUrlParamFieldValue, getRawUrlParamValue, type UrlParamValueShape } from "./content-types";
@@ -219,6 +219,7 @@ import {
   isTemplateVersioningSlug,
   rejectAttachedStructuralEdit,
 } from "./shared-layout-entry";
+import { abCheckPageLock } from "./ab-testing/state";
 import {
   isTypeLayoutTarget,
   isSharedTemplateBasename,
@@ -298,14 +299,14 @@ function applyPublishedAtAfterDuplicate(
     const localePath = path.join(contentRoot, getFolder(type, contentRoot), slug, `${loc}.yml`);
     if (!fs.existsSync(localePath)) continue;
     try {
-      const data = (yaml.load(fs.readFileSync(localePath, "utf-8")) as Record<string, unknown>) || {};
+      const data = loadContentYamlObject(fs.readFileSync(localePath, "utf-8")) ?? {};
       const ovr = data[FIELD_OVERRIDES_KEY];
       if (ovr && typeof ovr === "object" && !Array.isArray(ovr) && RESERVED_PUBLISHED_AT_FIELD in (ovr as object)) {
         const nextOvr = { ...(ovr as Record<string, unknown>) };
         delete nextOvr[RESERVED_PUBLISHED_AT_FIELD];
         if (Object.keys(nextOvr).length === 0) delete data[FIELD_OVERRIDES_KEY];
         else data[FIELD_OVERRIDES_KEY] = nextOvr;
-        fs.writeFileSync(localePath, yaml.dump(data, { lineWidth: 120, noRefs: true, sortKeys: false }), "utf-8");
+        fs.writeFileSync(localePath, dumpContentYaml(data, { lineWidth: 120, noRefs: true, sortKeys: false }, localePath), "utf-8");
         markFileAsModified(localePath, author, undefined, contentRoot);
       }
     } catch {
@@ -706,6 +707,19 @@ function enforceTouchedJsonFieldSchemas(opts: {
   return { ok: true };
 }
 
+/**
+ * Live language files never gain or change a top-level `funnel:` (page-level, `_common.yml` only).
+ * A legacy copy the save leaves as-is does not block unrelated edits.
+ */
+export function liveLocaleFunnelWriteError(
+  previous: Record<string, unknown> | null | undefined,
+  next: Record<string, unknown>,
+): string | null {
+  if (JSON.stringify(previous?.funnel ?? null) === JSON.stringify(next.funnel ?? null)) return null;
+  if (next.funnel === undefined || next.funnel === null) return null;
+  return "funnel is page-level and lives in _common.yml, not in a language file. Set it in the Funnel tab, with funnel.* field updates, or stage it in a draft (publishing moves it to _common.yml).";
+}
+
 export async function editContent(request: ContentEditRequest): Promise<{
   success: boolean;
   error?: string;
@@ -730,6 +744,9 @@ export async function editContent(request: ContentEditRequest): Promise<{
   
   // Normalize locale to prevent es-ES, en-US etc from causing file lookup failures
   const locale = normalizeLocale(rawLocale);
+
+  const lock = abCheckPageLock(contentType, slug, contentRoot ?? ci.contentRoot);
+  if (lock) return { success: false, error: lock.error, errorCode: lock.code };
   
   // Validate that version is not provided without a variant
   const hasVariant = variant !== undefined && variant !== null && variant !== "";
@@ -781,11 +798,21 @@ export async function editContent(request: ContentEditRequest): Promise<{
 
   for (const op of operations) {
     if (op.action === "update_field" && op.path === "slug") {
-      return {
-        success: false,
-        error:
-          "Locale URL slug cannot be changed via update_field. Use POST /api/content/rename-slug instead.",
-      };
+      if (!hasVariant) {
+        return {
+          success: false,
+          error:
+            "Locale URL slug cannot be changed via update_field. Use POST /api/content/rename-slug instead.",
+        };
+      }
+      // Drafts stage this language's own slug; URL ownership is checked at publish.
+      if (typeof op.value !== "string" || !isSlug(op.value.trim())) {
+        return {
+          success: false,
+          error: "Invalid slug format. Use lowercase letters, numbers, and hyphens only.",
+          errorCode: "invalid_locale_slug",
+        };
+      }
     }
     if (
       op.action === "update_field" &&
@@ -1521,6 +1548,8 @@ export async function editContent(request: ContentEditRequest): Promise<{
     // Draft variant files and shared template.*.yml (legacy single.*) edits skip this gate.
     const writingSharedTemplate = isSharedTemplateBasename(path.basename(filePath));
     const writingLiveLocale = !hasVariant && !writingSharedTemplate;
+    const funnelErr = writingLiveLocale ? liveLocaleFunnelWriteError(previousLocaleData, localeData) : null;
+    if (funnelErr) return { success: false, error: funnelErr, errorCode: "funnel_in_language_file" };
     let linkWarnings: InternalLinkWarning[] = [];
     if (writingLiveLocale) {
       const commonForGate = ci.loadCommonData(contentType, slug) || {};
@@ -1559,6 +1588,16 @@ export async function editContent(request: ContentEditRequest): Promise<{
       });
       if (linkGate.blocked) return linkGate.blocked;
       linkWarnings = linkGate.linkWarnings;
+      if (gateIntent === "publish") {
+        const consentGate = runConsentGate({ pageData: mergedForGate, contentRoot });
+        if (consentGate.failure) {
+          return {
+            success: false,
+            error: consentGate.failure.message,
+            errorCode: consentGate.failure.code,
+          };
+        }
+      }
     } else if (hasVariant && !writingSharedTemplate) {
       const commonForGate = ci.loadCommonData(contentType, slug) || {};
       linkWarnings = internalLinkGateForWrite({
@@ -1649,6 +1688,9 @@ export async function editContent(request: ContentEditRequest): Promise<{
     };
   } catch (error) {
     log.error({ err: error }, "Content edit error:");
+    if (error instanceof CorruptedTemplateValueError) {
+      return { success: false, error: error.message, errorCode: error.code };
+    }
     return { success: false, error: error instanceof Error ? error.message : "Unknown error" };
   }
 }
@@ -2076,7 +2118,7 @@ function writeTopLevelFieldsToPerEntryFile(opts: {
     let entryData: Record<string, unknown> = {};
     if (fs.existsSync(perEntryPath)) {
       const raw = fs.readFileSync(perEntryPath, "utf-8");
-      entryData = (yaml.load(raw) as Record<string, unknown>) || {};
+      entryData = loadContentYamlObject(raw) ?? {};
     }
 
     const previousEntryData = cloneYamlData(entryData);
@@ -2686,6 +2728,9 @@ export function editCommonContent(request: CommonEditRequest): {
   const ci = request.ci ?? contentIndex;
   const contentRootName = request.contentRootName;
 
+  const lock = abCheckPageLock(contentType, slug, contentRootName ?? ci.contentRoot);
+  if (lock) return { success: false, error: lock.error, errorCode: lock.code };
+
   const deprecatedGate = checkDeprecatedWrites({
     contentType,
     slug,
@@ -2709,7 +2754,7 @@ export function editCommonContent(request: CommonEditRequest): {
     }
 
     const raw = fs.readFileSync(commonPath, "utf-8");
-    const commonData = (yaml.load(raw) as Record<string, unknown>) || {};
+    const commonData = loadContentYamlObject(raw) ?? {};
 
     for (const op of operations) {
       if (op.action !== "update_field") {
@@ -2996,7 +3041,7 @@ export async function checkSlugRename(
   if (!isValidType(contentType)) {
     return { ok: false, statusCode: 400, code: "invalid_type", error: `Invalid type. Must be one of: ${getAllTypes().join(", ")}` };
   }
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(newSlug)) {
+  if (!isSlug(newSlug)) {
     return { ok: false, statusCode: 400, code: "invalid_slug", error: "Invalid slug format. Use lowercase letters, numbers, and hyphens only." };
   }
   if (isReservedTemplateVariantSlug(newSlug)) {
@@ -3013,11 +3058,23 @@ export async function checkSlugRename(
   );
 
   const contentFolder = ci.getFolderName(contentType);
-  const resolvedFolderSlug = ci.resolveBaseSlug(folderSlug, contentType);
-  const folderPath = ci.getContentFolderPath(contentType, folderSlug);
-
+  const page = resolveEntryRef(ci, { contentType, ref: folderSlug });
+  if (!page.ok && page.reason === "ambiguous") {
+    return { ok: false, statusCode: 409, code: "ambiguous_slug", error: entryRefFailureMessage(contentType, folderSlug, page) };
+  }
+  const resolvedFolderSlug = page.ok ? page.entryId : ci.resolveBaseSlug(folderSlug, contentType);
+  const folderPath = ci.getContentFolderPath(contentType, resolvedFolderSlug);
   if (!fs.existsSync(folderPath)) {
     return { ok: false, statusCode: 404, code: "entry_not_found", error: `Content folder not found: ${folderSlug} (resolved: ${resolvedFolderSlug})` };
+  }
+  const newSlugOwner = resolveEntryRef(ci, { contentType, ref: newSlug });
+  if (newSlugOwner.ok && newSlugOwner.entryId !== resolvedFolderSlug) {
+    return {
+      ok: false,
+      statusCode: 409,
+      code: "slug_already_owned_by_other_entry",
+      error: `"${newSlug}" is already an address (or another spelling of one) of page "${newSlugOwner.entryId}".`,
+    };
   }
 
   const effectiveLocale =
@@ -3129,6 +3186,9 @@ export async function renameContentSlug(
   const ci = input.ci ?? contentIndex;
   const rootName = input.contentRootName ?? ci.contentRootName ?? getDefaultContentRootName();
   let clusterRewireQueued = false;
+
+  const lock = abCheckPageLock(contentType, input.folderSlug, rootName);
+  if (lock) return { success: false, statusCode: 403, code: lock.code, error: lock.error };
 
   const check = await checkSlugRename(input);
   if (!check.ok) {
@@ -3270,6 +3330,34 @@ function collectEntryKeysInFolder(
   return keys;
 }
 
+/** Drop one folder from the indexes that serve requests, after it is gone from disk. */
+async function upsertRemovedFolder(relFile: string): Promise<void> {
+  const seen = new Set<ContentIndex>();
+  const apply = (ci: ContentIndex) => {
+    if (seen.has(ci)) return;
+    seen.add(ci);
+    try {
+      ci.upsertEntry(relFile);
+    } catch {
+      /* non-fatal */
+    }
+  };
+  let matched = false;
+  try {
+    const { getSiteContextMap } = await import("./site-manager");
+    for (const ctx of getSiteContextMap().values()) {
+      if (!relFile.startsWith(`${ctx.contentRootName}/`)) continue;
+      matched = true;
+      apply(ctx.contentIndex);
+    }
+  } catch {
+    /* non-fatal */
+  }
+  if (!matched && relFile.startsWith(`${contentIndex.contentRootName}/`)) {
+    apply(contentIndex);
+  }
+}
+
 function emitEntryDeletedPipelineEvent(opts: {
   rootName: string;
   type: string;
@@ -3326,6 +3414,9 @@ export async function deleteContentEntry(
     return { success: false, statusCode: 400, error: "Invalid slug format" };
   }
 
+  const lock = abCheckPageLock(type, slug, rootName);
+  if (lock) return { success: false, statusCode: 403, code: lock.code, error: lock.error };
+
   try {
     const { isProtectedContentSlug } = await import("./relation-delete");
     if (isProtectedContentSlug(type, slug)) {
@@ -3378,6 +3469,7 @@ export async function deleteContentEntry(
         markFileAsModified(`${rootName}/${typeFolder}/${resolvedSlug}/${file}`, author);
       }
       fs.rmSync(folderPath, { recursive: true, force: true });
+      await upsertRemovedFolder(`${rootName}/${typeFolder}/${resolvedSlug}/en.yml`);
       log.info(`[Content] Deleted ${type}/${slug} (all locales removed, folder cleaned up)`);
       try {
         const { removeSlugFromAllDependants } = await import("./utils/sectionAnchors");
@@ -3443,6 +3535,7 @@ export async function deleteContentEntry(
     markFileAsModified(`${rootName}/${typeFolder}/${resolvedSlug}/${file}`, author);
   }
   fs.rmSync(folderPath, { recursive: true, force: true });
+  await upsertRemovedFolder(`${rootName}/${typeFolder}/${resolvedSlug}/en.yml`);
   log.info(`[Content] Deleted ${type}/${slug}`);
   invalidateSitemapEntriesByContentKey(`${type}:${resolvedSlug}`);
   contentIndex.refresh();
@@ -3568,7 +3661,6 @@ export async function createContentEntry(
     }
   }
 
-  const slugRegex = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
   const skipEn = skipLocales.includes("en");
   const skipEs = skipLocales.includes("es");
   const enSlug = skipEn ? null : (input.slugEn || null);
@@ -3577,11 +3669,11 @@ export async function createContentEntry(
   if (!enSlug && !esSlug) {
     return { success: false, statusCode: 400, error: "At least one locale slug must be provided" };
   }
-  if (enSlug && !slugRegex.test(enSlug)) {
-    return { success: false, statusCode: 400, error: "Invalid English slug format. Use lowercase letters, numbers, and hyphens only." };
+  if (enSlug && !isSlug(enSlug)) {
+    return { success: false, statusCode: 400, error: `Invalid English slug format. ${SLUG_FORMAT_HINT}` };
   }
-  if (esSlug && !slugRegex.test(esSlug)) {
-    return { success: false, statusCode: 400, error: "Invalid Spanish slug format. Use lowercase letters, numbers, and hyphens only." };
+  if (esSlug && !isSlug(esSlug)) {
+    return { success: false, statusCode: 400, error: `Invalid Spanish slug format. ${SLUG_FORMAT_HINT}` };
   }
   if (
     (enSlug && isReservedTemplateVariantSlug(enSlug)) ||
@@ -3598,6 +3690,26 @@ export async function createContentEntry(
   const existingTypeSlugs = contentIndex.listContentSlugs(type);
   if (existingTypeSlugs.includes(folderSlug)) {
     return { success: false, statusCode: 409, error: `A ${type} with slug "${folderSlug}" already exists` };
+  }
+  // Creation never resolves: a new slug that is another spelling of an existing page's ID or address is refused.
+  let siteIndex: ContentIndex = contentIndex;
+  try {
+    const { getSiteContextMap } = await import("./site-manager");
+    for (const ctx of getSiteContextMap().values()) {
+      if (path.resolve(ctx.contentRoot) === path.resolve(contentRootAbs)) siteIndex = ctx.contentIndex;
+    }
+  } catch {}
+  for (const candidate of [enSlug, esSlug]) {
+    if (!candidate) continue;
+    const owner = resolveEntryRef(siteIndex, { contentType: type, ref: candidate });
+    if (owner.ok) {
+      return {
+        success: false,
+        statusCode: 409,
+        code: "slug_already_owned_by_other_entry",
+        error: `"${candidate}" is already an address (or another spelling of one) of ${type} page "${owner.entryId}".`,
+      };
+    }
   }
 
   const folderPath = path.join(process.cwd(), rootName, getFolder(type), folderSlug);
@@ -3881,6 +3993,8 @@ export async function createContentEntry(
             file === "en.yml" || file === "es.yml" ||
             (draftFirst && (/^[a-z]{2}(-[a-z]{2})?\.ya?ml$/.test(file) || localeFromDraft))
           ) {
+            // Funnel is page-level (`_common.yml`), and duplicates start without one.
+            delete parsed.funnel;
             const locTitle = localeTitles[effectiveLocale] || title;
             parsed.title = locTitle;
             if (locTitle) {

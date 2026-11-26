@@ -21,7 +21,7 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
 
       - name: Install dependencies
@@ -38,5 +38,4 @@ jobs:
         run: npm run check
 
       - name: Unit tests
-        # Single worker avoids SQLITE_BUSY on shared db-cache.sqlite across Vitest pools.
-        run: npx vitest run --maxWorkers=1
+        run: npm test

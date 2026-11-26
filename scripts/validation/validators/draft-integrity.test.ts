@@ -3,7 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import yaml from "js-yaml";
-import { commonKeysInLocale, isOrphanVersioning, localeKeysInCommon } from "./draft-integrity";
+import { commonKeysInLocale, isOrphanVersioning, localeKeysInCommon, unregisteredVariants } from "./draft-integrity";
 import { planFieldScopeFix } from "../fixers/draft-integrity";
 import type { ScannedEntry } from "../shared/draft-scan";
 
@@ -36,18 +36,37 @@ describe("draft-integrity", () => {
     ).toBe(false);
   });
 
+  it("unregistered variants: files versioning.yml does not list, per locale", () => {
+    const rewrite = write("rewrite.en.yml", { title: "x" });
+    const draftEs = write("draft.es.yml", { title: "y" });
+    const variants = [
+      { variant: "rewrite", locale: "en", filePath: rewrite },
+      { variant: "draft", locale: "es", filePath: draftEs },
+    ];
+    expect(unregisteredVariants(entry({ variants })).map((v) => v.variant)).toEqual(["rewrite", "draft"]);
+
+    const versioningPath = write("versioning.yml", { es: { variants: [{ slug: "draft", allocation: 0 }] } });
+    expect(unregisteredVariants(entry({ versioningPath, variants }))).toEqual([variants[0]]);
+
+    write("versioning.yml", { en: { variants: [{ slug: "draft", allocation: 0 }] } });
+    expect(unregisteredVariants(entry({ versioningPath, variants })).map((v) => `${v.variant}.${v.locale}`)).toEqual([
+      "rewrite.en",
+      "draft.es",
+    ]);
+  });
+
   it("only listed per-language keys count as misplaced in _common.yml", () => {
     expect(localeKeysInCommon({ slug: "x", title: "T", city: "Miami", funnel: {} })).toEqual(["title"]);
+    expect(localeKeysInCommon({ slug: "x", meta: { robots: "noindex", og_type: "article" } })).toEqual(["meta.robots"]);
     expect(commonKeysInLocale({ title: "T", funnel: { stage: "a" }, meta: { robots: "noindex", page_title: "P" } })).toEqual([
       "funnel",
-      "meta.robots",
     ]);
   });
 
   it("field-scope fix plan keeps what each language shows", () => {
-    const commonPath = write("_common.yml", { slug: "hello", status: "published" });
-    const es = write("es.yml", { title: "Hola", meta: { robots: "index" } });
-    const en = write("en.yml", { title: "Hi", status: "draft", meta: { robots: "index" } });
+    const commonPath = write("_common.yml", { slug: "hello", status: "published", meta: { robots: "noindex" } });
+    const es = write("es.yml", { title: "Hola", authors: ["a"] });
+    const en = write("en.yml", { title: "Hi", status: "draft", authors: ["a"], meta: { robots: "index" } });
     const draft = write("draft.es.yml", { title: "Hola 2" });
     const plan = planFieldScopeFix(
       entry({
@@ -59,12 +78,12 @@ describe("draft-integrity", () => {
         variants: [{ variant: "draft", locale: "es", filePath: draft }],
       }),
     );
-    expect(plan.moved_to_locales).toEqual(["status"]);
-    expect(plan.moved_to_common).toEqual(["meta.robots"]);
-    expect(plan.writes.get(commonPath)).toEqual({ slug: "hello", meta: { robots: "index" } });
-    expect(plan.writes.get(es)).toEqual({ title: "Hola", status: "published" });
-    expect(plan.writes.get(en)).toEqual({ title: "Hi", status: "draft" });
-    expect(plan.writes.get(draft)).toEqual({ title: "Hola 2", status: "published" });
+    expect(plan.moved_to_locales).toEqual(["status", "meta.robots"]);
+    expect(plan.moved_to_common).toEqual(["authors"]);
+    expect(plan.writes.get(commonPath)).toEqual({ slug: "hello", authors: ["a"] });
+    expect(plan.writes.get(es)).toEqual({ title: "Hola", status: "published", meta: { robots: "noindex" } });
+    expect(plan.writes.get(en)).toEqual({ title: "Hi", status: "draft", meta: { robots: "index" } });
+    expect(plan.writes.get(draft)).toEqual({ title: "Hola 2", status: "published", meta: { robots: "noindex" } });
   });
 
   it("leaves differing page-wide values for a person", () => {

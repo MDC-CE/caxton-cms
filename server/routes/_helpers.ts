@@ -87,10 +87,7 @@ import {
 } from "../content-editor";
 import { bindingManager } from "../bindings";
 import { loadYamlWithTemplateVars } from "../yaml-parse-cache";
-import {
-  escapeObjectVars,
-  unescapeYamlDump,
-} from "@shared/templateVars";
+import { dumpContentYaml } from "../content-yaml";
 import {
   getVersioningManager,
   readUserId,
@@ -99,6 +96,11 @@ import {
   buildUserContext,
 } from "../versioning";
 import { versioningContentSlug } from "../shared-layout-entry";
+import {
+  assignForRequest,
+  servedVariantSlug,
+  type ServedPageVersion,
+} from "../versioning/assign-request";
 import { mediaGallery } from "../media-gallery";
 import { media } from "../media";
 import multer from "multer";
@@ -177,6 +179,10 @@ import type { CapabilityName } from "../user-store";
 import { getCapabilityScopeKind } from "../user-store";
 import { resolveOwnedStaffSession } from "../staff-session-resolve";
 import { child } from "../logger";
+import { buildServerPageTracking } from "../tracking-page-context";
+import { getDefaultContentRoot } from "../site-config";
+import { isMcpLoopbackRequest } from "../mcp-loopback-auth";
+export { isMcpLoopbackRequest };
 const log = child({ module: "routes/_helpers" });
 
 
@@ -329,6 +335,22 @@ export async function requireCapability(
 }
 
 /**
+ * True when the caller (already authorized by requireCapability) also holds `capName`.
+ * Same dev / MCP bypass as requireCapability. Never writes a response for a missing capability.
+ */
+export async function callerHasCapability(
+  req: Request,
+  res: Response,
+  capName: CapabilityName,
+  scope?: string,
+): Promise<boolean> {
+  const base = await resolveStaffCapAuth(req, res);
+  if (!base.authorized) return false;
+  if (!base.sessionUsername) return true;
+  return userStore.hasCapability(base.sessionUsername, capName, resolveCapabilityScope(req, capName, scope));
+}
+
+/**
  * Like requireCapability, but any one of the listed capabilities is enough.
  * Each cap resolves its own scope from `scope` / the request (content type vs database slug).
  */
@@ -362,32 +384,103 @@ export async function requireAnyCapability(
   };
 }
 
+function hasPageRedirectsGrant(username: string): boolean {
+  const grant = userStore.getEffectiveCapabilities(username).find((g) => g.name === "edit_page_redirects");
+  if (!grant) return false;
+  return grant.contentTypes === "*" || (Array.isArray(grant.contentTypes) && grant.contentTypes.length > 0);
+}
+
 /**
- * Private Databases browse access: Manage databases, or Edit database data at any scope
- * (`*` or a non-empty slug list). Fail closed if neither.
+ * Live redirect add/delete: edit_redirects (global), or edit_page_redirects at any scope.
+ * Page-scoped callers still need `canEditPage(type)` for the page the rule lives on
+ * (see authorizeLiveRedirectWrite). MCP loopback / dev have no session: global, unless
+ * the body sets `page_scope: true` (MCP already checked the page's content type).
  */
-export async function requireDatabasesBrowseAccess(
+export async function requireRedirectWriteAccess(
   req: Request,
   res: Response,
-): Promise<CapAuthResult> {
+): Promise<CapAuthResult & { hasGlobal: boolean; canEditPage: (contentType: string) => boolean }> {
+  const base = await resolveStaffCapAuth(req, res);
+  if (!base.authorized) return { ...base, hasGlobal: false, canEditPage: () => false };
+  if (!base.sessionUsername) {
+    return {
+      authorized: true,
+      token: base.token,
+      username: base.username,
+      author: base.author,
+      hasGlobal: req.body?.page_scope !== true,
+      canEditPage: () => true,
+    };
+  }
+  const username = base.sessionUsername;
+  const hasGlobal = userStore.hasCapability(username, "edit_redirects");
+  if (!hasGlobal && !hasPageRedirectsGrant(username)) {
+    res.status(403).json({ error: "Insufficient permissions: edit_redirects or edit_page_redirects required" });
+    return { authorized: false, token: base.token, username, author: null, hasGlobal: false, canEditPage: () => false };
+  }
+  return {
+    authorized: true,
+    token: base.token,
+    username,
+    author: username,
+    hasGlobal,
+    canEditPage: (contentType) => userStore.hasCapability(username, "edit_page_redirects", contentType),
+  };
+}
+
+/** Read-only redirect test / lookups: read_redirects, or edit_page_redirects at any scope. */
+export async function requireRedirectReadAccess(req: Request, res: Response): Promise<CapAuthResult> {
   const base = await resolveStaffCapAuth(req, res);
   if (!base.authorized) return base;
   if (!base.sessionUsername) {
     return { authorized: true, token: base.token, username: base.username, author: base.author };
   }
-
   const username = base.sessionUsername;
-  const ok =
-    userStore.hasCapability(username, "databases_manage") ||
-    userStore.hasAnyDatabasesEditDataAccess(username);
-  if (!ok) {
-    res.status(403).json({
-      error: "Insufficient permissions: databases_manage or databases_edit_data required",
-    });
+  if (!userStore.hasCapability(username, "read_redirects") && !hasPageRedirectsGrant(username)) {
+    res.status(403).json({ error: "Insufficient permissions: read_redirects or edit_page_redirects required" });
     return { authorized: false, token: base.token, username, author: null };
   }
-
   return { authorized: true, token: base.token, username, author: username };
+}
+
+/**
+ * Private Databases browse access: Manage databases, View databases, or Edit database data
+ * at any scope (`*` or a non-empty slug list). Fail closed if none.
+ * `canManage` is true for dev / MCP loopback (no session) and for session users with
+ * databases_manage; callers use it to decide whether to expose source connection settings.
+ */
+export async function requireDatabasesBrowseAccess(
+  req: Request,
+  res: Response,
+): Promise<CapAuthResult & { canManage: boolean }> {
+  const base = await resolveStaffCapAuth(req, res);
+  if (!base.authorized) return { ...base, canManage: false };
+  if (!base.sessionUsername) {
+    return {
+      authorized: true,
+      token: base.token,
+      username: base.username,
+      author: base.author,
+      canManage: true,
+    };
+  }
+
+  const username = base.sessionUsername;
+  if (!userStore.hasDatabasesBrowseAccess(username)) {
+    res.status(403).json({
+      error:
+        "Insufficient permissions: databases_view, databases_edit_data or databases_manage required",
+    });
+    return { authorized: false, token: base.token, username, author: null, canManage: false };
+  }
+
+  return {
+    authorized: true,
+    token: base.token,
+    username,
+    author: username,
+    canManage: userStore.hasCapability(username, "databases_manage"),
+  };
 }
 
 /**
@@ -488,15 +581,6 @@ export async function requireMutatingStaff(
   }
 
   return { authorized: true, token, username: session.username, author: session.username };
-}
-
-/** True when the request is a trusted MCP server loopback call. */
-export function isMcpLoopbackRequest(req: Request): boolean {
-  const secret = process.env.MCP_SERVER_SECRET || process.env.MCP_API_KEY || "";
-  if (!secret) return false;
-  const authHeader = req.headers.authorization || "";
-  const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
-  return bearerToken === secret;
 }
 
 function sanitizeIssueActorModel(model: unknown): string | undefined {
@@ -775,63 +859,12 @@ export function resolveAssignedVariantSlug(
   entrySlug: string,
   locale: string,
 ): string | null {
-  if (extractToken(req)) return null;
-
   const root = (res.locals.site as { contentRoot?: string } | undefined)?.contentRoot;
   const versioningSlug = versioningContentSlug(contentType, entrySlug, root);
-
-  const userId = readUserId(req, res);
-  const versioningCookie = getVersioningCookie(req);
-  const existingAssignments = versioningCookie?.assignments || [];
-  const existing = existingAssignments.find(
-    (a) => a.contentType === contentType && a.slug === versioningSlug && a.locale === locale,
-  );
-
-  const versioningManager = getVersioningManager();
-  const assignedVariant = versioningManager.getAssignment(
-    contentType,
-    versioningSlug,
-    locale,
-    userId,
-    existing?.variantSlug,
-  );
-
-  if (!assignedVariant) return null;
-  // Only assign variants that exist in this language; otherwise visitors get the live page.
-  if (!versioningManager.getVariantContentResult(contentType, versioningSlug, assignedVariant, locale).ok) {
-    return null;
-  }
-
-  const updatedAssignments = [
-    ...existingAssignments.filter(
-      (a) => !(a.contentType === contentType && a.slug === versioningSlug && a.locale === locale),
-    ),
-    { contentType, slug: versioningSlug, locale, variantSlug: assignedVariant, assignedAt: Date.now() },
-  ];
-  setVersioningCookie(res, userId, updatedAssignments);
-  markServedPageVersion(res, contentType, versioningSlug, locale, assignedVariant);
-
-  return assignedVariant;
+  return servedVariantSlug(assignForRequest(req, res, contentType, versioningSlug, locale));
 }
 
-export type ServedPageVersion = { experiment_id: string; variant: string };
-
-/**
- * Remember which page version this response serves so the JSON body can carry
- * `_page_version` (client pushes `experiment_exposure`; see attachPageVersionToJson).
- */
-export function markServedPageVersion(
-  res: Response,
-  contentType: string,
-  slug: string,
-  locale: string,
-  variant: string,
-): void {
-  res.locals.pageVersion = {
-    experiment_id: `${contentType}:${slug}:${locale}`,
-    variant,
-  } satisfies ServedPageVersion;
-}
+export type { ServedPageVersion };
 
 /** Express middleware: add `_page_version` to object JSON bodies when a version was assigned. */
 export function attachPageVersionToJson(_req: Request, res: Response, next: () => void): void {
@@ -840,6 +873,45 @@ export function attachPageVersionToJson(_req: Request, res: Response, next: () =
     const pv = res.locals.pageVersion as ServedPageVersion | undefined;
     if (pv && body && typeof body === "object" && !Array.isArray(body)) {
       return original({ ...(body as Record<string, unknown>), _page_version: pv });
+    }
+    return original(body);
+  }) as typeof res.json;
+  next();
+}
+
+export type ServedPageRef = { contentType: string; slug: string };
+
+/** Remember which content page this JSON response is, so `_tracking` can be attached. */
+export function markServedPage(res: Response, contentType: string, slug: string): void {
+  (res.locals as { servedPage?: ServedPageRef }).servedPage = { contentType, slug };
+}
+
+/**
+ * Express middleware: add `_tracking` when the handler marked a served page.
+ * Same object the first HTML load already seeds. Unmarked (list/admin) responses stay as-is.
+ */
+export function attachTrackingToJson(_req: Request, res: Response, next: () => void): void {
+  const original = res.json.bind(res);
+  res.json = ((body: unknown) => {
+    const ref = (res.locals as { servedPage?: ServedPageRef }).servedPage;
+    if (
+      ref &&
+      res.statusCode < 400 &&
+      body &&
+      typeof body === "object" &&
+      !Array.isArray(body) &&
+      !("_tracking" in (body as Record<string, unknown>))
+    ) {
+      const site = res.locals.site as { contentRoot?: string } | undefined;
+      const tracking = buildServerPageTracking({
+        contentRoot: site?.contentRoot ?? getDefaultContentRoot(),
+        contentType: ref.contentType,
+        slug: ref.slug,
+        data: body as Record<string, unknown>,
+      });
+      if (tracking) {
+        return original({ ...(body as Record<string, unknown>), _tracking: tracking });
+      }
     }
     return original(body);
   }) as typeof res.json;
@@ -862,8 +934,6 @@ export function resolveVariantAssignment(
   slug: string,
   locale: string
 ): unknown | null {
-  if (extractToken(req)) return null;
-
   const root = (res.locals.site as { contentRoot?: string } | undefined)?.contentRoot;
   const versioningSlug = versioningContentSlug(contentType, slug, root);
 
@@ -873,43 +943,17 @@ export function resolveVariantAssignment(
     return null;
   }
 
-  const userId = readUserId(req, res);
-  const versioningCookie = getVersioningCookie(req);
-  const existingAssignments = versioningCookie?.assignments || [];
-  const existing = existingAssignments.find(
-    (a) => a.contentType === contentType && a.slug === versioningSlug && a.locale === locale
-  );
+  const variant = servedVariantSlug(assignForRequest(req, res, contentType, versioningSlug, locale));
+  if (!variant) return null;
 
-  const versioningManager = getVersioningManager();
-  const assignedVariant = versioningManager.getAssignment(
-    contentType,
-    versioningSlug,
-    locale,
-    userId,
-    existing?.variantSlug,
-  );
-
-  if (!assignedVariant) return null;
-
-  const variantContent = versioningManager.getVariantContent(contentType, versioningSlug, assignedVariant, locale);
-  if (!variantContent) return null;
-
-  const updatedAssignments = [
-    ...existingAssignments.filter(
-      (a) => !(a.contentType === contentType && a.slug === versioningSlug && a.locale === locale)
-    ),
-    { contentType, slug: versioningSlug, locale, variantSlug: assignedVariant, assignedAt: Date.now() },
-  ];
-  setVersioningCookie(res, userId, updatedAssignments);
-  markServedPageVersion(res, contentType, versioningSlug, locale, assignedVariant);
-
-  return variantContent;
+  const versioningManager =
+    (res.locals.site as { versioningManager?: ReturnType<typeof getVersioningManager> } | undefined)
+      ?.versioningManager ?? getVersioningManager();
+  return versioningManager.getVariantContent(contentType, versioningSlug, variant, locale);
 }
 
 export function safeYamlDump(obj: unknown, opts?: yaml.DumpOptions): string {
-  const { escaped, map } = escapeObjectVars(obj);
-  const dumped = yaml.dump(escaped, opts);
-  return unescapeYamlDump(dumped, map);
+  return dumpContentYaml(obj, opts);
 }
 
 
@@ -919,7 +963,7 @@ export function invalidateContentCaches(contentType?: string, ci: typeof content
   // shared config: rebuild only URLs already cached.
   if (!contentType) {
     void import("../html-rebuild")
-      .then(({ scheduleHotHtmlRebuild }) => scheduleHotHtmlRebuild("content-caches", ci.contentRoot))
+      .then(({ scheduleHotHtmlRebuild }) => scheduleHotHtmlRebuild("content-caches"))
       .catch(() => {});
   }
 }

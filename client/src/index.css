@@ -19,6 +19,12 @@
    Spacing: 8px base, 20px gutters, radius 12px
    ============================================================================= */
 
+/* @import must come before other rules or Vite/PostCSS drops them without inlining. */
+/* Above-fold article typography on critical path (avoids CLS when article chunk loads). */
+@import "./components/article/article-prose.css";
+/* Hero RTE mobile overrides on critical path (avoids CLS when hero chunk loads). */
+@import "./components/ui/responsive-rich-text.css";
+
 /* Metric-compatible system fallbacks reduce CLS while webfonts load. */
 @font-face {
   font-family: 'Plus Jakarta Sans Fallback';

@@ -1,11 +1,14 @@
 import type { Request, Response, NextFunction } from "express";
-import { listTypePages } from "./entry-layer";
+import { findEntryItem, listTypePages, loadEntry } from "./entry-layer";
 import yaml from "js-yaml";
 import { escapeTemplateVars, unescapeObjectVars } from "@shared/templateVars";
-import { contentIndex, type RedirectEntry } from "./content-index";
+import { contentIndex, type ContentIndex, type RedirectEntry } from "./content-index";
 import { databaseManager } from "./database";
+import { buildSingleEntryFromContent } from "./build-single-entry";
+import { resolveSingleVars } from "./single-resolver";
 import {
   getAllConfigs,
+  getContentTypeConfig,
   getFieldMappingDefaults,
   getFullFieldMapping,
   getLocaleKey,
@@ -18,6 +21,8 @@ import type { RedirectTraceMatchType } from "@shared/redirect-trace";
 import { localePrefixFromPath } from "@shared/runtime-issues";
 import { isLocaleHomeAlias } from "@shared/public-app-routes";
 import { resolveLocaleHomeAliasTarget } from "./locale-home-alias";
+import { slugKey } from "@shared/slug";
+import { resolveEntryRef } from "./entry-ref";
 const log = child({ module: "redirects" });
 
 // ============================================================================
@@ -194,6 +199,70 @@ function resolveRedirectTarget(entry: RedirectEntry, req: Request, captureGroups
   return target;
 }
 
+const ENTRY_VAR_IN_TARGET = /\{\{\s*(?:entry|single)\./;
+
+/**
+ * Turn `{{ entry.field }}` / `{{ single.field }}` in a redirect target into that
+ * field on the visited entry. A target with no entry variable is unchanged.
+ * Empty, missing, or leftover `{{ … }}` means this rule does not redirect.
+ * Only a site path or an http(s) URL is followed.
+ */
+export function redirectTargetFromEntryBag(
+  target: string,
+  bag: Record<string, unknown> | null,
+): string | null {
+  if (!ENTRY_VAR_IN_TARGET.test(target)) return target;
+  if (!bag) return null;
+  const resolved = resolveSingleVars(target, bag);
+  if (typeof resolved !== "string") return null;
+  const trimmed = resolved.trim();
+  if (!trimmed || trimmed.includes("{{")) return null;
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) return trimmed;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return null;
+}
+
+function entryBagForRedirect(ci: ContentIndex, requestPath: string): Record<string, unknown> | null {
+  let parsed: ReturnType<ContentIndex["parseContentUrl"]>;
+  try {
+    parsed = ci.parseContentUrl(requestPath.split("?")[0] || "/");
+  } catch (err) {
+    log.warn({ err }, "[Redirects] could not read the entry for a redirect target");
+    return null;
+  }
+  if (!parsed?.contentType || !parsed.slug) return null;
+
+  const config = getContentTypeConfig(parsed.contentType, ci.contentRoot);
+  if (config?.database?.slug) {
+    return findEntryItem(ci, parsed.contentType, parsed.slug, parsed.locale) ?? null;
+  }
+
+  try {
+    const loaded = loadEntry(ci, parsed.contentType, parsed.slug, parsed.locale);
+    if (!loaded) return null;
+    if (loaded.singleEntry && Object.keys(loaded.singleEntry).length > 0) return loaded.singleEntry;
+    return (
+      buildSingleEntryFromContent(parsed.contentType, loaded.data, {
+        slug: parsed.slug,
+        locale: parsed.locale,
+        contentRoot: ci.contentRoot,
+      }) ?? null
+    );
+  } catch (err) {
+    log.warn({ err }, "[Redirects] could not read the entry for a redirect target");
+    return null;
+  }
+}
+
+export function applyEntryVarsToRedirectTarget(
+  target: string,
+  requestPath: string,
+  ci: ContentIndex,
+): string | null {
+  if (!ENTRY_VAR_IN_TARGET.test(target)) return target;
+  return redirectTargetFromEntryBag(target, entryBagForRedirect(ci, requestPath));
+}
+
 /**
  * Append the inbound query string to a redirect target. When the target already has a query,
  * the two are merged (inbound wins on the same key) so the result never has a second `?`.
@@ -270,6 +339,34 @@ function sendRedirect(
   res.redirect(opts.status, opts.to);
 }
 
+/** Sends the redirect, or returns false when an entry variable is empty so the page is served. */
+function dispatchRedirect(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  ci: ContentIndex,
+  entry: RedirectEntry,
+  opts: {
+    matchType: RedirectTraceMatchType;
+    logLabel?: string;
+    captureGroups?: string[];
+  },
+): boolean {
+  const raw = resolveRedirectTarget(entry, req, opts.captureGroups);
+  const resolved = applyEntryVarsToRedirectTarget(raw, req.path, ci);
+  if (resolved == null) return false;
+  sendRedirect(req, res, next, {
+    from: req.path,
+    to: withInboundQuery(resolved, req),
+    status: entry.status || 301,
+    matchType: opts.matchType,
+    priority: entry.priority,
+    source: entry.source,
+    logLabel: opts.logLabel,
+  });
+  return true;
+}
+
 export function redirectMiddleware(req: Request, res: Response, next: NextFunction): void {
   if (
     req.path.startsWith("/api/") ||
@@ -305,34 +402,22 @@ export function redirectMiddleware(req: Request, res: Response, next: NextFuncti
 
   const entry = map.get(normalizedPath);
   if (entry) {
-    const status = entry.status || 301;
-    const target = withInboundQuery(resolveRedirectTarget(entry, req), req);
-    sendRedirect(req, res, next, {
-      from: req.path,
-      to: target,
-      status,
-      matchType: "exact",
-      priority: entry.priority,
-      source: entry.source,
-    });
+    if (!dispatchRedirect(req, res, next, ci, entry, { matchType: "exact" })) next();
     return;
   }
 
   for (const { regex, entry: regexEntry } of regexBefore) {
     const match = req.path.match(regex);
     if (match) {
-      const captureGroups = match.slice(1);
-      const status = regexEntry.status || 301;
-      const target = withInboundQuery(resolveRedirectTarget(regexEntry, req, captureGroups), req);
-      sendRedirect(req, res, next, {
-        from: req.path,
-        to: target,
-        status,
-        matchType: "regex",
-        priority: regexEntry.priority,
-        source: regexEntry.source,
-        logLabel: "(regex)",
-      });
+      if (
+        !dispatchRedirect(req, res, next, ci, regexEntry, {
+          matchType: "regex",
+          logLabel: "(regex)",
+          captureGroups: match.slice(1),
+        })
+      ) {
+        next();
+      }
       return;
     }
   }
@@ -368,17 +453,14 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
   if (activeFallbackNonCustomMap) {
     const entry = activeFallbackNonCustomMap.get(normalizedPath);
     if (entry) {
-      const status = entry.status || 301;
-      const target = withInboundQuery(resolveRedirectTarget(entry, req), req);
-      sendRedirect(req, res, next, {
-        from: req.path,
-        to: target,
-        status,
-        matchType: "fallback",
-        priority: entry.priority || "fallback",
-        source: entry.source,
-        logLabel: "(fallback non-custom)",
-      });
+      if (
+        !dispatchRedirect(req, res, next, activeCi, entry, {
+          matchType: "fallback",
+          logLabel: "(fallback non-custom)",
+        })
+      ) {
+        next();
+      }
       return;
     }
   }
@@ -387,18 +469,15 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
     for (const { regex, entry: regexEntry } of activeRegexFbNonCustom) {
       const match = req.path.match(regex);
       if (match) {
-        const captureGroups = match.slice(1);
-        const status = regexEntry.status || 301;
-        const target = withInboundQuery(resolveRedirectTarget(regexEntry, req, captureGroups), req);
-        sendRedirect(req, res, next, {
-          from: req.path,
-          to: target,
-          status,
-          matchType: "fallback",
-          priority: regexEntry.priority || "fallback",
-          source: regexEntry.source,
-          logLabel: "(fallback non-custom regex)",
-        });
+        if (
+          !dispatchRedirect(req, res, next, activeCi, regexEntry, {
+            matchType: "fallback",
+            logLabel: "(fallback non-custom regex)",
+            captureGroups: match.slice(1),
+          })
+        ) {
+          next();
+        }
         return;
       }
     }
@@ -445,17 +524,14 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
   if (activeFallbackMap) {
     const entry = activeFallbackMap.get(normalizedPath);
     if (entry) {
-      const status = entry.status || 301;
-      const target = withInboundQuery(resolveRedirectTarget(entry, req), req);
-      sendRedirect(req, res, next, {
-        from: req.path,
-        to: target,
-        status,
-        matchType: "fallback",
-        priority: entry.priority || "fallback",
-        source: entry.source,
-        logLabel: "(fallback)",
-      });
+      if (
+        !dispatchRedirect(req, res, next, activeCi, entry, {
+          matchType: "fallback",
+          logLabel: "(fallback)",
+        })
+      ) {
+        next();
+      }
       return;
     }
   }
@@ -467,12 +543,13 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
       const match = req.path.match(regex);
       if (match) {
         const captureGroups = match.slice(1);
-        const reachable = resolveReachableTarget(
+        const resolved = applyEntryVarsToRedirectTarget(
           resolveRedirectTarget(regexEntry, req, captureGroups),
-          locale,
+          req.path,
           activeCi,
-          reachMaps,
         );
+        if (resolved == null) continue;
+        const reachable = resolveReachableTarget(resolved, locale, activeCi, reachMaps);
         if (!reachable) continue;
         const status = regexEntry.status || 301;
         const target = withInboundQuery(reachable, req);
@@ -490,7 +567,74 @@ export function fallbackRedirectMiddleware(req: Request, res: Response, next: Ne
     }
   }
 
+  // Last resort before a 404: another spelling of a real address (capitals, underscores, accents).
+  try {
+    const normalized = findNormalizedSlugMatch(cleanUrlNoSlash, activeCi);
+    if (normalized) {
+      sendRedirect(req, res, next, {
+        from: cleanUrl,
+        to: withInboundQuery(normalized.canonicalUrl, req),
+        status: 301,
+        matchType: "canonical",
+        priority: "fallback",
+        source: `slug-key:${normalized.typeName}`,
+        logLabel: `(slug key ${normalized.typeName})`,
+      });
+      return;
+    }
+  } catch {}
+
   next();
+}
+
+/**
+ * When an unknown URL differs from a live page's official address only in spelling
+ * (capitals, underscores, accents, repeated hyphens), return that official address.
+ * Same URL pattern and params are required; the last segment is resolved by `slugKey`.
+ */
+export function findNormalizedSlugMatch(
+  cleanUrl: string,
+  ci: ContentIndex = contentIndex,
+): { typeName: string; canonicalUrl: string } | null {
+  const normalizedUrl = stripTrailingSlash(cleanUrl);
+  if (ci.isKnownUrl(normalizedUrl)) return null;
+  const segments = normalizedUrl.split("/").filter(Boolean);
+  const lastSegment = segments[segments.length - 1];
+  if (!lastSegment || !slugKey(lastSegment)) return null;
+  const requestShape = segments.slice(0, -1).map((s) => slugKey(s));
+
+  const found = new Map<string, string>();
+  for (const typeName of ci.getContentTypes()) {
+    const pattern = ci.getContentTypeConfig(typeName)?.url_pattern;
+    if (!pattern) continue;
+    for (const [patternLocale, urlPattern] of Object.entries(pattern)) {
+      const patternSegments = urlPattern.split("/").filter(Boolean);
+      if (patternSegments.length !== segments.length) continue;
+      if (patternSegments[patternSegments.length - 1] !== ":slug") continue;
+      const staticOk = patternSegments
+        .slice(0, -1)
+        .every((p, i) => p.startsWith(":") || slugKey(p) === requestShape[i]);
+      if (!staticOk) continue;
+      const locale = patternLocale === "default" ? (localePrefixFromPath(normalizedUrl) ?? "en") : patternLocale;
+      const resolved = resolveEntryRef(ci, {
+        contentType: typeName,
+        ref: lastSegment,
+        locale,
+        localeExplicit: true,
+        indexOnly: true,
+      });
+      if (!resolved.ok) continue;
+      const canonicalUrl = ci.getAlternateUrls(resolved.entryId, typeName)[locale];
+      if (!canonicalUrl || canonicalUrl === normalizedUrl || !ci.isKnownUrl(canonicalUrl)) continue;
+      const canonicalShape = canonicalUrl.split("/").filter(Boolean).map((s) => slugKey(s));
+      if (canonicalShape.length !== segments.length) continue;
+      if (!canonicalShape.every((s, i) => s === slugKey(segments[i]!))) continue;
+      found.set(canonicalUrl, typeName);
+    }
+  }
+  if (found.size !== 1) return null;
+  const [[canonicalUrl, typeName]] = [...found.entries()];
+  return { typeName: typeName!, canonicalUrl: canonicalUrl! };
 }
 
 export function getRedirects(): Array<{ from: string; to: string | Record<string, string>; type: string; status: number; source: string; priority?: string }> {
@@ -685,8 +829,21 @@ function resolveTarget(entry: RedirectEntry, locale: string, captureGroups?: str
   return target;
 }
 
-function makeResult(entry: RedirectEntry, locale: string, matchType: "exact" | "regex", priority?: string, captureGroups?: string[]): RedirectTestResult {
-  const resolvedTo = resolveTarget(entry, locale, captureGroups);
+function makeResult(
+  entry: RedirectEntry,
+  locale: string,
+  matchType: "exact" | "regex",
+  urlPath: string,
+  ci: ContentIndex,
+  priority?: string,
+  captureGroups?: string[],
+): RedirectTestResult | null {
+  const resolvedTo = applyEntryVarsToRedirectTarget(
+    resolveTarget(entry, locale, captureGroups),
+    urlPath,
+    ci,
+  );
+  if (resolvedTo == null) return null;
   return {
     match: true,
     from: entry.from,
@@ -719,13 +876,17 @@ function matchRedirectHop(
   normalized: string,
   locale: string,
   maps: RedirectMaps,
+  ci: ContentIndex,
 ): string | null {
   const exact = maps.map.get(normalized) ?? maps.fallbackNonCustomMap.get(normalized) ?? maps.fallbackMap.get(normalized);
-  if (exact) return resolveTarget(exact, locale);
+  if (exact) {
+    return applyEntryVarsToRedirectTarget(resolveTarget(exact, locale), urlPath, ci);
+  }
   for (const list of [maps.regexBefore, maps.regexFallbackNonCustom]) {
     for (const { regex, entry } of list) {
       const m = urlPath.match(regex);
-      if (m) return resolveTarget(entry, locale, m.slice(1));
+      if (!m) continue;
+      return applyEntryVarsToRedirectTarget(resolveTarget(entry, locale, m.slice(1)), urlPath, ci);
     }
   }
   return null;
@@ -753,7 +914,7 @@ function resolveReachableTarget(
   } catch {}
   if (visited.has(normalized) || visited.size >= MAX_FALLBACK_CHAIN_HOPS) return null;
   visited.add(normalized);
-  const next = matchRedirectHop(urlPath, normalized, locale, maps);
+  const next = matchRedirectHop(urlPath, normalized, locale, maps, ci);
   return next ? resolveReachableTarget(next, locale, ci, maps, visited) : null;
 }
 
@@ -791,20 +952,35 @@ function evaluatePublicUrl(
   const urlPath = toPublicUrlPath(rawInput);
   const normalized = normalizePath(urlPath);
 
-  const exact = maps.map.get(normalized);
-  if (exact) return withDestinationExists(makeResult(exact, locale, "exact"), ci);
+  const known = () => ci.isKnownUrl(urlPath) || ci.isKnownUrl(normalized);
 
-  for (const { regex, entry } of maps.regexBefore) {
-    const m = urlPath.match(regex);
-    if (m) return withDestinationExists(makeResult(entry, locale, "regex", undefined, m.slice(1)), ci);
+  const exact = maps.map.get(normalized);
+  if (exact) {
+    const result = makeResult(exact, locale, "exact", urlPath, ci);
+    if (result) return withDestinationExists(result, ci);
+  } else {
+    for (const { regex, entry } of maps.regexBefore) {
+      const m = urlPath.match(regex);
+      if (!m) continue;
+      const result = makeResult(entry, locale, "regex", urlPath, ci, undefined, m.slice(1));
+      if (result) return withDestinationExists(result, ci);
+      break;
+    }
   }
 
   const fbNc = maps.fallbackNonCustomMap.get(normalized);
-  if (fbNc) return withDestinationExists(makeResult(fbNc, locale, "exact", "fallback"), ci);
+  if (fbNc) {
+    const result = makeResult(fbNc, locale, "exact", urlPath, ci, "fallback");
+    if (result) return withDestinationExists(result, ci);
+    return { match: false, pageExists: known() };
+  }
 
   for (const { regex, entry } of maps.regexFallbackNonCustom) {
     const m = urlPath.match(regex);
-    if (m) return withDestinationExists(makeResult(entry, locale, "regex", "fallback", m.slice(1)), ci);
+    if (!m) continue;
+    const result = makeResult(entry, locale, "regex", urlPath, ci, "fallback", m.slice(1));
+    if (result) return withDestinationExists(result, ci);
+    return { match: false, pageExists: known() };
   }
 
   const soft = findCanonicalSoftMatch(urlPath, ci);
@@ -829,13 +1005,18 @@ function evaluatePublicUrl(
 
   if (!isKnown) {
     const fb = maps.fallbackMap.get(normalized);
-    if (fb) return withDestinationExists(makeResult(fb, locale, "exact", "fallback"), ci);
+    if (fb) {
+      const result = makeResult(fb, locale, "exact", urlPath, ci, "fallback");
+      if (result) return withDestinationExists(result, ci);
+      return { match: false, pageExists: false };
+    }
 
     for (const { regex, entry } of maps.regexFallback) {
       const m = urlPath.match(regex);
       if (!m) continue;
-      const result = makeResult(entry, locale, "regex", "fallback", m.slice(1));
-      const reachable = resolveReachableTarget(result.resolvedTo ?? "", locale, ci, maps);
+      const result = makeResult(entry, locale, "regex", urlPath, ci, "fallback", m.slice(1));
+      if (!result?.resolvedTo) continue;
+      const reachable = resolveReachableTarget(result.resolvedTo, locale, ci, maps);
       if (!reachable) continue;
       return { ...result, resolvedTo: reachable, destinationExists: true };
     }

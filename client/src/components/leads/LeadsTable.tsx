@@ -16,11 +16,17 @@ import {
 import { AdsPullProductionButton } from "@/components/ads/AdsPullProductionButton";
 import { LocaleFlag } from "@/components/DebugBubble/components/LocaleFlag";
 import { LeadDetailsDialog } from "@/components/leads/LeadDetailsDialog";
+import { LeadDeliveryBadge } from "@/components/leads/LeadDeliveryBadge";
 import { useToast } from "@/hooks/use-toast";
-import type { LeadsListResponse, LeadsListRow } from "@shared/leads-query";
+import type { LeadsListResponse, LeadsListRow, LeadsShow } from "@shared/leads-query";
 import { isTrafficChannel, TRAFFIC_CHANNEL_LABELS } from "@shared/traffic-channel";
 
 const NO_CONTACT_NOTE = "Names, emails and phone numbers are not saved here on purpose; they go straight to the CRM.";
+
+const TEST_REASON_LABELS: Record<string, { short: string; title: string }> = {
+  staff_session: { short: "Test · staff", title: "Sent while logged in as staff" },
+  email_pattern: { short: "Test · email", title: "Email matches a test pattern (Settings → Ads)" },
+};
 
 function localTime(ms: number): string {
   return new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -58,6 +64,7 @@ function sourceMedium(source: string | null, medium: string | null): string {
 export function LeadsTable({
   data,
   loading,
+  show,
   hasFilters,
   onClearFilters,
   onPage,
@@ -65,6 +72,7 @@ export function LeadsTable({
 }: {
   data?: LeadsListResponse;
   loading: boolean;
+  show: LeadsShow;
   hasFilters: boolean;
   onClearFilters: () => void;
   onPage: (page: number) => void;
@@ -117,14 +125,18 @@ export function LeadsTable({
         ) : data.total === 0 ? (
           hasFilters ? (
             <div className="py-8 text-center space-y-3" data-testid="empty-leads-filtered">
-              <p className="text-sm text-muted-foreground">No leads match these filters in this range.</p>
+              <p className="text-sm text-muted-foreground">
+                {show === "test" ? "No test leads match these filters in this range." : "No leads match these filters in this range."}
+              </p>
               <Button size="sm" variant="outline" onClick={onClearFilters} data-testid="button-leads-clear-filters-empty">
                 Clear filters
               </Button>
             </div>
           ) : (
             <div className="py-8 text-center space-y-3" data-testid="empty-leads">
-              <p className="text-sm text-muted-foreground">No leads recorded in this range yet.</p>
+              <p className="text-sm text-muted-foreground">
+                {show === "test" ? "No test leads in this range." : "No leads recorded in this range yet."}
+              </p>
               <p className="text-xs text-muted-foreground">{NO_CONTACT_NOTE}</p>
               {import.meta.env.DEV && (
                 <div className="flex flex-col items-center gap-2 pt-1">
@@ -145,6 +157,7 @@ export function LeadsTable({
                     <TableHead className="w-px whitespace-nowrap">When</TableHead>
                     <TableHead>Form / page</TableHead>
                     <TableHead>Source &amp; UTMs</TableHead>
+                    <TableHead className="w-px whitespace-nowrap">Delivery</TableHead>
                     <TableHead className="w-10" />
                   </TableRow>
                 </TableHeader>
@@ -166,8 +179,13 @@ export function LeadsTable({
                         <div className="flex items-center gap-1.5">
                           {localTime(r.created_at)}
                           {r.is_test === 1 && (
-                            <Badge variant="outline" className="px-1.5 py-0 text-[10px]" title={r.test_reason ?? undefined}>
-                              Test
+                            <Badge
+                              variant="outline"
+                              className="px-1.5 py-0 text-[10px]"
+                              title={TEST_REASON_LABELS[r.test_reason ?? ""]?.title ?? r.test_reason ?? undefined}
+                              data-testid={`badge-lead-test-${r.submission_id}`}
+                            >
+                              {TEST_REASON_LABELS[r.test_reason ?? ""]?.short ?? "Test"}
                             </Badge>
                           )}
                           {r.is_repeat === 1 && (
@@ -268,6 +286,16 @@ export function LeadsTable({
                             {r.utm_campaign}
                           </div>
                         )}
+                      </TableCell>
+                      <TableCell>
+                        <button
+                          type="button"
+                          className="rounded-sm"
+                          onClick={() => setDetailsId(r.submission_id)}
+                          aria-label="View delivery details"
+                        >
+                          <LeadDeliveryBadge status={r.delivery_status} testId={`badge-lead-delivery-${r.submission_id}`} />
+                        </button>
                       </TableCell>
                       <TableCell>
                         <Button

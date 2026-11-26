@@ -4,7 +4,134 @@
  */
 
 import { getUserIdFromCookie } from "./sessionBootstrap";
+import { getDebugToken } from "@/hooks/useDebugAuth";
 import { useQuery } from "@tanstack/react-query";
+import {
+  PAGE_TRACKING_KEYS,
+  SAMPLE_PAGE_TRACKING_IDS,
+  type PageTrackingContext,
+} from "@shared/tracking-context";
+
+let pageContext: PageTrackingContext | null = null;
+let pageContextPath: string | null = null;
+const EMPTY_CONTEXT_SIGNATURE = JSON.stringify(PAGE_TRACKING_KEYS.map(() => null));
+let lastContextPush = EMPTY_CONTEXT_SIGNATURE;
+const contextListeners = new Set<(pathname: string) => void>();
+
+function currentPathname(): string {
+  return typeof window === "undefined" ? "" : window.location.pathname;
+}
+
+/** Product / persona context for the page currently shown (empty during a route change). */
+export function getPageTrackingContext(): PageTrackingContext {
+  return pageContext && pageContextPath === currentPathname() ? pageContext : {};
+}
+
+/** True once the page at `pathname` has set (or explicitly cleared) its context. */
+export function isPageContextSet(pathname: string): boolean {
+  return pageContextPath === pathname;
+}
+
+/**
+ * Set the product / persona values for the page at `pathname` (null = this page has none).
+ * Pushes every key, with `undefined` for missing ones, so GTM drops the previous page's values.
+ */
+export function setPageTrackingContext(
+  ctx: PageTrackingContext | null,
+  pathname: string = currentPathname(),
+): void {
+  pageContext = ctx ? { ...ctx } : null;
+  pageContextPath = pathname;
+  seedContextSignatureFromServerPush();
+  const payload: Record<string, unknown> = {};
+  for (const key of PAGE_TRACKING_KEYS) payload[key] = ctx?.[key];
+  const signature = JSON.stringify(PAGE_TRACKING_KEYS.map((k) => payload[k] ?? null));
+  if (signature !== lastContextPush) {
+    lastContextPush = signature;
+    pushToDataLayer(payload);
+  }
+  for (const listener of Array.from(contextListeners)) listener(pathname);
+}
+
+/** First HTML already carries `_tracking` on the page query. Apply it before React effects. */
+function seedInitialContextFromSsr(): void {
+  if (typeof document === "undefined") return;
+  const script = document.getElementById("__INITIAL_DATA__");
+  if (!script?.textContent) return;
+  try {
+    const payload = JSON.parse(script.textContent) as {
+      queries?: Array<{ data?: { _tracking?: unknown } }>;
+    };
+    for (const query of payload.queries ?? []) {
+      const seeded = query?.data?._tracking;
+      if (!seeded || typeof seeded !== "object" || Array.isArray(seeded)) continue;
+      setPageTrackingContext(seeded as PageTrackingContext, window.location.pathname);
+      return;
+    }
+  } catch {
+    /* initial payload is optional */
+  }
+}
+
+seedInitialContextFromSsr();
+
+let seededFromServer = false;
+
+/** The server writes the first page's values before GTM; don't push them a second time. */
+function seedContextSignatureFromServerPush(): void {
+  if (seededFromServer || typeof window === "undefined") return;
+  seededFromServer = true;
+  const layer = window.dataLayer ?? [];
+  for (let i = layer.length - 1; i >= 0; i--) {
+    const entry = layer[i];
+    if (entry && !("event" in entry) && "content_key" in entry) {
+      lastContextPush = JSON.stringify(PAGE_TRACKING_KEYS.map((k) => (entry[k] as unknown) ?? null));
+      return;
+    }
+  }
+}
+
+/** Resolve when the page at `pathname` sets its context, or after `timeoutMs`. */
+export function onPageContextSet(pathname: string, cb: () => void): () => void {
+  if (isPageContextSet(pathname)) {
+    cb();
+    return () => {};
+  }
+  const listener = (p: string) => {
+    if (p !== pathname) return;
+    contextListeners.delete(listener);
+    cb();
+  };
+  contextListeners.add(listener);
+  return () => contextListeners.delete(listener);
+}
+
+/** How long an event waits for the page that is already on screen to publish its funnel. */
+const PAGE_CONTEXT_WAIT_MS = 500;
+
+/** Promise form of {@link onPageContextSet} with a fallback timer. */
+export function waitForPageContext(pathname: string, timeoutMs: number): Promise<"ready" | "timeout"> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (r: "ready" | "timeout") => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      off();
+      resolve(r);
+    };
+    const timer = setTimeout(() => finish("timeout"), timeoutMs);
+    const off = onPageContextSet(pathname, () => finish("ready"));
+  });
+}
+
+/** No-op when this path already has context (SSR seed or the page hook). */
+async function ensureCurrentPageContext(): Promise<void> {
+  if (typeof window === "undefined") return;
+  const pathname = currentPathname();
+  if (isPageContextSet(pathname)) return;
+  await waitForPageContext(pathname, PAGE_CONTEXT_WAIT_MS);
+}
 
 export type ConversionName = string;
 
@@ -13,7 +140,9 @@ export const TRACKING_EVENTS = [
   "page_view",
   "experiment_exposure",
   "cta_click",
-  "video_play",
+  "video_start",
+  "video_progress",
+  "video_complete",
   "scroll_depth",
 ] as const;
 
@@ -101,10 +230,12 @@ export function resolveEcommerceProduct(
  * Track an ecommerce funnel event. No-ops unless a purchasable product resolves
  * (via program_id / item_id + registered product lookup).
  */
-export function trackEcommerce(
+export async function trackEcommerce(
   eventName: EcommerceWiredEventName,
   payload: EcommercePayload = {},
-): void {
+): Promise<void> {
+  await ensureCurrentPageContext();
+
   const programId =
     (typeof payload.program_id === "string" && payload.program_id) || undefined;
 
@@ -132,6 +263,7 @@ export function trackEcommerce(
   pushToDataLayer({
     event: eventName,
     user_id: getUserIdFromCookie() ?? undefined,
+    ...getPageTrackingContext(),
     ...payload,
     item_id: itemId,
     item_name: itemName,
@@ -308,8 +440,13 @@ export async function hashEmail(email: string): Promise<string> {
   return hashHex.substring(0, 16);
 }
 
+/** True while a signed-in staff session is active in this browser. */
+export function isStaffSession(): boolean {
+  return !!getDebugToken();
+}
+
 /**
- * Push data to GTM dataLayer
+ * Push data to GTM dataLayer. Every push carries `is_staff` so GTM can drop staff traffic.
  */
 function pushToDataLayer(data: Record<string, unknown>): void {
   if (typeof window === "undefined") return;
@@ -318,9 +455,68 @@ function pushToDataLayer(data: Record<string, unknown>): void {
     window.dataLayer = [];
   }
   
-  window.dataLayer.push(data);
+  const pushed = { is_staff: isStaffSession(), ...data };
+  window.dataLayer.push(pushed);
+  refreshVisitExperiment();
   
-  console.log("[Tracking] dataLayer.push:", data);
+  console.log("[Tracking] dataLayer.push:", pushed);
+}
+
+/** First test seen this visit: `experiment_id|variant`, shared across tabs. */
+export const VISIT_EXPERIMENT_COOKIE = "4g_visit_exp";
+/** A visit ends after 30 idle minutes, like a GA4 session. */
+const VISIT_TTL_SECONDS = 30 * 60;
+
+function readCookie(name: string): string | null {
+  if (typeof document === "undefined") return null;
+  const prefix = `${name}=`;
+  for (const part of document.cookie.split(";")) {
+    const c = part.trim();
+    if (c.startsWith(prefix)) return c.slice(prefix.length);
+  }
+  return null;
+}
+
+function writeVisitCookie(value: string): void {
+  if (typeof document === "undefined") return;
+  const secure = typeof location !== "undefined" && location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${VISIT_EXPERIMENT_COOKIE}=${value}; Max-Age=${VISIT_TTL_SECONDS}; Path=/; SameSite=Lax${secure}`;
+}
+
+/** Page test the visitor saw first this visit (null when none). */
+export function getVisitExperiment(): ServedPageVersion | null {
+  const raw = readCookie(VISIT_EXPERIMENT_COOKIE);
+  if (!raw) return null;
+  let value = raw;
+  try {
+    value = decodeURIComponent(raw);
+  } catch {
+    /* keep raw */
+  }
+  const sep = value.lastIndexOf("|");
+  if (sep <= 0 || sep === value.length - 1) return null;
+  return { experiment_id: value.slice(0, sep), variant: value.slice(sep + 1) };
+}
+
+/** Keep the visit alive: push the cookie's expiry 30 minutes ahead. */
+export function refreshVisitExperiment(): void {
+  const raw = readCookie(VISIT_EXPERIMENT_COOKIE);
+  if (raw) writeVisitCookie(raw);
+}
+
+/** Record the first test of the visit (no-op when one is already recorded). */
+function rememberVisitExperiment(pv: ServedPageVersion): void {
+  if (readCookie(VISIT_EXPERIMENT_COOKIE)) {
+    refreshVisitExperiment();
+    return;
+  }
+  writeVisitCookie(encodeURIComponent(`${pv.experiment_id}|${pv.variant}`));
+}
+
+/** `experiment_id` / `variant` from the visit's first test, for conversion pushes. */
+function visitExperimentFields(): { experiment_id?: string; variant?: string } {
+  const visit = getVisitExperiment();
+  return visit ? { experiment_id: visit.experiment_id, variant: visit.variant } : {};
 }
 
 /**
@@ -339,6 +535,25 @@ export function isValidEventName(name: string): boolean {
   );
 }
 
+type TrackListener = (eventName: string, payload: Record<string, unknown>, kind: "event" | "conversion") => void;
+const trackListeners = new Set<TrackListener>();
+
+/** Observe track() / trackConversion() calls (the site's own visit counting). Returns an unsubscribe. */
+export function onTrack(listener: TrackListener): () => void {
+  trackListeners.add(listener);
+  return () => trackListeners.delete(listener);
+}
+
+function notifyTrackListeners(eventName: string, payload: Record<string, unknown>, kind: "event" | "conversion"): void {
+  for (const listener of Array.from(trackListeners)) {
+    try {
+      listener(eventName, payload, kind);
+    } catch {
+      /* listeners must not break tracking */
+    }
+  }
+}
+
 /**
  * Track a conversion event (form submissions, signups, etc.)
  */
@@ -346,9 +561,12 @@ export function trackConversion(
   eventName: ConversionName,
   payload: ConversionPayload = {}
 ): void {
+  notifyTrackListeners(eventName, payload as Record<string, unknown>, "conversion");
   pushToDataLayer({
     event: eventName,
     user_id: getUserIdFromCookie() ?? undefined,
+    ...visitExperimentFields(),
+    ...getPageTrackingContext(),
     ...payload,
   });
 
@@ -358,13 +576,16 @@ export function trackConversion(
 /**
  * Track a general event (page views, clicks, etc.)
  */
-export function track(
+export async function track(
   eventName: EventName,
   payload: TrackingPayload = {}
-): void {
+): Promise<void> {
+  await ensureCurrentPageContext();
+  notifyTrackListeners(eventName, payload as Record<string, unknown>, "event");
   pushToDataLayer({
     event: eventName,
     user_id: getUserIdFromCookie() ?? undefined,
+    ...getPageTrackingContext(),
     ...payload,
   });
 
@@ -372,9 +593,9 @@ export function track(
 }
 
 export interface ServedPageVersion {
-  /** `{contentType}:{slug}:{locale}` */
+  /** `{contentType}:{slug}:{locale}` plus `@YYYY-MM-DD` when the test run has a start date. */
   experiment_id: string;
-  /** Version slug served to this visitor. */
+  /** Version slug served to this visitor, or `default` for the live page during a test. */
   variant: string;
 }
 
@@ -387,12 +608,14 @@ export function getCurrentPageVersion(): ServedPageVersion | null {
 }
 
 /**
- * Push `experiment_exposure` once per page view for the version the server served.
- * Pass null on pages without a test so a stale version is not sent with leads.
+ * Push `experiment_exposure` once per page view for the version the server served
+ * (a variant, or `default` for the live page during a test), and remember it as the
+ * visit's first test when none is recorded yet. Pass null on pages without a test.
  */
 export function trackPageVersion(pv: ServedPageVersion | null | undefined): void {
   currentPageVersion = pv ?? null;
   if (!pv || typeof window === "undefined") return;
+  rememberVisitExperiment(pv);
   const key = `${window.location.pathname}|${pv.experiment_id}|${pv.variant}`;
   if (key === lastExposureKey) return;
   lastExposureKey = key;
@@ -451,6 +674,8 @@ export const SAMPLE_LEAD_PAYLOAD: Record<string, unknown> = {
   last_name: "Doe",
   phone: "+13055550100",
   program: "ai-engineering",
+  /** Full ids (the CRM / ledger never get short codes); "all" / "none" sentinels. */
+  ...SAMPLE_PAGE_TRACKING_IDS,
   location: "miami-usa",
   region: "us",
   coupon: "",
@@ -491,9 +716,10 @@ export const SAMPLE_LEAD_PAYLOAD: Record<string, unknown> = {
   last_paid_landing_url: "https://example.com/en/ai-engineering",
   last_paid_landing_at: "2026-09-28T14:03:00.000Z",
   ad_platform: "google",
-  page_experiment_id: "",
-  page_variant: "",
+  experiment_id: "",
+  variant: "",
   is_test: false,
+  is_staff: false,
   is_repeat: false,
   consent_state: "granted",
 };

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearch } from "wouter";
 import { ENTRY_ACTIVITY_WINDOW_DAYS } from "@shared/event-log-filters";
@@ -9,9 +9,26 @@ import {
   BrokenInternalLinksNotice,
   promoteLinkWarningsText,
 } from "@/components/editing/BrokenInternalLinksNotice";
+import {
+  DISPLAY_VALUES_CHANGE_CODE,
+  DisplayValuesChangeNotice,
+  type DisplayValueChange,
+} from "@/components/editing/DisplayValuesChangeNotice";
+import {
+  isValidLocaleUrlSlug,
+  LOCALE_URL_SLUG_REQUIRED_CODE,
+  LocaleUrlSlugPrompt,
+} from "@/components/editing/LocaleUrlSlugPrompt";
+import {
+  ROBOTS_CHANGE_ON_PUBLISH_CODE,
+  RobotsOnPublishChoiceField,
+  robotsChangeRows,
+  type RobotsChangeRow,
+  type RobotsOnPublishChoice,
+} from "@/components/editing/RobotsOnPublishChoice";
 import { TextLimitsIssue } from "@/components/TextLimitsIssue";
 import { deslugify } from "../utils/debugHelpers";
-import { IconRobot, IconArrowLeft, IconGitBranch, IconRefresh, IconPencil, IconCheck, IconX, IconPlayerPlay, IconPlus, IconHistory, IconExternalLink, IconCrown, IconTrash, IconDots, IconCode, IconShare, IconCopy, IconEyeOff } from "@tabler/icons-react";
+import { IconChartBar, IconRobot, IconArrowLeft, IconGitBranch, IconRefresh, IconPencil, IconCheck, IconX, IconPlayerPlay, IconPlus, IconHistory, IconExternalLink, IconCrown, IconTrash, IconDots, IconCode, IconShare, IconCopy, IconEyeOff } from "@tabler/icons-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
@@ -24,18 +41,28 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { EntryActivityDialog } from "@/components/pipeline/EntryActivityBadge";
 import { Link2, Loader2, Unlink } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { getDebugToken } from "@/hooks/useDebugAuth";
+import { getDebugToken, useDebugAuth } from "@/hooks/useDebugAuth";
 import { apiFetch } from "@/lib/queryClient";
+import { cn } from "@/lib/utils";
 import { emitContentUpdated, emitVariantCreated, emitVariantDeleted, emitVariantPromoted } from "@/lib/contentEvents";
 import { TEMPLATE_VERSIONING_SLUG, versioningContentSlug } from "@/lib/sharedLayoutEntry";
+import { AB_TESTING_HREF } from "@/lib/settings-tab";
 import { isReservedContentSlug } from "@shared/safe-href";
 import { getFolderFromType, useContentTypes } from "@/hooks/useContentTypes";
 import { FolderRestoreDialog, type FolderRestoreResult, type FolderRestoreTarget } from "./FolderRestoreDialog";
-import type { MenuView, ContentInfo, VersioningResponse } from "../types";
+import type { MenuView, ContentInfo, VersioningResponse, PendingProposalForPage } from "../types";
 import { STORAGE_KEY, OPEN_STORAGE_KEY } from "../types";
 import { PageHealthIndicators } from "./PageHealthIndicators";
 import { LayoutApprovalControl } from "./LayoutApprovalControl";
 import { VariantProposalBadge } from "./VariantProposalBadge";
+import { PendingProposalsDialog } from "./PendingProposalsDialog";
+import { LocaleFlag } from "./LocaleFlag";
+import {
+  AbStickyAdvanced,
+  AbTestingNotSetUpNotice,
+  AbTrafficNotice,
+  SplitMismatchNotice,
+} from "./AbTrafficNotices";
 import type { PageErrorsTab } from "./PageErrorsModal";
 
 interface VersioningViewProps {
@@ -59,6 +86,8 @@ interface VersioningViewProps {
   pageDiagnosticsUrl?: string | null;
   pageDiagnosticsEntryKey?: string | null;
   onOpenPageErrors?: (tab: PageErrorsTab) => void;
+  /** Opens the page stats drawer, or a dialog explaining why it can't (no metrics_view, no public URL). */
+  onOpenPageStats?: () => void;
 }
 
 function formatAbsoluteDate(iso: string): string | null {
@@ -96,6 +125,73 @@ function formatRelativeUpdatedAt(iso: string): { relative: string; absolute: str
     }
   }
   return { relative, absolute };
+}
+
+function UnregisteredVariantsNotice({
+  variants,
+  canRegister,
+  registering,
+  onRegister,
+  onPreview,
+}: {
+  variants: Array<{ locale: string; slug: string; fileName: string }>;
+  canRegister: boolean;
+  registering: string | null;
+  onRegister: (locale: string, slug: string) => void;
+  onPreview: (locale: string, slug: string) => void;
+}) {
+  return (
+    <div
+      className="mx-1 mb-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-foreground space-y-2"
+      data-testid="banner-unregistered-variants"
+    >
+      <p className="text-muted-foreground">
+        {variants.length === 1 ? "This version exists" : "These versions exist"} but{" "}
+        {variants.length === 1 ? "isn't" : "aren't"} in the traffic list, so visitors never see{" "}
+        {variants.length === 1 ? "it" : "them"}. Add {variants.length === 1 ? "it" : "them"} at 0% to manage{" "}
+        {variants.length === 1 ? "it" : "them"} here.
+      </p>
+      <div className="space-y-1">
+        {variants.map((v) => {
+          const key = `${v.locale}:${v.slug}`;
+          return (
+            <div key={key} className="flex items-center justify-between gap-2" data-testid={`row-unregistered-${v.locale}-${v.slug}`}>
+              <div className="flex items-center gap-1.5 min-w-0">
+                <Badge variant="secondary" className="text-[10px] px-1.5 py-0 leading-4 flex-shrink-0 gap-1">
+                  <LocaleFlag locale={v.locale} className="w-3.5 h-2.5 rounded-sm" />
+                  {v.locale.toUpperCase()}
+                </Badge>
+                <button
+                  onClick={() => onPreview(v.locale, v.slug)}
+                  className="truncate text-left text-sm text-foreground hover:underline"
+                  title="Preview this version"
+                  data-testid={`button-preview-unregistered-${v.locale}-${v.slug}`}
+                >
+                  {v.slug}
+                </button>
+                <Badge variant="outline" className="text-[10px] px-1.5 py-0 leading-4 flex-shrink-0">
+                  Not registered
+                </Badge>
+              </div>
+              {canRegister && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 px-2 text-[11px] flex-shrink-0"
+                  disabled={registering !== null}
+                  onClick={() => onRegister(v.locale, v.slug)}
+                  data-testid={`button-register-variant-${v.locale}-${v.slug}`}
+                >
+                  {registering === key ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                  Add to versions
+                </Button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function DefaultLiveRowActions({
@@ -223,22 +319,42 @@ export function VersioningView({
   pageDiagnosticsUrl,
   pageDiagnosticsEntryKey,
   onOpenPageErrors,
+  onOpenPageStats,
 }: VersioningViewProps) {
   const { toast } = useToast();
+  const { hasCapability } = useDebugAuth();
+  const canManageAbTesting = hasCapability("ab_testing_settings");
+  const [registeringVariant, setRegisteringVariant] = useState<string | null>(null);
   const entryKey = pageDiagnosticsEntryKey?.trim() || "";
   const [activityOpen, setActivityOpen] = useState(false);
+  const [proposalsChooserOpen, setProposalsChooserOpen] = useState(false);
   const activityCountQuery = useQuery({
     queryKey: ["/api/admin/entry-activity-count", entryKey, ENTRY_ACTIVITY_WINDOW_DAYS],
     enabled: Boolean(entryKey),
+    refetchInterval: 60_000,
     queryFn: async () => {
       const params = new URLSearchParams({ entry: entryKey });
       const res = await apiFetch(`/api/admin/entry-activity-count?${params}`);
       if (!res.ok) throw new Error("Failed to load write count");
-      return (await res.json()) as { writeCount: number; windowDays: number };
+      return (await res.json()) as {
+        writeCount: number;
+        windowDays: number;
+        openProposals?: PendingProposalForPage[];
+      };
     },
   });
   const writeCount = activityCountQuery.data?.writeCount ?? 0;
   const windowDays = activityCountQuery.data?.windowDays ?? ENTRY_ACTIVITY_WINDOW_DAYS;
+  const openProposals = activityCountQuery.data?.openProposals ?? [];
+  const pendingCount = openProposals.length;
+  const hasAgentProposal = openProposals.some((p) => p.proposer_kind === "agent");
+  const [robotDancing, setRobotDancing] = useState(false);
+  const prevPendingRef = useRef(0);
+  useEffect(() => {
+    if (pendingCount > prevPendingRef.current && hasAgentProposal) setRobotDancing(true);
+    prevPendingRef.current = pendingCount;
+  }, [pendingCount, hasAgentProposal]);
+  const writesLabel = `${writeCount} write${writeCount === 1 ? "" : "s"} in the last ${windowDays} days`;
   // Keep the control visible in read mode while diagnostics (entryKey) or write count load.
   const writeCountLoading =
     !entryKey
@@ -246,6 +362,11 @@ export function VersioningView({
       : activityCountQuery.data === undefined &&
         (activityCountQuery.isPending || activityCountQuery.isFetching);
   const showActivityButton = Boolean(entryKey) || pageDiagnosticsLoading;
+  const activityLabel = writeCountLoading
+    ? `Loading writes in the last ${windowDays} days`
+    : pendingCount > 0
+      ? `${pendingCount} proposal${pendingCount === 1 ? "" : "s"} waiting for review · ${writesLabel}`
+      : writesLabel;
   const locales = versioningData?.versioning ? Object.keys(versioningData.versioning) : [];
   const dialogLocales = locales.length > 0 ? locales : (versioningData?.availableLocales ?? ["en"]);
 
@@ -303,8 +424,19 @@ export function VersioningView({
 
   const searchString = useSearch();
   const activeVariant = new URLSearchParams(searchString).get("variant") ?? null;
+  const pathLocale = pathname.split("/")[1] ?? "";
+  const activeLocale =
+    new URLSearchParams(searchString).get("locale") ??
+    (dialogLocales.includes(pathLocale) ? pathLocale : null);
 
   const [editingLocale, setEditingLocale] = useState<string | null>(null);
+  /** Locale whose pencil was pressed while A/B testing is not set up (notice instead of sliders). */
+  const [abNoticeLocale, setAbNoticeLocale] = useState<string | null>(null);
+  const abStatus = versioningData?.ab_testing;
+  const abNotSetUp = !!abStatus && !abStatus.set_up;
+  const abCheckFailing = !!abStatus && abStatus.set_up && !abStatus.latest_check_ok;
+  /** Traffic can only go down until A/B testing is set up and the latest check passed. */
+  const abLowerOnly = abNotSetUp || abCheckFailing;
   const [tempAllocations, setTempAllocations] = useState<Record<string, number>>({});
   const [isSaving, setIsSaving] = useState(false);
   const [savedLocale, setSavedLocale] = useState<string | null>(null);
@@ -322,11 +454,25 @@ export function VersioningView({
     message: string;
     violations?: TextLimitViolation[];
     brokenLinks?: BrokenInternalLink[];
+    displayChange?: { locale: string; fields: DisplayValueChange[]; paths?: { common?: string; locale?: string } };
+    urlSlug?: { locale: string; currentSlug: string };
+    robots?: RobotsChangeRow[];
   } | null>(null);
-  const [promoteConfirms, setPromoteConfirms] = useState<{ overwrite: boolean; source: boolean; textLimits: boolean }>({
+  const [promoteUrlSlugInput, setPromoteUrlSlugInput] = useState("");
+  const [promoteUrlSlugs, setPromoteUrlSlugs] = useState<Record<string, string>>({});
+  const [promoteRobotsChoice, setPromoteRobotsChoice] = useState<RobotsOnPublishChoice | null>(null);
+  const [promoteConfirms, setPromoteConfirms] = useState<{
+    overwrite: boolean;
+    source: boolean;
+    textLimits: boolean;
+    displayChange: boolean;
+    robots: RobotsOnPublishChoice | null;
+  }>({
     overwrite: false,
     source: false,
     textLimits: false,
+    displayChange: false,
+    robots: null,
   });
   const [isPromoting, setIsPromoting] = useState(false);
 
@@ -418,6 +564,24 @@ export function VersioningView({
     }
   };
 
+  const canCreateVariant = hasCapability("content_create_variant", contentInfo.type ?? undefined);
+
+  const renderNewVersionButton = (locale: string) =>
+    canCreateVariant ? (
+      <button
+        onClick={() => {
+          setCreateVersionLocale(locale);
+          setCreateVersionSlug("");
+          setCreateVersionOpen(true);
+        }}
+        className="p-1 rounded-md hover-elevate text-muted-foreground"
+        title="New version"
+        data-testid={`button-new-version-${locale}`}
+      >
+        <IconPlus className="h-3.5 w-3.5" />
+      </button>
+    ) : null;
+
   const handleEditDefault = (locale: string) => {
     const { type, slug } = contentInfo;
     if (!type || !slug) return;
@@ -462,24 +626,111 @@ export function VersioningView({
     }
   };
 
-  const resetPromoteIssue = () => {
-    setPromoteIssue(null);
-    setPromoteConfirms({ overwrite: false, source: false, textLimits: false });
+  const handleRegisterVariant = async (locale: string, variantSlug: string) => {
+    const { type, slug } = contentInfo;
+    if (!type || !slug || !versioningWriteSlug) return;
+    setRegisteringVariant(`${locale}:${variantSlug}`);
+    try {
+      const token = getDebugToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Token ${token}`;
+      const res = await fetch(`/api/versioning/${type}/${versioningWriteSlug}/register`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ variantSlug, locale }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast({ title: data.error || "Failed to add version", variant: "destructive" });
+        return;
+      }
+      toast({ title: `"${variantSlug}" added at 0% traffic` });
+      if (onVersioningDataUpdate) {
+        const updated = await fetch(`/api/versioning/${type}/${slug}`).then((r) => r.json());
+        onVersioningDataUpdate(updated);
+      }
+    } catch {
+      toast({ title: "Failed to add version", variant: "destructive" });
+    } finally {
+      setRegisteringVariant(null);
+    }
   };
 
-  const promoteConfirmBody = (confirms = promoteConfirms) => ({
+  const handlePreviewUnregistered = (locale: string, variantSlug: string) => {
+    const { type, slug } = contentInfo;
+    if (!type || !slug) return;
+    persistOpenStateForNavigation();
+    navigate(`/private/preview/${type}/${slug}?variant=${encodeURIComponent(variantSlug)}&locale=${locale}`);
+  };
+
+  const resetPromoteIssue = () => {
+    setPromoteIssue(null);
+    setPromoteConfirms({ overwrite: false, source: false, textLimits: false, displayChange: false, robots: null });
+    setPromoteRobotsChoice(null);
+    setPromoteUrlSlugInput("");
+    setPromoteUrlSlugs({});
+  };
+
+  const promoteConfirmBody = (confirms = promoteConfirms, urlSlugs = promoteUrlSlugs) => ({
     ...(confirms.overwrite ? { confirm_overwrite_newer_live: true } : {}),
     ...(confirms.source ? { confirm_source_changed: true } : {}),
     ...(confirms.textLimits ? { confirm_text_limits: true } : {}),
+    ...(confirms.displayChange ? { confirm_display_change: true } : {}),
+    ...(confirms.robots ? { robots_on_publish: confirms.robots } : {}),
+    ...(Object.keys(urlSlugs).length ? { locale_url_slugs: urlSlugs } : {}),
   });
 
   /** Keep the dialog open and ask again when the server needs an explicit overwrite confirm. */
   const holdForPromoteConfirm = (data: {
     code?: string;
     error?: string;
-    details?: { violations?: TextLimitViolation[]; broken_internal_links?: BrokenInternalLink[] };
+    locale?: string;
+    details?: {
+      violations?: TextLimitViolation[];
+      broken_internal_links?: BrokenInternalLink[];
+      locale?: string;
+      fields?: DisplayValueChange[];
+      paths?: { common?: string; locale?: string };
+      current_slug?: string;
+      live_robots?: string;
+      draft_robots?: string;
+      locales?: RobotsChangeRow[];
+    };
   }): boolean => {
     const code = data.code;
+    if (code === ROBOTS_CHANGE_ON_PUBLISH_CODE) {
+      setPromoteIssue({
+        code,
+        message: data.error || "Publishing changes whether search engines can see this page.",
+        robots: robotsChangeRows(data.details, promoteTarget?.locale ?? ""),
+      });
+      setPromoteRobotsChoice(null);
+      return true;
+    }
+    if (code === LOCALE_URL_SLUG_REQUIRED_CODE) {
+      setPromoteIssue({
+        code,
+        message: data.error || "This new language needs its own web address.",
+        urlSlug: {
+          locale: data.details?.locale ?? data.locale ?? promoteTarget?.locale ?? "",
+          currentSlug: data.details?.current_slug ?? contentInfo.slug ?? "",
+        },
+      });
+      setPromoteUrlSlugInput("");
+      return true;
+    }
+    if (code === DISPLAY_VALUES_CHANGE_CODE) {
+      setPromoteIssue({
+        code,
+        message: data.error || "Publishing changes what visitors of this language see.",
+        displayChange: {
+          locale: data.details?.locale ?? data.locale ?? promoteTarget?.locale ?? "",
+          fields: Array.isArray(data.details?.fields) ? data.details.fields : [],
+          paths: data.details?.paths,
+        },
+      });
+      return true;
+    }
     if (code === BROKEN_INTERNAL_LINKS_CODE) {
       setPromoteIssue({
         code,
@@ -517,7 +768,7 @@ export function VersioningView({
     if (linkText) toast({ title: "Check the links on this page", description: linkText });
   };
 
-  const handlePromote = async (confirms = promoteConfirms) => {
+  const handlePromote = async (confirms = promoteConfirms, urlSlugs = promoteUrlSlugs) => {
     if (!promoteTarget || !contentInfo.type || !contentInfo.slug) return;
     setIsPromoting(true);
     try {
@@ -531,7 +782,7 @@ export function VersioningView({
           {
             method: "POST",
             headers,
-            body: JSON.stringify({ variantSlug: promoteTarget.slug, ...promoteConfirmBody(confirms) }),
+            body: JSON.stringify({ variantSlug: promoteTarget.slug, ...promoteConfirmBody(confirms, urlSlugs) }),
           },
         );
         const data = await res.json();
@@ -566,7 +817,7 @@ export function VersioningView({
 
       const res = await fetch(
         `/api/versioning/${contentInfo.type}/${versioningWriteSlug}/${promoteTarget.locale}/promote/${promoteTarget.slug}`,
-        { method: "POST", headers, body: JSON.stringify(promoteConfirmBody(confirms)) }
+        { method: "POST", headers, body: JSON.stringify(promoteConfirmBody(confirms, urlSlugs)) }
       );
       const data = await res.json();
       if (!res.ok) {
@@ -706,6 +957,13 @@ export function VersioningView({
   const openEditAllocations = (locale: string) => {
     const localeData = versioningData?.versioning?.[locale];
     if (!localeData) return;
+    const hasTraffic = localeData.variants.some((v) => (v.allocation ?? 0) > 0);
+    if (abNotSetUp && !hasTraffic) {
+      // Nothing to lower and nothing can be raised: explain instead of showing sliders.
+      setAbNoticeLocale(locale);
+      return;
+    }
+    setAbNoticeLocale(null);
     const allocations: Record<string, number> = {};
     localeData.variants.forEach((v) => {
       allocations[v.slug] = v.allocation;
@@ -841,10 +1099,13 @@ export function VersioningView({
       setTimeout(() => setSavedLocale(null), 4000);
       setEditingLocale(null);
       setTempAllocations({});
-    } catch {
+    } catch (err) {
       toast({
         title: "Failed to save",
-        description: "Could not update traffic allocation.",
+        description:
+          err instanceof Error && err.message
+            ? `Could not update traffic allocation: ${err.message}`
+            : "Could not update traffic allocation.",
         variant: "destructive",
       });
     } finally {
@@ -988,17 +1249,40 @@ export function VersioningView({
               )}
               <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5 min-w-0">
                 {contentInfo.type ? (
-                  <a
-                    href={`/private/type/${contentInfo.type}`}
-                    className="underline underline-offset-2 hover:text-foreground shrink-0"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      navigate(`/private/type/${contentInfo.type}`);
-                    }}
-                    data-testid="link-versioning-content-type"
-                  >
-                    {contentInfo.label}
-                  </a>
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <button
+                        type="button"
+                        className="underline underline-offset-2 hover:text-foreground shrink-0"
+                        data-testid="link-versioning-content-type"
+                        aria-label={`Content type: ${contentInfo.label}. Click for details.`}
+                      >
+                        {contentInfo.label}
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent
+                      align="start"
+                      className="w-64 text-xs space-y-2 z-[10001]"
+                      data-testid="popover-versioning-content-type"
+                    >
+                      <p className="text-foreground font-medium">Content type: {contentInfo.label}</p>
+                      <p className="text-muted-foreground leading-snug">
+                        Every page belongs to a content type. It decides which fields, sections and
+                        templates this page shares with every other {contentInfo.label} page.
+                      </p>
+                      <a
+                        href={`/private/type/${contentInfo.type}`}
+                        className="inline-flex text-foreground underline underline-offset-2 hover:text-primary"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          navigate(`/private/type/${contentInfo.type}`);
+                        }}
+                        data-testid="link-versioning-content-type-dashboard"
+                      >
+                        Open {contentInfo.label} dashboard
+                      </a>
+                    </PopoverContent>
+                  </Popover>
                 ) : (
                   <span className="shrink-0">{contentInfo.label}</span>
                 )}
@@ -1097,30 +1381,51 @@ export function VersioningView({
                     className="h-7 gap-1 px-1.5 text-xs"
                     onClick={() => {
                       if (!entryKey) return;
-                      setActivityOpen(true);
+                      if (pendingCount > 0) setProposalsChooserOpen(true);
+                      else setActivityOpen(true);
                     }}
                     disabled={!entryKey && writeCountLoading}
                     data-testid="button-open-versioning-activity"
-                    title={
-                      writeCountLoading
-                        ? `Activity · loading writes in the last ${windowDays} days`
-                        : `Activity · ${writeCount} write${writeCount === 1 ? "" : "s"} in the last ${windowDays} days`
-                    }
-                    aria-label={
-                      writeCountLoading
-                        ? `Loading writes in the last ${windowDays} days`
-                        : `${writeCount} write${writeCount === 1 ? "" : "s"} in the last ${windowDays} days`
-                    }
+                    data-pending-proposals={pendingCount || undefined}
+                    title={`Activity · ${activityLabel}`}
+                    aria-label={activityLabel}
                     aria-busy={writeCountLoading || undefined}
                   >
-                    <IconRobot className="h-3.5 w-3.5" />
+                    <span
+                      className={cn(
+                        "inline-flex",
+                        robotDancing && "animate-robot-dance motion-reduce:animate-none",
+                      )}
+                      onAnimationEnd={() => setRobotDancing(false)}
+                      data-testid="icon-versioning-activity-robot"
+                    >
+                      <IconRobot className="h-3.5 w-3.5" />
+                    </span>
                     <Badge
                       variant="secondary"
-                      className="h-5 min-w-5 px-1.5 text-[10px] font-normal tabular-nums bg-muted text-muted-foreground border border-border shadow-none"
+                      className={cn(
+                        "h-5 min-w-5 px-1.5 text-[10px] tabular-nums border shadow-none",
+                        pendingCount > 0
+                          ? "bg-status-away/15 text-status-away border-status-away/40 font-medium"
+                          : "bg-muted text-muted-foreground border-border font-normal",
+                      )}
                       data-testid="badge-versioning-activity-count"
                     >
-                      {writeCountLoading ? "…" : writeCount}
+                      {writeCountLoading ? "…" : pendingCount > 0 ? pendingCount : writeCount}
                     </Badge>
+                  </Button>
+                ) : null}
+                {onOpenPageStats ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 w-7 p-0"
+                    onClick={onOpenPageStats}
+                    data-testid="button-open-page-stats"
+                    title="Page stats: objective, traffic, leads, search and ads for this page"
+                    aria-label="Open page stats"
+                  >
+                    <IconChartBar className="h-3.5 w-3.5" />
                   </Button>
                 ) : null}
               </div>
@@ -1136,6 +1441,17 @@ export function VersioningView({
           onOpenChange={setActivityOpen}
           testIdPrefix="versioning-activity"
           pageUrl={pageDiagnosticsUrl ?? undefined}
+        />
+      ) : null}
+
+      {pendingCount > 0 ? (
+        <PendingProposalsDialog
+          open={proposalsChooserOpen}
+          onOpenChange={setProposalsChooserOpen}
+          proposals={openProposals}
+          page={{ type: contentInfo.type, slug: contentInfo.slug, locale: activeLocale }}
+          navigate={navigate}
+          onSeePastSaves={() => setActivityOpen(true)}
         />
       ) : null}
 
@@ -1411,6 +1727,15 @@ export function VersioningView({
               </details>
             </div>
           )}
+          {!versioningLoading && (versioningData?.unregisteredVariants?.length ?? 0) > 0 && (
+            <UnregisteredVariantsNotice
+              variants={versioningData!.unregisteredVariants!}
+              canRegister={hasCapability("content_create_variant", contentInfo.type ?? undefined)}
+              registering={registeringVariant}
+              onRegister={handleRegisterVariant}
+              onPreview={handlePreviewUnregistered}
+            />
+          )}
           {versioningLoading ? (
             <div className="flex items-center justify-center py-8">
               <IconRefresh className="h-5 w-5 animate-spin text-muted-foreground" />
@@ -1422,14 +1747,18 @@ export function VersioningView({
                   const isDefaultActive = activeVariant === null;
                   return (
                     <div key={locale} className="px-2 py-2">
-                      <div className="flex items-center gap-1.5 mb-2">
-                        <span className="text-xs text-muted-foreground">
-                          {isTemplateVersioning ? "Live template for" : "Live version for"}
-                        </span>
-                        <Badge variant="secondary" className="text-[10px] px-1.5 py-0 leading-4">
-                          {locale.toUpperCase()}
-                        </Badge>
-                        <span className="text-xs text-muted-foreground">locale</span>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs text-muted-foreground">
+                            {isTemplateVersioning ? "Live template for" : "Live version for"}
+                          </span>
+                          <Badge variant="secondary" className="text-[10px] px-1.5 py-0 leading-4 gap-1">
+                            <LocaleFlag locale={locale} className="w-3.5 h-2.5 rounded-sm" />
+                            {locale.toUpperCase()}
+                          </Badge>
+                          <span className="text-xs text-muted-foreground">locale</span>
+                        </div>
+                        {renderNewVersionButton(locale)}
                       </div>
                       <div className={isDefaultActive ? "rounded-md bg-primary/10 px-2 py-1 -mx-2" : ""}>
                         <div className="flex items-center justify-between text-sm gap-2">
@@ -1497,7 +1826,7 @@ export function VersioningView({
                     <p className="text-muted-foreground">
                       Use them for a new headline or CTA, a layout experiment, or a stakeholder preview.
                       They start at <strong>0% traffic</strong>; promote later if it wins.
-                      Click <strong>New</strong> to add one — a versioning file is created automatically then. You do not create it by hand.
+                      Click <strong>+</strong> next to a locale to add one — a versioning file is created automatically then. You do not create it by hand.
                     </p>
                   </>
                 ) : (
@@ -1550,7 +1879,8 @@ export function VersioningView({
                             ? "Template variants for"
                             : "Traffic allocation for"}
                       </span>
-                      <Badge variant="secondary" className="text-[10px] px-1.5 py-0 leading-4">
+                      <Badge variant="secondary" className="text-[10px] px-1.5 py-0 leading-4 gap-1">
+                        <LocaleFlag locale={locale} className="w-3.5 h-2.5 rounded-sm" />
                         {locale.toUpperCase()}
                       </Badge>
                       <span className="text-xs text-muted-foreground">locale</span>
@@ -1566,28 +1896,19 @@ export function VersioningView({
                         </Badge>
                       )}
                     </div>
-                    {!isDraftEntry && (!isEditing ? (
+                    {!isEditing ? (
                       <div className="flex items-center gap-0.5">
-                        <button
-                          onClick={() => {
-                            setCreateVersionLocale(locale);
-                            setCreateVersionSlug("");
-                            setCreateVersionOpen(true);
-                          }}
-                          className="p-1 rounded-md hover-elevate text-muted-foreground"
-                          title="New version"
-                          data-testid={`button-new-version-${locale}`}
-                        >
-                          <IconPlus className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          onClick={() => openEditAllocations(locale)}
-                          className="p-1 rounded-md hover-elevate text-muted-foreground"
-                          title="Edit traffic allocation"
-                          data-testid={`button-edit-allocations-${locale}`}
-                        >
-                          <IconPencil className="h-3.5 w-3.5" />
-                        </button>
+                        {renderNewVersionButton(locale)}
+                        {!isDraftEntry && (
+                          <button
+                            onClick={() => openEditAllocations(locale)}
+                            className="p-1 rounded-md hover-elevate text-muted-foreground"
+                            title="Edit traffic allocation"
+                            data-testid={`button-edit-allocations-${locale}`}
+                          >
+                            <IconPencil className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                       </div>
                     ) : (
                       <div className="flex items-center gap-1">
@@ -1620,7 +1941,7 @@ export function VersioningView({
                           <IconX className="h-3.5 w-3.5" />
                         </button>
                       </div>
-                    ))}
+                    )}
                   </div>
 
                   {isEditing && allocationSaveError && (
@@ -1630,6 +1951,51 @@ export function VersioningView({
                     >
                       {allocationSaveError}
                     </p>
+                  )}
+
+                  {abNoticeLocale === locale && !isEditing && (
+                    <AbTestingNotSetUpNotice
+                      onClose={() => setAbNoticeLocale(null)}
+                      locale={locale}
+                      canSetUp={canManageAbTesting}
+                    />
+                  )}
+
+                  {isEditing && abNotSetUp && (
+                    <AbTrafficNotice tone="warning" testId={`text-ab-not-setup-${locale}`}>
+                      A/B testing has not been set up yet, so visitors only see Default. You can lower or stop traffic
+                      here, but not raise it.{" "}
+                      {canManageAbTesting ? (
+                        <a href={`${AB_TESTING_HREF}#ab-setup`} className="underline underline-offset-2">
+                          Set up A/B testing
+                        </a>
+                      ) : (
+                        "Ask a Platform Steward to set it up."
+                      )}
+                    </AbTrafficNotice>
+                  )}
+                  {isEditing && abCheckFailing && (
+                    <AbTrafficNotice tone="destructive" testId={`text-ab-check-failing-${locale}`}>
+                      The last A/B check failed. You can lower or stop tests, but not start or raise them until a check
+                      passes.{" "}
+                      {canManageAbTesting ? (
+                        <a href={`${AB_TESTING_HREF}#ab-health`} className="underline underline-offset-2">
+                          Open A/B testing health
+                        </a>
+                      ) : (
+                        "A Platform Steward can re-run the check."
+                      )}
+                    </AbTrafficNotice>
+                  )}
+                  {isEditing && !abLowerOnly && (
+                    <AbTrafficNotice tone="warning" testId={`text-ab-sticky-${locale}`}>
+                      Visitors who already saw this page keep their version. The new split only applies to new
+                      visitors.
+                      <AbStickyAdvanced />
+                    </AbTrafficNotice>
+                  )}
+                  {!isEditing && versioningData?.split_health?.[locale]?.status === "mismatch" && (
+                    <SplitMismatchNotice health={versioningData.split_health[locale]} locale={locale} />
                   )}
 
                   <div className="space-y-2">
@@ -1861,7 +2227,11 @@ export function VersioningView({
                             if (v.slug === variant.slug) return sum;
                             return sum + (tempAllocations[v.slug] ?? (v.allocation ?? 0));
                           }, 0) + (tempAllocations["__default__"] ?? 0);
-                          const maxAllowed = Math.max(0, 100 - othersTotal);
+                          const maxAllowed = Math.min(
+                            Math.max(0, 100 - othersTotal),
+                            // Lower-only while A/B testing is not ready: never above today's traffic.
+                            abLowerOnly ? (variant.allocation ?? 0) : 100,
+                          );
                           return (
                             <div className="mt-1.5 flex items-center gap-2">
                               <Slider
@@ -2068,6 +2438,28 @@ export function VersioningView({
             )
           ) : promoteIssue?.code === TEXT_LIMITS_EXCEEDED_CODE ? (
             <TextLimitsIssue message={promoteIssue.message} violations={promoteIssue.violations ?? []} />
+          ) : promoteIssue?.code === DISPLAY_VALUES_CHANGE_CODE && promoteIssue.displayChange ? (
+            <DisplayValuesChangeNotice
+              locale={promoteIssue.displayChange.locale}
+              fields={promoteIssue.displayChange.fields}
+              paths={promoteIssue.displayChange.paths}
+              className="max-h-72 overflow-y-auto"
+            />
+          ) : promoteIssue?.code === LOCALE_URL_SLUG_REQUIRED_CODE && promoteIssue.urlSlug ? (
+            <LocaleUrlSlugPrompt
+              locale={promoteIssue.urlSlug.locale}
+              currentSlug={promoteIssue.urlSlug.currentSlug}
+              value={promoteUrlSlugInput}
+              onChange={setPromoteUrlSlugInput}
+            />
+          ) : promoteIssue?.code === ROBOTS_CHANGE_ON_PUBLISH_CODE && promoteIssue.robots ? (
+            <RobotsOnPublishChoiceField
+              rows={promoteIssue.robots}
+              value={promoteRobotsChoice}
+              onChange={setPromoteRobotsChoice}
+              name="promote-robots-on-publish"
+              testIdPrefix="promote-robots-on-publish"
+            />
           ) : promoteIssue ? (
             <p
               className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
@@ -2081,14 +2473,32 @@ export function VersioningView({
             <Button
               variant="destructive"
               onClick={() => {
+                if (promoteIssue?.code === LOCALE_URL_SLUG_REQUIRED_CODE && promoteIssue.urlSlug) {
+                  const nextSlugs = { ...promoteUrlSlugs, [promoteIssue.urlSlug.locale]: promoteUrlSlugInput.trim() };
+                  setPromoteUrlSlugs(nextSlugs);
+                  setPromoteIssue(null);
+                  void handlePromote(promoteConfirms, nextSlugs);
+                  return;
+                }
+                if (promoteIssue?.code === ROBOTS_CHANGE_ON_PUBLISH_CODE) {
+                  if (!promoteRobotsChoice) return;
+                  const next = { ...promoteConfirms, robots: promoteRobotsChoice };
+                  setPromoteConfirms(next);
+                  setPromoteIssue(null);
+                  void handlePromote(next);
+                  return;
+                }
                 if (promoteIssue) {
                   const isTextLimits = promoteIssue.code === TEXT_LIMITS_EXCEEDED_CODE;
+                  const isDisplayChange = promoteIssue.code === DISPLAY_VALUES_CHANGE_CODE;
                   const next = {
                     overwrite:
                       promoteConfirms.overwrite ||
-                      (!isTextLimits && promoteIssue.code !== "translation_source_changed"),
+                      (!isTextLimits && !isDisplayChange && promoteIssue.code !== "translation_source_changed"),
                     source: promoteConfirms.source || promoteIssue.code === "translation_source_changed",
                     textLimits: promoteConfirms.textLimits || isTextLimits,
+                    displayChange: promoteConfirms.displayChange || isDisplayChange,
+                    robots: promoteConfirms.robots,
                   };
                   setPromoteConfirms(next);
                   setPromoteIssue(null);
@@ -2097,7 +2507,11 @@ export function VersioningView({
                 }
                 void handlePromote();
               }}
-              disabled={isPromoting}
+              disabled={
+                isPromoting ||
+                (promoteIssue?.code === LOCALE_URL_SLUG_REQUIRED_CODE && !isValidLocaleUrlSlug(promoteUrlSlugInput)) ||
+                (promoteIssue?.code === ROBOTS_CHANGE_ON_PUBLISH_CODE && !promoteRobotsChoice)
+              }
               className="w-full"
               data-testid="button-confirm-promote"
             >
@@ -2106,7 +2520,11 @@ export function VersioningView({
               ) : (
                 <IconCrown className="h-4 w-4" />
               )}
-              {promoteIssue
+              {promoteIssue?.code === LOCALE_URL_SLUG_REQUIRED_CODE
+                ? "Publish with this address"
+                : promoteIssue?.code === ROBOTS_CHANGE_ON_PUBLISH_CODE
+                ? "Publish with this choice"
+                : promoteIssue
                 ? "Publish anyway"
                 : isDraftEntry
                   ? "Yes, publish now"

@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useParams, useSearch } from "wouter";
 import {
   IconAlertTriangle,
   IconArrowsSort,
   IconBan,
+  IconBug,
   IconCheck,
+  IconChevronDown,
   IconChevronLeft,
   IconCircleCheck,
   IconCircleX,
   IconCloudDownload,
-  IconCopy,
   IconExternalLink,
   IconFilter,
   IconInbox,
@@ -33,6 +35,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { getDebugUserName, useDebugAuth } from "@/hooks/useDebugAuth";
+import { BlockerOverrideField, blockerOverrideReasonOk } from "@/components/agents/BlockerOverrideField";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -70,10 +73,15 @@ import {
   ACCEPT_NEXT_STEP_MIN,
   CLOSE_NOTE_MIN,
   IDEA_PARK_CLOSE_REASON_OPTIONS,
+  IDEA_RETIRE_REASON_OPTIONS,
   PROPOSAL_CLOSE_REASON_OPTIONS,
   closeNoteRequired,
+  closeReasonOptionLabel,
+  isIdeaRetireReason,
+  type IdeaRetireReasonValue,
   type ProposalCloseReasonValue,
 } from "@/lib/proposalCloseReason";
+import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import {
   PROPOSAL_REJECT_KIND_OPTIONS,
   REJECT_NOTE_MIN,
@@ -86,18 +94,20 @@ import { ProposalKpiStrip } from "@/components/agents/ProposalKpiStrip";
 import {
   ProposalListCard,
   ProposalListCardSkeleton,
-  ProposalMetaRow,
   ProposalCategoryTags,
 } from "@/components/agents/ProposalListCard";
+import { ProposalDetailMetaCard } from "@/components/agents/ProposalDetailMetaCard";
 import { ProposalFieldDiff } from "@/components/agents/ProposalFieldDiff";
 import {
   ProposalSituationCallout,
-  ReviewSituationsEditor,
-  STAFF_IDEA_DEMAND_SITUATION_OPTIONS,
   type ReviewContextPayload,
 } from "@/components/agents/SituationReviewBadge";
+import { ProposalEvidenceBlock } from "@/components/agents/ProposalEvidenceBlock";
+import { filedIdeaDemand } from "@/lib/review-situation-summary";
 import { EntryActivityBadge } from "@/components/pipeline/EntryActivityBadge";
 import { RelatedEntryPopover } from "@/components/agents/RelatedEntryPopover";
+import { ProposalEntryCard, proposalEntryBlockId } from "@/components/agents/ProposalEntryCard";
+import { ImplementsIdeaCard, type ImplementsIdeaSummary } from "@/components/agents/ImplementsIdeaCard";
 import { entryPreviewHref } from "@/lib/variable-usage-href";
 import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
 import { ProposalV1Badges } from "@/components/agents/ProposalDraftBadges";
@@ -111,13 +121,13 @@ import {
   type OutcomeVerdict,
 } from "@/components/agents/ProposalOutcomeReview";
 import { BlockersBadge } from "@/components/agents/BlockersBadge";
+import { ProposalMarkdown } from "@/components/agents/ProposalMarkdown";
 import {
-  IdeaPageTypeStrategy,
+  IdeaTargetEntryCard,
   type IdeaContentTypeStrategyPayload,
-} from "@/components/agents/IdeaPageTypeStrategy";
+} from "@/components/agents/IdeaTargetEntryCard";
 import {
   ProposalKindBadge,
-  ProposalProgressLabel,
   ProposalStatusLabel,
 } from "@/components/agents/ProposalExplainBadges";
 import { EventWebhooksKpiButton } from "@/components/pipeline/EventWebhooksDialog";
@@ -128,19 +138,30 @@ import { buildEntryKey } from "@/lib/entryKeyToPageUrl";
 import { ENTRY_ACTIVITY_WINDOW_DAYS } from "@shared/event-log-filters";
 import { TEXT_LIMITS_EXCEEDED_CODE, type TextLimitViolation } from "@shared/component-text-limits";
 import { TextLimitsIssue } from "@/components/TextLimitsIssue";
+import {
+  ROBOTS_CHANGE_ON_PUBLISH_CODE,
+  RobotsOnPublishChoiceField,
+  type RobotsOnPublishChoice,
+} from "@/components/editing/RobotsOnPublishChoice";
 import { IdeaSeoTargetPanel, type IdeaSeoTarget } from "@/components/agents/IdeaSeoTargetPanel";
 import { apiFetch, apiRequestWithAuth } from "@/lib/queryClient";
 import { Checkbox } from "@/components/ui/checkbox";
+import { assessSlugLocaleMatch, slugLocaleMismatchHint } from "@shared/slug-locale-heuristic";
 import { getSessionHeaders } from "@/lib/sessionHeaders";
 import { outcomesBackHref } from "@/lib/agents-tab";
 import { useToast } from "@/hooks/use-toast";
 import { ToastAction } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
+import {
+  canApproveInDrawer,
+  proposalDraftPreviewHref,
+  sameDraft,
+  type ProposalPreviewEntry,
+} from "@/lib/proposal-drawer";
 import { proposalStatusUi } from "@/lib/proposalStatusUi";
 import {
   asIssueActor,
   formatProposalRelativeUpdatedAt,
-  proposalAttributionLines,
   proposalEntryProgress,
   shortProposalId,
 } from "@/lib/proposalCardMeta";
@@ -178,6 +199,8 @@ import {
 
 export const AGENTS_PROPOSALS_BASE = "/private/agents/proposals";
 
+const ENTRY_CARDS_COLLAPSED_COUNT = 4;
+
 const REJECT_UNDO_MS = 10_000;
 
 function proposalsListHref(search: string): string {
@@ -204,12 +227,24 @@ const ACCEPTED_ENTRY_NOT_CREATABLE_COPY =
 const ACCEPTED_ENTRY_NEEDS_LAYOUT_COPY =
   "This page builds its own layout, so the follow-up proposal must include the whole page layout (every section), not only text fields.";
 
+type ApplyRobotsEntry = {
+  entry_id: number;
+  entry_key: string;
+  locale: string;
+  live_robots?: string;
+  draft_robots?: string;
+  agent_choice?: RobotsOnPublishChoice | null;
+};
+
 type ProposalWarning = {
   code?: string;
   message: string;
   details?: {
     placeholders?: Array<{ name: string; missing: number; total: number }>;
     waiting_ideas?: Array<{ id: string; title: string }>;
+    entry_key?: string;
+    locale?: string;
+    fields?: string[];
   };
 };
 
@@ -253,6 +288,7 @@ function plainSectionIssue(details?: { property_path?: string; message?: string 
 type BlockerRow = {
   id: number;
   body: string;
+  staff_summary?: string | null;
   status: string;
   author: string;
   created_at: number;
@@ -272,6 +308,7 @@ type Proposal = {
   id: string;
   title: string;
   summary: string;
+  rationale?: string | null;
   kind: string;
   status: string;
   category?: string;
@@ -301,12 +338,15 @@ type Proposal = {
   stale_flagged_at?: string | null;
   blocked_flagged_at?: string | null;
   reverts_proposal_id?: string | null;
+  applies_after_proposal_id?: string | null;
+  applied_before_proposal_ids?: string[];
+  dependent_overdue_flagged_at?: string | null;
   co_authors?: Array<{ username: string }>;
   affected_entries?: {
     count: number;
     sample: Array<{ contentType: string; slug: string; locale: string; variant: string | null }>;
   } | null;
-  accepted_entry?: { contentType: string; slug: string; locale: string } | null;
+  accepted_entry?: { contentType: string; slug: string; locale: string; url_slug?: string } | null;
   accepted_entry_create_mode?: "attached" | "page" | "manual" | null;
   accepted_entry_layout_owner?: "shared_template" | "entry" | null;
   idea_funnel?: {
@@ -360,6 +400,20 @@ type Proposal = {
   outcome_lesson_note?: string | null;
 };
 
+function suggestedEntriesBesidesReserved(p: Proposal): RelatedEntryRef[] {
+  const related = p.related_entries ?? [];
+  const reserved = p.accepted_entry;
+  if (!reserved) return related;
+  return related.filter(
+    (ref) =>
+      !(
+        ref.contentType === reserved.contentType &&
+        ref.slug === reserved.slug &&
+        (!ref.locale || ref.locale === reserved.locale)
+      ),
+  );
+}
+
 function headers(): Record<string, string> {
   return { "Content-Type": "application/json", ...getSessionHeaders() };
 }
@@ -392,6 +446,50 @@ function TemplatePlaceholderNotice({ proposalId }: { proposalId: string }) {
         <p key={line}>{line}</p>
       ))}
       <p className="text-xs text-muted-foreground">You can still publish; fill those fields later.</p>
+    </div>
+  );
+}
+
+const DISPLAY_FIELD_LABELS: Record<string, string> = {
+  funnel: "funnel",
+  authors: "authors",
+  published_at: "publish date",
+  detached: "template detach",
+};
+
+/** Apply dialog: pages whose language will show the shared value instead of its own old copy (non-blocking). */
+function ApplyDisplayChangeNotice({ proposalId }: { proposalId: string }) {
+  const { data } = useQuery({
+    queryKey: ["/api/admin/proposals", proposalId, "apply-dry-run"],
+    queryFn: async () => {
+      const res = await apiFetch(`/api/admin/proposals/${proposalId}/apply`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ dry_run: true }),
+      });
+      if (!res.ok) return null;
+      return (await res.json()) as { warnings?: ProposalWarning[] };
+    },
+    staleTime: 30_000,
+  });
+  const changes = (data?.warnings ?? []).filter((w) => w.code === "display_values_change");
+  if (!changes.length) return null;
+  return (
+    <div
+      className="space-y-1 rounded-md border border-card-border bg-muted/40 p-3 text-sm text-foreground"
+      data-testid="apply-display-values-change-notice"
+    >
+      {changes.map((w) => {
+        const d = w.details ?? {};
+        const names = (d.fields ?? []).map((f) => DISPLAY_FIELD_LABELS[f] ?? f).join(", ");
+        return (
+          <p key={`${d.entry_key}|${d.locale}`}>
+            {d.entry_key} ({d.locale}): publishing changes what visitors of this language see for {names}. These now
+            come from the page-wide settings shared by every language.
+          </p>
+        );
+      })}
+      <p className="text-xs text-muted-foreground">You can still publish.</p>
     </div>
   );
 }
@@ -442,66 +540,80 @@ function DecisionDebugPanel({
 }: {
   debug: NonNullable<Proposal["decision_debug"]>;
 }) {
+  const [open, setOpen] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const think = debug.review_context?.think_items ?? [];
   return (
-    <div
-      className="rounded-md border border-card-border bg-muted/30 px-3 py-2.5 space-y-1.5"
-      data-testid="callout-proposal-decision-debug"
-    >
-      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-        Decide debug
-      </p>
-      <p className="text-sm leading-5 text-foreground/90">
-        Debug snapshot of the review checklist at decide time — it does not change the site.
-      </p>
-      <p className="text-xs text-muted-foreground">
-        {debug.action ?? "—"}
-        {debug.source ? ` · ${debug.source}` : ""}
-        {debug.actor?.username ? ` · ${debug.actor.username}` : ""}
-        {debug.review_context?.damage_class
-          ? ` · ${debug.review_context.damage_class}`
-          : ""}
-      </p>
-      <Button
+    <>
+      <button
         type="button"
-        variant="ghost"
-        size="sm"
-        className="h-auto px-0 text-xs text-primary"
-        data-testid="button-proposal-decision-debug-advanced"
-        onClick={() => setAdvanced((v) => !v)}
+        className="inline-flex shrink-0"
+        data-testid="badge-proposal-decision-debug"
+        aria-label="Open decision debugger"
+        onClick={() => setOpen(true)}
       >
-        {advanced ? "Hide advanced" : "Read more (advanced)"}
-      </Button>
-      {advanced ? (
-        <div
-          className="space-y-2 border-t pt-2 text-xs text-muted-foreground"
-          data-testid="panel-proposal-decision-debug-advanced"
+        <Badge variant="outline" className="cursor-pointer gap-1 font-normal hover-elevate">
+          <IconBug className="h-3.5 w-3.5" aria-hidden />
+          Decision Debugger
+        </Badge>
+      </button>
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          if (!next) setAdvanced(false);
+        }}
+      >
+        <DialogContent
+          className="max-w-2xl max-h-[85vh] overflow-y-auto"
+          data-testid="dialog-proposal-decision-debug"
         >
-          <p>
-            <span className="font-medium text-foreground">checklists:</span>{" "}
-            {(debug.review_context?.active_checklists ?? []).join(", ") || "—"}
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <IconBug className="h-4 w-4" aria-hidden />
+              Decision Debugger
+            </DialogTitle>
+            <DialogDescription>
+              Debug snapshot of the review checklist at decide time — it does not change the site.
+            </DialogDescription>
+          </DialogHeader>
+          <p className="text-xs text-muted-foreground">
+            {debug.action ?? "—"}
+            {debug.source ? ` · ${debug.source}` : ""}
+            {debug.actor?.username ? ` · ${debug.actor.username}` : ""}
+            {debug.review_context?.damage_class
+              ? ` · ${debug.review_context.damage_class}`
+              : ""}
           </p>
-          {think.length ? (
-            <ul className="list-disc space-y-2 pl-4">
-              {think.map((t) => (
-                <li key={t.id}>
-                  <span className="font-medium text-foreground">{t.title}</span>
-                  <ul className="mt-1 list-disc pl-4">
-                    {t.look_for.map((l) => (
-                      <li key={l}>{l}</li>
-                    ))}
-                  </ul>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          <pre className="max-h-56 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[10px] leading-4">
-            {JSON.stringify(debug, null, 2)}
-          </pre>
-        </div>
-      ) : null}
-    </div>
+          <div
+            className="space-y-2 border-t pt-2 text-xs text-muted-foreground"
+            data-testid="panel-proposal-decision-debug-advanced"
+          >
+            <p>
+              <span className="font-medium text-foreground">checklists:</span>{" "}
+              {(debug.review_context?.active_checklists ?? []).join(", ") || "—"}
+            </p>
+            {think.length ? (
+              <ul className="list-disc space-y-2 pl-4">
+                {think.map((t) => (
+                  <li key={t.id}>
+                    <span className="font-medium text-foreground">{t.title}</span>
+                    <ul className="mt-1 list-disc pl-4">
+                      {t.look_for.map((l) => (
+                        <li key={l}>{l}</li>
+                      ))}
+                    </ul>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            <pre className="max-h-80 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[10px] leading-4">
+              {JSON.stringify(debug, null, 2)}
+            </pre>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -628,6 +740,76 @@ function NoAutoRetryBadge({
             <p>New handoffs default to this block when they link an issue. Handoffs with no linked issue are not gated this way.</p>
             <p>Staff can change this without claiming. Agents must claim first, then change the flag.</p>
             <p>Closing or finishing this handoff ends the block for that issue link.</p>
+          </div>
+        ) : null}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+const IDEA_PAGE_EXPLAIN = {
+  suggested: {
+    title: "Suggested page",
+    body: "The page the person who filed this idea thinks it is about. It may not exist yet. This is only a suggestion: it does not reserve the page or stop other ideas from aiming at it.",
+    use: "Check it fits the brief before accepting. Accept pre-fills this page as the one to reserve, and you can change it there.",
+    advanced: [
+      "Stored as related_entries. The proposer can replace it (set_related_entries) while the idea is open; it is frozen once the idea is accepted.",
+      "A suggestion with no language matches every language of that page.",
+      "When a reserved page frees up, open ideas that suggest it are listed as waiting so a reviewer can accept the next one. Nothing is accepted automatically.",
+    ],
+  },
+  reserved: {
+    title: "Reserved page",
+    body: "The page and language the reviewer reserved for this idea when they accepted it. While reserved, no other idea can be accepted for it, and edit proposals for that page must be linked to this idea.",
+    use: "File the follow-up edit proposal against this exact page and language. The reservation ends once one of those edits is applied.",
+    advanced: [
+      "Stored as accepted_entry { contentType, slug, locale }. A second accept for the same page is refused (accepted_entry_taken); unlinked edit proposals are refused (implements_required).",
+      "Released when one implementing edit is applied and none are still open or partial. Rejected or withdrawn edits do not release it, and a later revert does not re-reserve it.",
+      "Accepting does not publish or write YAML; the follow-up edit does.",
+    ],
+  },
+} as const;
+
+function IdeaPageInfoButton({ kind }: { kind: keyof typeof IDEA_PAGE_EXPLAIN }) {
+  const [advanced, setAdvanced] = useState(false);
+  const explain = IDEA_PAGE_EXPLAIN[kind];
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+          data-testid={`button-idea-${kind}-page-info`}
+          aria-label={`${explain.title} — what this means`}
+        >
+          <IconInfoCircle className="h-3.5 w-3.5" aria-hidden />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        className="w-80 space-y-3 text-sm"
+        align="start"
+        data-testid={`popover-idea-${kind}-page-info`}
+      >
+        <p className="font-medium text-foreground">{explain.title}</p>
+        <p className="text-muted-foreground leading-5">{explain.body}</p>
+        <p className="text-muted-foreground leading-5">
+          <span className="font-medium text-foreground">How to use it: </span>
+          {explain.use}
+        </p>
+        <button
+          type="button"
+          className="text-xs text-primary hover:underline"
+          data-testid={`button-idea-${kind}-page-advanced`}
+          onClick={() => setAdvanced((v) => !v)}
+        >
+          {advanced ? "Hide advanced" : "Read more (advanced)"}
+        </button>
+        {advanced ? (
+          <div className="space-y-1 border-t pt-2 text-xs text-muted-foreground leading-5">
+            {explain.advanced.map((line) => (
+              <p key={line}>{line}</p>
+            ))}
           </div>
         ) : null}
       </PopoverContent>
@@ -887,7 +1069,7 @@ export function ProposalListPanel() {
           });
         }}
         trailing={
-          <EventWebhooksKpiButton onClick={() => setLocation("/private/webhooks/hooks")} />
+          <EventWebhooksKpiButton onClick={() => setLocation("/private/agents/webhooks")} />
         }
       />
       {selectionActive ? (
@@ -906,12 +1088,26 @@ export function ProposalListPanel() {
             aria-hidden
           />
           <Input
-            className="pl-9"
+            className={qInput ? "pl-9 pr-9" : "pl-9"}
             placeholder="Search by title, author, or ID"
             value={qInput}
             onChange={(e) => setQInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && qInput) setQInput("");
+            }}
             data-testid="input-proposal-search"
           />
+          {qInput ? (
+            <button
+              type="button"
+              className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={() => setQInput("")}
+              aria-label="Clear search"
+              data-testid="button-proposal-search-clear"
+            >
+              <IconX className="h-4 w-4" aria-hidden />
+            </button>
+          ) : null}
         </div>
         <Button
           type="button"
@@ -1177,11 +1373,54 @@ export function ProposalListPanel() {
   );
 }
 
-export function ProposalDetailPanel({ id }: { id: string }) {
+function PortalInto({ target, children }: { target: HTMLElement | null; children: ReactNode }) {
+  return target ? createPortal(children, target) : <>{children}</>;
+}
+
+type ProposalDetailPayload = {
+  proposal: Proposal;
+  review_context?: ReviewContextPayload | null;
+  content_type_strategies?: IdeaContentTypeStrategyPayload[];
+  deleted_refs?: string[];
+  referenced_proposals?: Record<string, ImplementsIdeaSummary>;
+  idea_retire?: {
+    retired: boolean;
+    can_retire: boolean;
+    open_edit: { id: string; title: string; status: string } | null;
+    applied_edit_id: string | null;
+  };
+};
+
+export function ProposalDetailPanel({
+  id,
+  layout = "page",
+  onClose,
+  onProposalChange,
+  onViewLive,
+  onReloadPreview,
+  previewEntry,
+  actionBarTarget,
+}: {
+  id: string;
+  /** `drawer`: compact digest for the draft preview drawer (phone-width). */
+  layout?: "page" | "drawer";
+  onClose?: () => void;
+  /** Drawer: a follow-up proposal (revert) replaces this one without leaving the preview. */
+  onProposalChange?: (id: string) => void;
+  onViewLive?: () => void;
+  /** Drawer: reload the page preview after the reviewer accepts a newer proposal version. */
+  onReloadPreview?: () => void;
+  previewEntry?: ProposalPreviewEntry;
+  /** Drawer: element pinned under the scroll area that hosts the decision buttons. */
+  actionBarTarget?: HTMLElement | null;
+}) {
+  const isDrawer = layout === "drawer";
   const { toast } = useToast();
   const qc = useQueryClient();
-  const { roles } = useDebugAuth();
+  const { roles, hasCapability } = useDebugAuth();
   const isSteward = roles.includes("platform_steward");
+  const canOverrideBlockers = hasCapability("proposals_review");
+  const [overrideReason, setOverrideReason] = useState("");
   const searchString = useSearch();
   const outcomesBack = outcomesBackHref(searchString);
   const backHref = outcomesBack ?? proposalsListHref(searchString);
@@ -1190,9 +1429,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const [confirmExperiment, setConfirmExperiment] = useState(false);
   const [confirmBaseUnknown, setConfirmBaseUnknown] = useState(false);
   const [textLimitViolations, setTextLimitViolations] = useState<TextLimitViolation[] | null>(null);
+  const [robotsEntries, setRobotsEntries] = useState<ApplyRobotsEntry[] | null>(null);
+  const [robotsChoices, setRobotsChoices] = useState<Record<string, RobotsOnPublishChoice>>({});
   const [, setDetailLocation] = useLocation();
   const [advanced, setAdvanced] = useState(false);
-  const [copiedImplementsId, setCopiedImplementsId] = useState(false);
   const [claimOpen, setClaimOpen] = useState(false);
   const [applyOpen, setApplyOpen] = useState(false);
   const [activityAck, setActivityAck] = useState(false);
@@ -1205,15 +1445,18 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const [acceptContentType, setAcceptContentType] = useState("");
   const [acceptSlug, setAcceptSlug] = useState("");
   const [acceptLocale, setAcceptLocale] = useState("");
-  const [funnelStage, setFunnelStage] = useState("awareness");
-  const [funnelProductsMode, setFunnelProductsMode] = useState<"all" | "named">("all");
-  const [funnelProductSlug, setFunnelProductSlug] = useState("");
+  const [acceptUrlSlug, setAcceptUrlSlug] = useState("");
+  const [acceptSlugAck, setAcceptSlugAck] = useState(false);
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectPending, setRejectPending] = useState(false);
   const [rejectKind, setRejectKind] = useState<ProposalRejectKindValue>("bad_idea");
   const [rejectNote, setRejectNote] = useState("");
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [withdrawNote, setWithdrawNote] = useState("");
+  const [retireOpen, setRetireOpen] = useState(false);
+  const [retireReason, setRetireReason] = useState<IdeaRetireReasonValue>("already_done");
+  const [retireNote, setRetireNote] = useState("");
+  const [retireAdvanced, setRetireAdvanced] = useState(false);
   const [escalateOpen, setEscalateOpen] = useState(false);
   const [escalateNote, setEscalateNote] = useState("");
   const [deescalateOpen, setDeescalateOpen] = useState(false);
@@ -1230,8 +1473,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
     }, 350);
   };
 
-  const { data, isLoading, error: detailError } = useQuery({
+  const { data: liveData, isLoading, error: detailError } = useQuery({
     queryKey: ["/api/admin/proposals", id],
+    refetchInterval: isDrawer ? 60_000 : false,
+    refetchOnWindowFocus: isDrawer ? "always" : undefined,
     queryFn: async () => {
       const res = await apiFetch(`/api/admin/proposals/${id}`, { headers: headers() });
       if (res.status === 410) {
@@ -1244,17 +1489,37 @@ export function ProposalDetailPanel({ id }: { id: string }) {
         });
       }
       if (!res.ok) throw new Error("Not found");
-      return res.json() as Promise<{
-        proposal: Proposal;
-        review_context?: ReviewContextPayload | null;
-        content_type_strategies?: IdeaContentTypeStrategyPayload[];
-        deleted_refs?: string[];
-      }>;
+      return res.json() as Promise<ProposalDetailPayload>;
     },
   });
+  // Drawer renders the version the reviewer opened; newer server copies only raise the stale banner.
+  const [snapshot, setSnapshot] = useState<ProposalDetailPayload | null>(null);
+  const adoptNextRef = useRef(false);
+  useEffect(() => {
+    if (!isDrawer || !liveData) return;
+    if (!snapshot || snapshot.proposal.id !== liveData.proposal.id || adoptNextRef.current) {
+      adoptNextRef.current = false;
+      setSnapshot(liveData);
+    }
+  }, [isDrawer, liveData, snapshot]);
+  const data = isDrawer ? (snapshot ?? liveData) : liveData;
+  const drawerStale = Boolean(
+    isDrawer &&
+      snapshot &&
+      liveData &&
+      liveData.proposal.id === snapshot.proposal.id &&
+      (liveData.proposal.updated_at ?? 0) !== (snapshot.proposal.updated_at ?? 0),
+  );
+  const reloadDrawer = () => {
+    if (liveData) setSnapshot(liveData);
+    onReloadPreview?.();
+  };
   const deletedInfo = (detailError as { deleted?: { by: string; at: string | null } } | null)
     ?.deleted;
   const deletedRefs = new Set(data?.deleted_refs ?? []);
+  const referencedProposals = data?.referenced_proposals ?? {};
+  const [entriesExpandedFor, setEntriesExpandedFor] = useState<string | null>(null);
+  const showAllEntries = entriesExpandedFor === id;
 
   const mut = useMutation({
     mutationFn: async (payload: { action: string; body?: Record<string, unknown> }) => {
@@ -1268,7 +1533,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
       return json;
     },
     onSuccess: (json) => {
+      adoptNextRef.current = true;
       qc.invalidateQueries({ queryKey: ["/api/admin/proposals"] });
+      qc.invalidateQueries({ queryKey: ["/api/admin/entry-activity-count"] });
+      qc.invalidateQueries({ queryKey: ["/api/versioning"] });
       toast({ title: "Updated" });
       if (json.warnings?.length) {
         toast({
@@ -1321,6 +1589,17 @@ export function ProposalDetailPanel({ id }: { id: string }) {
           "The number of pages this template change reaches has changed. Reload and confirm again.",
         text_limits_exceeded:
           "Some text is longer than this section allows. Nothing was published — review it and shorten it, or publish anyway.",
+        locale_url_slug_required:
+          "This new language needs its own web address before it goes live. Ask the author to add a slug.",
+        url_slug_required:
+          "This page already exists in another language. Fill in the web address for this language, then accept.",
+        idea_url_slug_conflict:
+          "These edits use a different web address than the idea locked. The author must use the locked address or explain why.",
+        slug_locale_mismatch:
+          "This web address looks like another language. Pick one in this language, or tick “Keep it” if it is a name.",
+        slug_already_owned_by_other_entry:
+          "Another page already uses this web address in this language. Pick a different one.",
+        invalid_locale_slug: "Web addresses use lowercase letters, numbers, and hyphens only.",
         idea_seo_target_required:
           "This new page needs an SEO target (keyword and topic hub) before it can be accepted.",
         idea_seo_target_frozen: "The SEO target locked when the idea was accepted.",
@@ -1339,6 +1618,13 @@ export function ProposalDetailPanel({ id }: { id: string }) {
         locale_seo_target_required:
           "This new language needs its own keyword and a hub in the same language before it goes live.",
         seo_index_unavailable: "The SEO index could not be read. Nothing changed — try again shortly.",
+        implements_edit_open:
+          "An edit for this idea is still open. Withdraw that edit first, then retire the idea.",
+        idea_already_implemented:
+          "An edit for this idea was already applied, so it is done — there is nothing to retire.",
+        retire_note_required: `Add a note of at least ${CLOSE_NOTE_MIN} characters.`,
+        [ROBOTS_CHANGE_ON_PUBLISH_CODE]:
+          "This draft changes whether search engines can see the page. Choose what to keep for each page, then approve again.",
       };
       const emptyPage = e.message.includes("EMPTY_PAGE") ? plainByCode.empty_page : undefined;
       toast({
@@ -1369,23 +1655,27 @@ export function ProposalDetailPanel({ id }: { id: string }) {
         );
         setApplyOpen(true);
       }
+      if (e.data?.code === ROBOTS_CHANGE_ON_PUBLISH_CODE) {
+        const entries =
+          (e.data.details as { entries?: ApplyRobotsEntry[] } | undefined)?.entries?.filter(
+            (entry) => entry.entry_id != null,
+          ) ?? [];
+        setRobotsEntries(entries);
+        setRobotsChoices((prev) => {
+          const next: Record<string, RobotsOnPublishChoice> = {};
+          for (const entry of entries) {
+            const key = String(entry.entry_id);
+            const preset = prev[key] ?? entry.agent_choice ?? null;
+            if (preset) next[key] = preset;
+          }
+          return next;
+        });
+        setApplyOpen(true);
+      }
     },
   });
   const mutRef = useRef(mut);
   mutRef.current = mut;
-
-  const pLoaded = data?.proposal;
-  useEffect(() => {
-    if (!pLoaded?.idea_funnel) return;
-    setFunnelStage(pLoaded.idea_funnel.stage);
-    if (pLoaded.idea_funnel.products === "all") {
-      setFunnelProductsMode("all");
-      setFunnelProductSlug("");
-    } else {
-      setFunnelProductsMode("named");
-      setFunnelProductSlug(pLoaded.idea_funnel.products[0]?.product ?? "");
-    }
-  }, [pLoaded?.id, pLoaded?.idea_funnel]);
 
   const clearPendingReject = () => {
     if (rejectTimerRef.current) {
@@ -1460,19 +1750,6 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const needsActivityAck = gateWriteTotal > 0;
   const claimActive =
     p?.claim && new Date(p.claim.expiresAt).getTime() > Date.now() ? p.claim : null;
-  const attribution = p
-    ? proposalAttributionLines({
-        proposerUsername: p.proposer_username,
-        proposerActor: p.proposer_actor,
-        claim: p.claim,
-        status: p.status,
-        closeReason: p.close_reason,
-        closedBy: p.closed_by,
-        reviewer: p.reviewer_action_by,
-        reviewerActor: p.reviewer_action_by_actor,
-        reviewerAt: p.reviewer_action_at,
-      })
-    : null;
   const progress = p && p.kind === "edits" ? proposalEntryProgress(p.entries ?? []) : null;
   // Resolve enabled when any staff holds claim — server enforces claimant match via session author.
   const canResolveUi = Boolean(claimActive);
@@ -1480,10 +1757,20 @@ export function ProposalDetailPanel({ id }: { id: string }) {
     p != null &&
     (p.status === "finished" || p.status === "rejected" || p.status === "withdrawn");
   const blockersOpen = (p?.open_blocker_count ?? 0) > 0;
+  const overridingBlockers = blockersOpen && canOverrideBlockers;
+  const approveBlocked = blockersOpen && !canOverrideBlockers;
+  const openBlockers = (p?.blockers ?? []).filter((b) => b.status === "open");
+  const overrideReasonOk = !overridingBlockers || blockerOverrideReasonOk(overrideReason);
+  const overrideBody = overridingBlockers
+    ? { override_blockers: true, override_reason: overrideReason.trim() }
+    : {};
   const showPrimaryEdits = Boolean(p && p.kind === "edits" && !isTerminal);
   const showPrimaryNotes = Boolean(p && p.kind === "notes" && p.status === "open");
   const showPrimaryIdeas = Boolean(p && p.kind === "idea" && p.status === "open");
   const showBlockersSection = Boolean(p && (p.kind === "edits" || p.kind === "idea"));
+  const drawerApproveInline = !isDrawer || Boolean(p && canApproveInDrawer(p, previewEntry));
+  const drawerEntry = isDrawer && previewEntry && p ? p.entries.find((e) => sameDraft(e, previewEntry)) : undefined;
+  const otherDrafts = isDrawer && p ? p.entries.filter((e) => e !== drawerEntry) : [];
   const viewerUsername = getDebugUserName().trim();
   const isProposer =
     Boolean(viewerUsername) &&
@@ -1524,6 +1811,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
     acceptLocale.trim().length > 0;
   const acceptNextStepHint =
     acceptNextStep.trim().length > 0 ? minLengthHint(acceptNextStep, ACCEPT_NEXT_STEP_MIN) : null;
+  const acceptAddress = acceptUrlSlug.trim() || acceptSlug.trim();
+  const acceptAddressCheck = acceptAddress ? assessSlugLocaleMatch(acceptAddress, acceptLocale) : null;
+  const acceptAddressHint =
+    acceptAddressCheck && !acceptAddressCheck.ok ? slugLocaleMismatchHint(acceptAddressCheck) : null;
   const blockerHint =
     blockerBody.trim().length > 0 ? minLengthHint(blockerBody, 80) : null;
   const rejectNoteOk = rejectNote.trim().length >= REJECT_NOTE_MIN;
@@ -1538,57 +1829,83 @@ export function ProposalDetailPanel({ id }: { id: string }) {
   const closeReasonLabel =
     p?.close_reason === "accepted"
       ? "Accepted"
-      : PROPOSAL_CLOSE_REASON_OPTIONS.find((o) => o.value === p?.close_reason)?.label ??
+      : closeReasonOptionLabel(p?.close_reason) ??
         (p?.status === "rejected" ? rejectKindLabel(p.close_reason) : p?.close_reason);
+  const ideaRetire = data?.idea_retire ?? null;
+  const retireNoteOk = retireNote.trim().length >= CLOSE_NOTE_MIN;
+  const retireNoteHint =
+    retireNote.trim().length > 0 ? minLengthHint(retireNote, CLOSE_NOTE_MIN) : null;
 
-  const detailMeta: Array<{ key: string; node: ReactNode }> = [];
-  if (p && attribution) {
-    for (const line of attribution.lines) {
-      detailMeta.push({ key: `attr-${line}`, node: <span>{line}</span> });
-    }
-    if (attribution.expiredLine) {
-      detailMeta.push({
-        key: "expired",
-        node: <span className="text-muted-foreground/70">{attribution.expiredLine}</span>,
-      });
-    }
-    // Terminal proposals already show the closer in the decision banner below.
-    if (attribution.reviewLine && !isTerminal) {
-      detailMeta.push({
-        key: "review",
-        node: (
-          <span title={attribution.reviewLine.title} data-testid="text-proposal-detail-review">
-            {attribution.reviewLine.text}
-          </span>
-        ),
-      });
-    }
-    if (progress) {
-      detailMeta.push({
-        key: "progress",
-        node: <ProposalProgressLabel progress={progress} className="text-xs" />,
-      });
-    }
-    detailMeta.push({
-      key: "updated",
-      node: <span>Updated {formatProposalRelativeUpdatedAt(p.updated_at ?? p.created_at)}</span>,
-    });
-    if (claimActive) {
-      detailMeta.push({
-        key: "claim",
-        node: <span>Claim holds until {new Date(claimActive.expiresAt).toLocaleString()}</span>,
-      });
-    }
-  }
+  const drawerOrder = (n: number) => (isDrawer ? { order: n } : undefined);
+  const drawerOutcome = isDrawer && p && isTerminal ? p.status : null;
 
   return (
-    <div className="space-y-5" data-testid="panel-agents-proposal-detail">
-      <Button variant="ghost" asChild className="-ml-2 h-10 gap-1.5 px-3 text-sm text-muted-foreground">
-        <Link href={backHref} data-testid="link-proposal-detail-back">
-          <IconChevronLeft className="h-5 w-5" />
-          {outcomesBack ? "All outcomes" : "All proposals"}
-        </Link>
-      </Button>
+    <div
+      className={cn("@container", isDrawer ? "flex flex-col gap-4 [&>*]:order-5" : "space-y-5")}
+      data-testid="panel-agents-proposal-detail"
+      data-layout={layout}
+    >
+      {!isDrawer ? (
+        <Button variant="ghost" asChild className="-ml-2 h-10 gap-1.5 px-3 text-sm text-muted-foreground">
+          <Link href={backHref} data-testid="link-proposal-detail-back">
+            <IconChevronLeft className="h-5 w-5" />
+            {outcomesBack ? "All outcomes" : "All proposals"}
+          </Link>
+        </Button>
+      ) : null}
+      {isDrawer && p && !isTerminal ? (
+        <div style={drawerOrder(0)} className="space-y-2" data-testid="proposal-drawer-intro">
+          <p className="text-sm leading-6 text-muted-foreground">
+            This draft is part of a proposal. Read why it was proposed, check blockers, then approve or ask for
+            changes.
+          </p>
+          {drawerStale ? (
+            <div
+              className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-status-away/40 bg-status-away/10 px-3 py-2 text-sm"
+              data-testid="banner-proposal-drawer-stale"
+            >
+              <p className="text-foreground">
+                This proposal was updated since you opened it. Reload to see the latest before approving.
+              </p>
+              <Button size="sm" variant="outline" onClick={reloadDrawer} data-testid="button-proposal-drawer-reload">
+                Reload
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {drawerOutcome ? (
+        <div
+          style={drawerOrder(0)}
+          className="space-y-3 rounded-md border border-card-border bg-muted/40 px-3 py-3 text-sm"
+          data-testid="proposal-drawer-outcome"
+        >
+          {drawerOutcome === "finished" ? (
+            <p className="flex items-start gap-2 text-foreground">
+              <IconCircleCheck className="mt-0.5 h-4 w-4 shrink-0 text-status-online" aria-hidden />
+              Published. The draft is now live.
+            </p>
+          ) : (
+            <p className="flex items-start gap-2 text-foreground">
+              <IconBan className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+              Proposal closed. This draft is no longer under review; it stays as a draft.
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {drawerOutcome === "finished" && onViewLive ? (
+              <Button size="sm" onClick={onViewLive} data-testid="button-proposal-drawer-view-live">
+                <IconExternalLink className="h-4 w-4" aria-hidden />
+                View live page
+              </Button>
+            ) : null}
+            {onClose ? (
+              <Button size="sm" variant="outline" onClick={onClose} data-testid="button-proposal-drawer-close">
+                Close
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
       {isLoading && (
         <Card className="space-y-3 p-5" data-testid="loading-proposal-detail">
           <Skeleton className="h-4 w-24" />
@@ -1614,10 +1931,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
           </div>
         </div>
       ) : null}
-      {p && mode && attribution && ui && (
+      {p && mode && ui && (
         <>
-          <Card className={cn("border-l-2", ui.accentClassName)}>
-            <div className="flex items-start gap-3 p-5">
+          <Card className={cn("border-l-2", ui.accentClassName)} style={drawerOrder(1)}>
+            <div className={cn("flex items-start gap-3", isDrawer ? "p-4" : "p-5")}>
               <span
                 className={cn(
                   "mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
@@ -1663,7 +1980,31 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     )}
                   />
                 </div>
-                <h2 className="text-xl font-semibold leading-tight tracking-tight">{p.title}</h2>
+                <h2
+                  className={cn(
+                    "font-semibold leading-tight tracking-tight",
+                    isDrawer ? "text-base" : "text-xl",
+                  )}
+                >
+                  {p.title}
+                </h2>
+                <div
+                  className="flex flex-wrap items-center gap-2"
+                  data-testid="proposal-identity-row"
+                >
+                  <ProposalCategoryTags
+                    category={p.category}
+                    kind={p.kind}
+                    tags={p.tags}
+                    testIdPrefix="proposal-detail"
+                  />
+                  <span className="inline-flex items-center gap-0.5 text-xs text-muted-foreground">
+                    <span className="font-mono" data-testid="text-proposal-short-id" title={p.id}>
+                      {shortProposalId(p.id)}
+                    </span>
+                    <McpCopyButton text={p.id} testId="button-copy-proposal-id" />
+                  </span>
+                </div>
                 {p.escalated ? (
                   <div
                     className="rounded-md border border-status-busy/30 bg-status-busy/5 px-3 py-2 text-sm text-foreground"
@@ -1717,33 +2058,35 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     reviewContext={reviewContext}
                     snapshot={p.review_context_snapshot}
                     kind={p.kind}
+                    {...(p.kind === "edits" || p.kind === "idea"
+                      ? {
+                          filedSituations:
+                            p.kind === "idea"
+                              ? filedIdeaDemand(p.review_situations)
+                              : (p.review_situations ?? []),
+                          saving: mut.isPending,
+                          onSaveSituations: (ids: string[]) =>
+                            mut.mutate({
+                              action: "set_review_situations",
+                              body: { review_situations: ids },
+                            }),
+                        }
+                      : {})}
                   />
                 ) : null}
-                {(p.kind === "edits" || p.kind === "idea") && !isTerminal ? (
-                  <ReviewSituationsEditor
-                    mode={p.kind === "idea" ? "idea" : "edits"}
-                    filedSituations={
-                      p.kind === "idea"
-                        ? (p.review_situations ?? []).filter((id) =>
-                            STAFF_IDEA_DEMAND_SITUATION_OPTIONS.some((o) => o.id === id),
-                          )
-                        : (p.review_situations ?? [])
-                    }
-                    liveSituations={reviewContext?.review_situations}
-                    situationSource={reviewContext?.situation_source}
+                {!isTerminal && (p.kind === "edits" || p.kind === "idea") ? (
+                  <ProposalEvidenceBlock
+                    evidence={reviewContext?.evidence}
                     saving={mut.isPending}
-                    onSave={(ids) =>
-                      mut.mutate({
-                        action: "set_review_situations",
-                        body: { review_situations: ids },
-                      })
+                    onDismiss={(name, reason) =>
+                      mut.mutate({ action: "evidence-dismissals", body: { name, reason } })
                     }
                   />
                 ) : null}
-                {isTerminal && p.decision_debug ? (
+                {isTerminal && !isDrawer && p.decision_debug ? (
                   <DecisionDebugPanel debug={p.decision_debug} />
                 ) : null}
-                {isTerminal ? (
+                {isTerminal && !isDrawer ? (
                   <ProposalOutcomeReview
                     proposal={p}
                     isSteward={isSteward}
@@ -1753,107 +2096,79 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     }
                   />
                 ) : null}
-                <div
-                  className="flex flex-wrap items-center gap-2"
-                  data-testid="proposal-identity-row"
-                >
-                  <ProposalCategoryTags
-                    category={p.category}
-                    tags={p.tags}
-                    testIdPrefix="proposal-detail"
+                {p.kind === "edits" && p.implements_proposal_id ? (
+                  <ImplementsIdeaCard
+                    ideaId={p.implements_proposal_id}
+                    ideaHref={`${AGENTS_PROPOSALS_BASE}/${p.implements_proposal_id}`}
+                    idea={referencedProposals[p.implements_proposal_id]}
+                    deleted={deletedRefs.has(p.implements_proposal_id)}
                   />
-                  <span className="inline-flex items-center gap-0.5 text-xs text-muted-foreground">
-                    <span className="font-mono" data-testid="text-proposal-short-id" title={p.id}>
-                      {shortProposalId(p.id)}
-                    </span>
-                    <McpCopyButton text={p.id} testId="button-copy-proposal-id" />
-                  </span>
-                </div>
-                {p.kind === "edits" && p.entries.length > 0 ? (
-                  <div
-                    className="flex flex-wrap items-center gap-1.5"
-                    data-testid="proposal-related-entries"
-                  >
-                    <span className="text-xs text-muted-foreground">Related</span>
-                    {p.entries.map((e) => {
-                      const liveKey = buildEntryKey({
-                        contentType: e.contentType,
-                        slug: e.slug,
-                        locale: e.locale,
-                      });
-                      const draftKey = e.variant
-                        ? buildEntryKey({
-                            contentType: e.contentType,
-                            slug: e.slug,
-                            locale: e.locale,
-                            variant: e.variant,
-                          })
-                        : null;
-                      const liveAct = activityByKey.get(liveKey);
-                      const draftAct = draftKey ? activityByKey.get(draftKey) : undefined;
-                      return (
-                        <span
-                          key={e.id}
-                          className="inline-flex max-w-full flex-wrap items-center gap-1"
-                        >
-                          <RelatedEntryPopover
-                            contentType={e.contentType}
-                            slug={e.slug}
-                            locale={e.locale}
-                            variant={e.variant}
+                ) : null}
+                {p.kind === "edits" && p.entries.length > 0 && !isDrawer ? (
+                  <div className="space-y-2">
+                    <div
+                      className="grid gap-2 @xl:grid-cols-2"
+                      data-testid="proposal-related-entries"
+                    >
+                      {(showAllEntries
+                        ? p.entries
+                        : p.entries.slice(0, ENTRY_CARDS_COLLAPSED_COUNT)
+                      ).map((e) => {
+                        const liveKey = buildEntryKey({
+                          contentType: e.contentType,
+                          slug: e.slug,
+                          locale: e.locale,
+                        });
+                        const draftKey = e.variant
+                          ? buildEntryKey({
+                              contentType: e.contentType,
+                              slug: e.slug,
+                              locale: e.locale,
+                              variant: e.variant,
+                            })
+                          : null;
+                        return (
+                          <ProposalEntryCard
+                            key={e.id}
+                            entry={e}
+                            liveKey={liveKey}
+                            draftKey={draftKey}
+                            liveActivity={activityByKey.get(liveKey)}
+                            draftActivity={draftKey ? activityByKey.get(draftKey) : undefined}
                             previewHref={previewHref(e)}
-                            testId={`popover-related-entry-${e.id}`}
-                          >
-                            <Badge
-                              variant="outline"
-                              className="gap-1 font-mono font-normal max-w-full truncate"
-                              data-testid={`badge-related-entry-${e.id}`}
-                            >
-                              <IconLink className="h-3 w-3 shrink-0" aria-hidden />
-                              <span className="inline-flex items-center gap-1 truncate">
-                                <span className="truncate">
-                                  {e.contentType}/{e.slug}
-                                </span>
-                                <span
-                                  className="inline-flex shrink-0 text-muted-foreground"
-                                  title={e.locale}
-                                  aria-label={e.locale}
-                                >
-                                  ·{" "}
-                                  <LocaleFlag locale={e.locale} className="w-3.5 h-2.5 rounded-sm" />
-                                </span>
-                                {e.variant ? (
-                                  <span className="text-muted-foreground"> · draft {e.variant}</span>
-                                ) : null}
-                              </span>
-                            </Badge>
-                          </RelatedEntryPopover>
-                          <EntryActivityBadge
-                            entryKey={liveKey}
-                            writeCount={liveAct?.writeCount ?? 0}
-                            windowDays={liveAct?.windowDays ?? ENTRY_ACTIVITY_WINDOW_DAYS}
-                            testIdPrefix={`proposal-activity-live-${e.id}`}
+                            windowDays={ENTRY_ACTIVITY_WINDOW_DAYS}
                           />
-                          {draftKey ? (
-                            <EntryActivityBadge
-                              entryKey={draftKey}
-                              writeCount={draftAct?.writeCount ?? 0}
-                              windowDays={draftAct?.windowDays ?? ENTRY_ACTIVITY_WINDOW_DAYS}
-                              testIdPrefix={`proposal-activity-draft-${e.id}`}
-                            />
-                          ) : null}
-                        </span>
-                      );
-                    })}
+                        );
+                      })}
+                    </div>
+                    {p.entries.length > ENTRY_CARDS_COLLAPSED_COUNT ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs text-primary"
+                        data-testid="button-show-more-entries"
+                        onClick={() => setEntriesExpandedFor(showAllEntries ? null : id)}
+                      >
+                        {showAllEntries
+                          ? "Show fewer pages"
+                          : `Show ${p.entries.length - ENTRY_CARDS_COLLAPSED_COUNT} more ${
+                              p.entries.length - ENTRY_CARDS_COLLAPSED_COUNT === 1 ? "page" : "pages"
+                            }`}
+                      </Button>
+                    ) : null}
                   </div>
                 ) : null}
-                {p.kind === "idea" && (p.related_entries?.length ?? 0) > 0 ? (
+                {p.kind === "idea" && suggestedEntriesBesidesReserved(p).length > 0 ? (
                   <div
                     className="flex flex-wrap items-center gap-1.5"
                     data-testid="proposal-idea-related-entries"
                   >
-                    <span className="text-xs text-muted-foreground">Context</span>
-                    {p.related_entries!.map((ref, i) => (
+                    <span className="inline-flex items-center gap-0.5 text-xs text-muted-foreground">
+                      {suggestedEntriesBesidesReserved(p).length > 1 ? "Suggested pages" : "Suggested page"}
+                      <IdeaPageInfoButton kind="suggested" />
+                    </span>
+                    {suggestedEntriesBesidesReserved(p).map((ref, i) => (
                       <Badge
                         key={`${ref.contentType}/${ref.slug}/${ref.locale ?? ""}-${i}`}
                         variant="outline"
@@ -1880,163 +2195,42 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     ))}
                   </div>
                 ) : null}
-                {p.kind === "idea" && (data?.content_type_strategies?.length ?? 0) > 0 ? (
-                  <IdeaPageTypeStrategy strategies={data!.content_type_strategies!} />
-                ) : null}
-                {p.kind === "idea" && p.accepted_entry ? (
-                  <div
-                    className="flex flex-wrap items-center gap-1.5"
-                    data-testid="proposal-idea-accepted-entry"
-                  >
-                    <span className="text-xs text-muted-foreground">Locked page</span>
-                    <Badge
-                      variant="secondary"
-                      className="gap-1 font-mono font-normal max-w-full truncate"
-                      data-testid="badge-idea-accepted-entry"
-                    >
-                      {p.accepted_entry.contentType}/{p.accepted_entry.slug}
-                      <span className="text-muted-foreground">· {p.accepted_entry.locale}</span>
-                    </Badge>
-                    {p.accepted_entry_create_mode === "manual" ? (
-                      <p
-                        className="basis-full text-xs text-muted-foreground"
-                        data-testid="text-idea-entry-not-creatable"
-                      >
-                        {ACCEPTED_ENTRY_NOT_CREATABLE_COPY}
-                      </p>
-                    ) : p.accepted_entry_create_mode === "page" ? (
-                      <p
-                        className="basis-full text-xs text-muted-foreground"
-                        data-testid="text-idea-entry-needs-layout"
-                      >
-                        {ACCEPTED_ENTRY_NEEDS_LAYOUT_COPY}
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
                 {p.kind === "idea" ? (
-                  <div
-                    className="space-y-2 rounded-md border border-card-border bg-muted/20 px-3 py-2.5"
-                    data-testid="proposal-idea-funnel"
-                  >
-                    <p className="text-xs text-muted-foreground">
-                      {p.status === "finished" && p.close_reason === "accepted"
-                        ? "Funnel locked at accept (read-only)."
-                        : "New page ideas need who/product/stage before greenlight. Accept will not lock a new URL without it."}
-                    </p>
-                    {p.idea_funnel ? (
-                      <Badge
-                        variant="secondary"
-                        className="font-mono font-normal"
-                        data-testid="badge-idea-funnel"
-                      >
-                        {p.idea_funnel.stage}
-                        {" · "}
-                        {p.idea_funnel.products === "all"
-                          ? "all products"
-                          : p.idea_funnel.products
-                              .map((b) => (b.persona ? `${b.product}/${b.persona}` : b.product))
-                              .join(", ")}
-                      </Badge>
-                    ) : (
-                      <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="text-idea-funnel-missing">
-                        No structured funnel yet.
-                      </p>
-                    )}
-                    {p.status === "open" ? (
-                      <div className="grid gap-2 sm:grid-cols-3">
-                        <div className="space-y-1">
-                          <Label htmlFor="idea-funnel-stage" className="text-xs">
-                            Stage
-                          </Label>
-                          <select
-                            id="idea-funnel-stage"
-                            className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
-                            value={funnelStage}
-                            onChange={(e) => {
-                              const next = e.target.value;
-                              setFunnelStage(next);
-                              if (next !== "awareness") setFunnelProductsMode("named");
-                            }}
-                            data-testid="select-idea-funnel-stage"
-                          >
-                            <option value="awareness">awareness</option>
-                            <option value="consideration">consideration</option>
-                            <option value="decision">decision</option>
-                            <option value="post-enrollment">post-enrollment</option>
-                          </select>
-                        </div>
-                        <div className="space-y-1">
-                          <Label htmlFor="idea-funnel-products-mode" className="text-xs">
-                            Products
-                          </Label>
-                          <select
-                            id="idea-funnel-products-mode"
-                            className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
-                            value={funnelProductsMode}
-                            onChange={(e) =>
-                              setFunnelProductsMode(e.target.value === "all" ? "all" : "named")
-                            }
-                            disabled={funnelStage !== "awareness"}
-                            data-testid="select-idea-funnel-products-mode"
-                          >
-                            <option value="all">all (awareness only)</option>
-                            <option value="named">named product</option>
-                          </select>
-                        </div>
-                        <div className="space-y-1">
-                          <Label htmlFor="idea-funnel-product" className="text-xs">
-                            Product slug
-                          </Label>
-                          <Input
-                            id="idea-funnel-product"
-                            value={funnelProductSlug}
-                            onChange={(e) => setFunnelProductSlug(e.target.value)}
-                            placeholder="full-stack"
-                            disabled={funnelProductsMode === "all"}
-                            data-testid="input-idea-funnel-product"
-                          />
-                        </div>
-                        <div className="sm:col-span-3">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="secondary"
-                            disabled={
-                              mut.isPending ||
-                              (funnelProductsMode === "named" && !funnelProductSlug.trim())
-                            }
-                            onClick={() => {
-                              const products =
-                                funnelProductsMode === "all"
-                                  ? "all"
-                                  : [{ product: funnelProductSlug.trim() }];
-                              mut.mutate({
-                                action: "set_idea_funnel",
-                                body: {
-                                  idea_funnel: { stage: funnelStage, products },
-                                },
-                              });
-                            }}
-                            data-testid="button-save-idea-funnel"
-                          >
-                            Save funnel
-                          </Button>
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-                {p.kind === "idea" ? (
-                  <IdeaSeoTargetPanel
-                    target={p.idea_seo_target}
-                    editable={p.status === "open"}
-                    locked={p.status === "finished" && p.close_reason === "accepted"}
-                    reviewSituations={p.review_situations}
-                    locale={p.accepted_entry?.locale ?? p.related_entries?.[0]?.locale ?? null}
-                    pending={mut.isPending}
-                    onSave={(target) =>
-                      mut.mutate({ action: "set_idea_seo_target", body: { idea_seo_target: target } })
+                  <IdeaTargetEntryCard
+                    strategies={data?.content_type_strategies ?? []}
+                    acceptedEntry={p.accepted_entry ?? null}
+                    pitchedTypes={Array.from(new Set((p.related_entries ?? []).map((r) => r.contentType)))}
+                    createModeNote={
+                      p.accepted_entry_create_mode === "manual"
+                        ? ACCEPTED_ENTRY_NOT_CREATABLE_COPY
+                        : p.accepted_entry_create_mode === "page"
+                          ? ACCEPTED_ENTRY_NEEDS_LAYOUT_COPY
+                          : null
+                    }
+                    reservedInfo={<IdeaPageInfoButton kind="reserved" />}
+                    keywordsPanel={
+                      <IdeaSeoTargetPanel
+                        embedded
+                        target={p.idea_seo_target}
+                        editable={p.status === "open"}
+                        locked={p.status === "finished" && p.close_reason === "accepted"}
+                        reviewSituations={p.review_situations}
+                        locale={p.accepted_entry?.locale ?? p.related_entries?.[0]?.locale ?? null}
+                        pending={mut.isPending}
+                        onSave={(target) =>
+                          mut.mutate({ action: "set_idea_seo_target", body: { idea_seo_target: target } })
+                        }
+                      />
+                    }
+                    keywordsMissing={
+                      !p.idea_seo_target && !(p.status === "finished" && p.close_reason === "accepted")
+                    }
+                    funnel={p.idea_funnel}
+                    funnelLocked={p.status === "finished" && p.close_reason === "accepted"}
+                    funnelEditable={p.status === "open"}
+                    funnelPending={mut.isPending}
+                    onFunnelSave={(idea_funnel) =>
+                      mut.mutate({ action: "set_idea_funnel", body: { idea_funnel } })
                     }
                   />
                 ) : null}
@@ -2049,92 +2243,49 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     Reason: {p.seo_target_override.reason}
                   </div>
                 ) : null}
-                {p.kind === "edits" && p.implements_proposal_id ? (
-                  <div
-                    className="flex flex-wrap items-center gap-1.5"
-                    data-testid="proposal-implements-idea"
-                  >
-                    <span className="text-xs text-muted-foreground">Implements idea</span>
-                    {deletedRefs.has(p.implements_proposal_id) ? (
-                      <Badge
-                        variant="outline"
-                        className="font-normal text-muted-foreground"
-                        title={p.implements_proposal_id}
-                        data-testid="badge-implements-proposal-deleted"
-                      >
-                        Deleted proposal
-                      </Badge>
-                    ) : (
-                      <>
-                        <Badge
-                          variant="outline"
-                          className="font-mono font-normal"
-                          title={p.implements_proposal_id}
-                          data-testid="badge-implements-proposal"
-                        >
-                          {p.implements_proposal_id.slice(0, 8)}…
-                        </Badge>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="h-6 w-6 text-muted-foreground"
-                          title="Copy idea id"
-                          aria-label="Copy idea id"
-                          data-testid="button-copy-implements-proposal"
-                          onClick={() => {
-                            const ideaId = p.implements_proposal_id!;
-                            void navigator.clipboard.writeText(ideaId).then(
-                              () => {
-                                setCopiedImplementsId(true);
-                                toast({ title: "Copied idea id" });
-                                setTimeout(() => setCopiedImplementsId(false), 2000);
-                              },
-                              () => toast({ title: "Copy failed", variant: "destructive" }),
-                            );
-                          }}
-                        >
-                          {copiedImplementsId ? (
-                            <IconCheck className="h-3.5 w-3.5" aria-hidden />
-                          ) : (
-                            <IconCopy className="h-3.5 w-3.5" aria-hidden />
-                          )}
-                        </Button>
-                        <Button
-                          asChild
-                          variant="ghost"
-                          size="icon"
-                          className="h-6 w-6 text-muted-foreground"
-                        >
-                          <Link
-                            href={`${AGENTS_PROPOSALS_BASE}/${p.implements_proposal_id}`}
-                            title="Open idea"
-                            aria-label="Open idea"
-                            data-testid="link-implements-proposal"
-                          >
-                            <IconExternalLink className="h-3.5 w-3.5" aria-hidden />
-                          </Link>
-                        </Button>
-                      </>
-                    )}
-                  </div>
+                {!isDrawer ? (
+                  <ProposalDetailMetaCard proposal={p} isTerminal={isTerminal} progress={progress} />
                 ) : null}
-                <ProposalMetaRow items={detailMeta} className="text-xs" />
               </div>
             </div>
             {!isTerminal ? (
-              <div className="flex flex-wrap items-center gap-2 border-t border-card-border px-5 py-3">
-                {showPrimaryEdits ? (
+              <PortalInto target={isDrawer ? actionBarTarget ?? null : null}>
+              <div
+                className={cn(
+                  "flex flex-wrap items-center gap-2",
+                  isDrawer ? "px-3 py-2.5" : "border-t border-card-border px-5 py-3",
+                )}
+                data-testid="proposal-action-bar"
+              >
+                {showPrimaryEdits && drawerApproveInline ? (
                   <Button
                     onClick={() => {
                       setActivityAck(false);
+                      setOverrideReason("");
                       setApplyOpen(true);
                     }}
-                    disabled={mut.isPending || rejectPending || blockersOpen || Boolean(p.recent_activity_error)}
+                    disabled={
+                      mut.isPending ||
+                      rejectPending ||
+                      approveBlocked ||
+                      Boolean(p.recent_activity_error) ||
+                      drawerStale
+                    }
+                    title={drawerStale ? "Reload to see the latest version before approving." : undefined}
                     data-testid="button-apply-proposal"
                   >
                     <IconCheck className="h-4 w-4" aria-hidden />
                     {primaryActionLabel}
+                  </Button>
+                ) : null}
+                {showPrimaryEdits && !drawerApproveInline ? (
+                  <Button asChild variant="secondary" data-testid="link-approve-on-full-page">
+                    <a href={`${AGENTS_PROPOSALS_BASE}/${p.id}`}>
+                      <IconExternalLink className="h-4 w-4" aria-hidden />
+                      {p.affected_entries
+                        ? `Approve on the full proposal page (changes the shared layout on ${p.affected_entries.count} page${p.affected_entries.count === 1 ? "" : "s"})`
+                        : `Approve on the full proposal page (publishes ${p.entries.length} draft${p.entries.length === 1 ? "" : "s"})`}
+                    </a>
                   </Button>
                 ) : null}
                 {showPrimaryIdeas ? (
@@ -2144,10 +2295,13 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                       setAcceptContentType(rel?.contentType ?? "");
                       setAcceptSlug(rel?.slug ?? "");
                       setAcceptLocale(rel?.locale ?? "");
+                      setAcceptUrlSlug("");
+                      setAcceptSlugAck(false);
                       setAcceptNextStep("");
+                      setOverrideReason("");
                       setAcceptOpen(true);
                     }}
-                    disabled={mut.isPending || rejectPending || blockersOpen}
+                    disabled={mut.isPending || rejectPending || approveBlocked}
                     data-testid="button-accept-idea"
                   >
                     <IconCheck className="h-4 w-4" aria-hidden />
@@ -2179,7 +2333,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     Close / park
                   </Button>
                 ) : null}
-                {claimActive ? (
+                {isDrawer ? null : claimActive ? (
                   <Button
                     variant="outline"
                     onClick={() =>
@@ -2216,7 +2370,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     Ask for changes
                   </Button>
                 ) : null}
-                {isSteward && !isTerminal && !p.escalated ? (
+                {!isDrawer && isSteward && !isTerminal && !p.escalated ? (
                   <Button
                     variant="outline"
                     className="border-status-busy/40 text-status-busy"
@@ -2230,7 +2384,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     Escalate
                   </Button>
                 ) : null}
-                {isSteward && p.escalated ? (
+                {!isDrawer && isSteward && p.escalated ? (
                   <Button
                     variant="outline"
                     onClick={() => setDeescalateOpen(true)}
@@ -2262,7 +2416,12 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     Withdraw
                   </Button>
                 ) : null}
-                {blockersOpen && showReject ? (
+                {overridingBlockers && (showPrimaryEdits || showPrimaryIdeas) ? (
+                  <span className="text-xs text-muted-foreground" data-testid="text-override-blockers-hint">
+                    {p.open_blocker_count} needs-changes item{p.open_blocker_count === 1 ? " is" : "s are"}{" "}
+                    open. You can still {p.kind === "idea" ? "accept" : "approve"}; you&apos;ll be asked why.
+                  </span>
+                ) : blockersOpen && showReject ? (
                   <span className="text-xs text-muted-foreground">
                     {p.kind === "idea" ? "Accept" : "Approve"} is disabled while needs-changes items
                     are open. Reject Completely remains available.
@@ -2274,6 +2433,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                   </span>
                 ) : null}
               </div>
+              </PortalInto>
             ) : null}
           </Card>
 
@@ -2347,10 +2507,76 @@ export function ProposalDetailPanel({ id }: { id: string }) {
             >
               <IconCircleCheck className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
               <p>
-                {p.close_reason === "accepted" ? "Accepted" : `Closed as ${closeReasonLabel}`}
+                {p.close_reason === "accepted"
+                  ? "Accepted"
+                  : isIdeaRetireReason(p.close_reason)
+                    ? `Retired as ${closeReasonLabel}`
+                    : `Closed as ${closeReasonLabel}`}
                 {p.closed_by ? ` by ${p.closed_by}` : ""}
                 {p.close_note ? `: ${p.close_note}` : ""}
               </p>
+            </div>
+          ) : null}
+
+          {ideaRetire && !ideaRetire.retired && !ideaRetire.applied_edit_id ? (
+            <div
+              className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-card-border bg-muted/40 px-3 py-2.5 text-sm"
+              data-testid="panel-idea-retire"
+            >
+              <p className="min-w-0 flex-1 text-muted-foreground">
+                {ideaRetire.open_edit ? (
+                  <>
+                    An edit for this idea is still open (
+                    <Link
+                      href={`${AGENTS_PROPOSALS_BASE}/${ideaRetire.open_edit.id}`}
+                      onClick={(e) => {
+                        if (!isDrawer || !onProposalChange || !ideaRetire.open_edit) return;
+                        e.preventDefault();
+                        onProposalChange(ideaRetire.open_edit.id);
+                      }}
+                      className="text-primary underline-offset-2 hover:underline"
+                      data-testid="link-idea-retire-open-edit"
+                    >
+                      {ideaRetire.open_edit.title}
+                    </Link>
+                    ). Withdraw it first if this idea is no longer needed.
+                  </>
+                ) : (
+                  "No longer needed? Retiring takes this idea off the stalled list and frees its page for other ideas."
+                )}
+              </p>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={mut.isPending || !ideaRetire.can_retire}
+                onClick={() => setRetireOpen(true)}
+                data-testid="button-retire-idea"
+              >
+                Retire idea
+              </Button>
+            </div>
+          ) : null}
+
+          {ideaRetire?.retired ? (
+            <div
+              className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-card-border bg-muted/40 px-3 py-2.5 text-sm"
+              data-testid="panel-idea-unretire"
+            >
+              <p className="min-w-0 flex-1 text-muted-foreground">
+                Retired by mistake? Restoring puts this idea back to accepted, as long as no other idea
+                has taken its page.
+              </p>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={mut.isPending}
+                onClick={() => mut.mutate({ action: "unretire" })}
+                data-testid="button-unretire-idea"
+              >
+                Restore to accepted
+              </Button>
             </div>
           ) : null}
 
@@ -2376,9 +2602,9 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                     { action: "revert" },
                     {
                       onSuccess: (json: { proposal?: { id?: string } }) => {
-                        if (json.proposal?.id) {
-                          setDetailLocation(`${AGENTS_PROPOSALS_BASE}/${json.proposal.id}`);
-                        }
+                        if (!json.proposal?.id) return;
+                        if (isDrawer && onProposalChange) onProposalChange(json.proposal.id);
+                        else setDetailLocation(`${AGENTS_PROPOSALS_BASE}/${json.proposal.id}`);
                       },
                     },
                   )
@@ -2387,6 +2613,46 @@ export function ProposalDetailPanel({ id }: { id: string }) {
               >
                 Revert
               </Button>
+            </div>
+          ) : null}
+
+          {p.applies_after_proposal_id || p.applied_before_proposal_ids?.length ? (
+            <div
+              className="space-y-1.5 rounded-md border border-card-border bg-muted/40 px-3 py-2.5 text-sm"
+              data-testid="panel-proposal-chain"
+            >
+              {p.applies_after_proposal_id ? (
+                <p>
+                  Publishes after{" "}
+                  <Link
+                    href={`${AGENTS_PROPOSALS_BASE}/${p.applies_after_proposal_id}`}
+                    className="text-primary underline-offset-2 hover:underline"
+                    data-testid="link-applies-after-proposal"
+                  >
+                    proposal {p.applies_after_proposal_id.slice(0, 8)}
+                  </Link>
+                  . It cannot be approved until that one is fully live.
+                </p>
+              ) : null}
+              {p.applied_before_proposal_ids?.length ? (
+                <p>
+                  {p.applied_before_proposal_ids.length === 1 ? "1 proposal waits" : `${p.applied_before_proposal_ids.length} proposals wait`}{" "}
+                  on this one:{" "}
+                  {p.applied_before_proposal_ids.map((depId, i) => (
+                    <span key={depId}>
+                      {i > 0 ? ", " : ""}
+                      <Link
+                        href={`${AGENTS_PROPOSALS_BASE}/${depId}`}
+                        className="text-primary underline-offset-2 hover:underline"
+                        data-testid={`link-applied-before-proposal-${depId}`}
+                      >
+                        {depId.slice(0, 8)}
+                      </Link>
+                    </span>
+                  ))}
+                  . Approving this one does not approve them — approve them right after it is live.
+                </p>
+              ) : null}
             </div>
           ) : null}
 
@@ -2439,6 +2705,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
           ) : null}
 
           {!isTerminal &&
+          !isDrawer &&
           (p.kind === "notes" ||
             p.kind === "idea" ||
             p.review_mode === "draft_backed" ||
@@ -2483,16 +2750,30 @@ export function ProposalDetailPanel({ id }: { id: string }) {
           </div>
           ) : null}
 
-          <Card className="p-5 space-y-2">
+          <Card className={cn("space-y-2", isDrawer ? "p-4" : "p-5")} style={drawerOrder(2)}>
             <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              {p.kind === "notes" ? "Handoff note" : p.kind === "idea" ? "Idea brief" : "Summary"}
+              {isDrawer
+                ? "What and why"
+                : p.kind === "notes"
+                  ? "Handoff note"
+                  : p.kind === "idea"
+                    ? "Idea brief"
+                    : "Summary"}
             </h3>
             {p.kind === "edits" ? (
               <p className="text-xs leading-5 text-muted-foreground">
                 Intent and why — exact field values are in Proposed changes below.
               </p>
             ) : null}
-            <p className="whitespace-pre-wrap text-sm leading-6">{p.summary}</p>
+            <ProposalMarkdown text={p.summary} className="text-sm" />
+            {p.rationale?.trim() ? (
+              <div className="space-y-1 border-t border-card-border pt-3" data-testid="proposal-rationale">
+                <h4 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  {p.kind === "idea" ? "Evidence and sources" : "Why"}
+                </h4>
+                <ProposalMarkdown text={p.rationale.trim()} className="text-sm text-muted-foreground" />
+              </div>
+            ) : null}
             {p.related_issue_ids.length > 0 ? (
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
                 <span className="text-xs text-muted-foreground">Linked issues</span>
@@ -2525,10 +2806,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
             }}
           />
 
-          {p.kind === "edits" && p.entries.length > 0 && (
-            <div className="space-y-3">
+          {p.kind === "edits" && p.entries.length > 0 && (!isDrawer || drawerEntry || p.affected_entries) && (
+            <div className="space-y-3" style={drawerOrder(3)}>
               <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Proposed changes ({p.entries.length})
+                {isDrawer ? "What this draft changes" : `Proposed changes (${p.entries.length})`}
               </h3>
               {p.affected_entries ? (
                 <div
@@ -2560,10 +2841,10 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                   ) : null}
                 </div>
               ) : null}
-              {p.entries.map((e) => {
+              {(isDrawer ? (drawerEntry ? [drawerEntry] : []) : p.entries).map((e) => {
                 const href = previewHref(e);
                 return (
-                  <Card key={e.id}>
+                  <Card key={e.id} id={proposalEntryBlockId(e.id)} className="scroll-mt-4">
                     <div className="flex flex-wrap items-start justify-between gap-3 border-b border-card-border px-4 py-3">
                       <div className="min-w-0">
                         <p className="flex items-center gap-1.5 truncate text-sm font-medium">
@@ -2649,7 +2930,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                         >
                           {e.status}
                         </span>
-                        {href && (
+                        {href && !isDrawer && (
                           <Button variant="outline" size="sm" asChild>
                             <a href={href} target="_blank" rel="noreferrer">
                               <IconExternalLink className="h-3.5 w-3.5 mr-1.5" />
@@ -2691,7 +2972,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
           )}
 
           {showBlockersSection ? (
-            <Card>
+            <Card style={drawerOrder(4)}>
               <div className="flex items-center justify-between gap-2 border-b border-card-border px-4 py-3">
                 <h3 className="text-sm font-medium">Needs changes</h3>
                 {blockersOpen ? (
@@ -2736,17 +3017,49 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                         ·
                       </span>
                       <span>{formatProposalRelativeUpdatedAt(b.created_at)}</span>
+                      {!b.staff_summary?.trim() ? (
+                        <>
+                          <span aria-hidden className="text-muted-foreground/40">
+                            ·
+                          </span>
+                          <span data-testid={`text-blocker-agent-only-${b.id}`}>Written for agents</span>
+                        </>
+                      ) : null}
                     </div>
-                    <p className="whitespace-pre-wrap leading-6">{b.body}</p>
+                    {b.staff_summary?.trim() ? (
+                      <>
+                        <ProposalMarkdown text={b.staff_summary} />
+                        {b.body.trim() !== b.staff_summary.trim() ? (
+                          <Collapsible>
+                            <CollapsibleTrigger
+                              className="group inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
+                              data-testid={`button-blocker-technical-${b.id}`}
+                            >
+                              <IconChevronDown
+                                aria-hidden
+                                className="h-3 w-3 -rotate-90 transition-transform group-data-[state=open]:rotate-0"
+                              />
+                              Technical details (for the agent)
+                            </CollapsibleTrigger>
+                            <CollapsibleContent className="mt-2 rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                              <ProposalMarkdown text={b.body} />
+                            </CollapsibleContent>
+                          </Collapsible>
+                        ) : null}
+                      </>
+                    ) : (
+                      <ProposalMarkdown text={b.body} />
+                    )}
                     {b.resolved_by ? (
                       <p className="text-xs text-muted-foreground">
                         Resolved by {formatIssueActorLine(b.resolved_by, asIssueActor(b.resolved_by_actor))}
                       </p>
                     ) : null}
                     {b.resolve_note ? (
-                      <p className="rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
-                        {b.resolve_note}
-                      </p>
+                      <ProposalMarkdown
+                        text={b.resolve_note}
+                        className="rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground"
+                      />
                     ) : null}
                     {b.status === "open" && canResolveUi && (
                       <div className="space-y-2 pt-1">
@@ -2794,12 +3107,12 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                   className="space-y-2 border-t border-card-border pt-3"
                 >
                   <p className="text-xs text-muted-foreground">
-                    Add needs-change note: what’s wrong, what fixed looks like, and why (min 80
-                    characters). No tool lists.
+                    Say what’s wrong and what needs to change before this can be approved. Write it so a
+                    teammate who hasn’t seen the code understands it (min 80 characters).
                   </p>
                   <Textarea
                     ref={addBlockerInputRef}
-                    placeholder="On draft …, X is wrong. It must be Y because …"
+                    placeholder={"The idea works, but the draft has one problem.\n\n1. On draft …, X is wrong. It must be Y because …"}
                     value={blockerBody}
                     onChange={(e) => setBlockerBody(e.target.value)}
                     data-testid="input-add-blocker"
@@ -2829,13 +3142,55 @@ export function ProposalDetailPanel({ id }: { id: string }) {
             </Card>
           ) : null}
 
-          <Collapsible open={advanced} onOpenChange={setAdvanced}>
+          {isDrawer && otherDrafts.length > 0 ? (
+            <div className="space-y-2" style={drawerOrder(6)} data-testid="proposal-drawer-other-drafts">
+              <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Other drafts in this proposal ({otherDrafts.length})
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                Approving publishes these together with the draft on screen.
+              </p>
+              <ul className="space-y-1 text-sm">
+                {otherDrafts.map((e) => (
+                  <li key={e.id} className="flex items-center gap-1.5 min-w-0">
+                    <LocaleFlag locale={e.locale} className="w-3.5 h-2.5 shrink-0 rounded-sm" />
+                    {e.variant ? (
+                      <a
+                        href={proposalDraftPreviewHref({ ...e, variant: e.variant }, p.id)}
+                        className="truncate text-primary hover:underline"
+                        data-testid={`link-proposal-drawer-other-draft-${e.id}`}
+                      >
+                        {e.contentType}/{e.slug} · {e.variant}
+                      </a>
+                    ) : (
+                      <span className="truncate text-muted-foreground">
+                        {e.contentType}/{e.slug} (live page edit)
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          <Collapsible open={advanced} onOpenChange={setAdvanced} style={drawerOrder(7)}>
             <CollapsibleTrigger asChild>
               <Button variant="ghost" size="sm" className="h-auto px-0 text-xs text-muted-foreground">
                 {advanced ? "Hide advanced" : "Read more (advanced)"}
               </Button>
             </CollapsibleTrigger>
             <CollapsibleContent className="text-xs text-muted-foreground space-y-1">
+              {isDrawer ? (
+                <div className="space-y-2 pb-2 text-sm">
+                  <ProposalDetailMetaCard proposal={p} isTerminal={isTerminal} progress={progress} />
+                  {mode ? (
+                    <p className="text-xs">
+                      Review mode: <span className="font-medium text-foreground">{mode.label}</span>
+                      {previewEntry ? ` · draft file ${previewEntry.variant}.${previewEntry.locale}.yml` : ""}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
               <p>Promote copies the draft over live for one locale; SEO cluster on live is preserved when promoting over an existing live file.</p>
               <p>Ending an experiment deletes other traffic-bearing variants after confirm. Claim TTL is 30 minutes; only the claimant resolves blockers.</p>
               <p>Variant attachment is write-once in the creating agent session.</p>
@@ -2885,6 +3240,34 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                             footer="Ask the author to shorten it, or publish anyway."
                           />
                         ) : null}
+                        {robotsEntries?.length ? (
+                          <div className="space-y-2" data-testid="apply-robots-on-publish">
+                            {robotsEntries.map((entry) => {
+                              const key = String(entry.entry_id);
+                              return (
+                                <div key={key} className="space-y-1">
+                                  {robotsEntries.length > 1 ? (
+                                    <p className="font-mono text-xs text-foreground">{entry.entry_key}</p>
+                                  ) : null}
+                                  <RobotsOnPublishChoiceField
+                                    rows={[
+                                      {
+                                        locale: entry.locale,
+                                        live_robots: entry.live_robots ?? "index, follow",
+                                        draft_robots: entry.draft_robots ?? "index, follow",
+                                      },
+                                    ]}
+                                    value={robotsChoices[key] ?? null}
+                                    agentChoice={entry.agent_choice ?? null}
+                                    onChange={(v) => setRobotsChoices((c) => ({ ...c, [key]: v }))}
+                                    name={`apply-robots-${key}`}
+                                    testIdPrefix={`apply-robots-${key}`}
+                                  />
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : null}
                         {confirmExperiment ? (
                           <p className="text-destructive">
                             Other versions still have traffic. Confirming will remove those
@@ -2914,6 +3297,15 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                         </p>
                       </>
                     )}
+                    {overridingBlockers ? (
+                      <BlockerOverrideField
+                        blockers={openBlockers}
+                        reason={overrideReason}
+                        onReasonChange={setOverrideReason}
+                        verb="approve"
+                        testIdPrefix="apply"
+                      />
+                    ) : null}
                     {p.affected_entries ? (
                       <label
                         className="flex items-start gap-2 rounded-md border border-card-border bg-muted/40 p-3 text-sm text-foreground cursor-pointer"
@@ -2932,6 +3324,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                       </label>
                     ) : null}
                     {p.affected_entries && applyOpen ? <TemplatePlaceholderNotice proposalId={p.id} /> : null}
+                    {applyOpen ? <ApplyDisplayChangeNotice proposalId={p.id} /> : null}
                     {needsActivityAck ? (
                       <div
                         className="space-y-2 rounded-md border border-card-border bg-muted/40 p-3"
@@ -2964,18 +3357,21 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                   type="button"
                   disabled={
                     mut.isPending ||
-                    blockersOpen ||
+                    approveBlocked ||
+                    !overrideReasonOk ||
                     Boolean(p.recent_activity_error) ||
                     (needsActivityAck && !activityAck) ||
-                    (Boolean(p.affected_entries) && !affectedAck)
+                    (Boolean(p.affected_entries) && !affectedAck) ||
+                    Boolean(robotsEntries?.some((entry) => !robotsChoices[String(entry.entry_id)]))
                   }
                   onClick={() => {
-                    const body: Record<string, unknown> = {};
+                    const body: Record<string, unknown> = { ...overrideBody };
                     if (confirmExperiment) body.confirm_end_experiment = true;
                     if (needsActivityAck) body.confirm_recent_activity = true;
                     if (confirmBaseUnknown) body.confirm_base_unknown = true;
                     if (textLimitViolations) body.confirm_text_limits = true;
                     if (p.affected_entries) body.confirm_affected_entries = p.affected_entries.count;
+                    if (Object.keys(robotsChoices).length) body.robots_on_publish_by_entry = robotsChoices;
                     mut.mutate(
                       {
                         action: "apply",
@@ -2987,6 +3383,9 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                           setActivityAck(false);
                           setConfirmBaseUnknown(false);
                           setTextLimitViolations(null);
+                          setRobotsEntries(null);
+                          setRobotsChoices({});
+                          setOverrideReason("");
                         },
                       },
                     );
@@ -2994,7 +3393,11 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                   data-testid="button-confirm-apply-proposal"
                 >
                   <IconCheck className="h-4 w-4" aria-hidden />
-                  {textLimitViolations ? "Publish anyway" : primaryActionLabel}
+                  {textLimitViolations
+                    ? "Publish anyway"
+                    : overridingBlockers
+                      ? "Approve anyway"
+                      : primaryActionLabel}
                 </Button>
               </AlertDialogFooter>
             </AlertDialogContent>
@@ -3203,6 +3606,107 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                   data-testid="button-confirm-withdraw-proposal"
                 >
                   Withdraw
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog
+            open={retireOpen}
+            onOpenChange={(open) => {
+              setRetireOpen(open);
+              if (!open) {
+                setRetireNote("");
+                setRetireAdvanced(false);
+              }
+            }}
+          >
+            <DialogContent data-testid="dialog-retire-idea">
+              <DialogHeader>
+                <DialogTitle>Retire this idea?</DialogTitle>
+                <DialogDescription>
+                  This idea was accepted but no longer needs doing. Retiring it takes it off the stalled
+                  list and frees its page for other ideas. Nothing on the live site changes.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3">
+                <ToggleButtonBar
+                  value={retireReason}
+                  onValueChange={(v) => v && setRetireReason(v as IdeaRetireReasonValue)}
+                  listTestId="toggle-retire-reason"
+                >
+                  {IDEA_RETIRE_REASON_OPTIONS.map((o) => (
+                    <ToggleButtonBarTrigger key={o.value} value={o.value} data-testid={`toggle-retire-${o.value}`}>
+                      {o.label}
+                    </ToggleButtonBarTrigger>
+                  ))}
+                </ToggleButtonBar>
+                <div className="space-y-1">
+                  <Label htmlFor="proposal-retire-note">Note (min {CLOSE_NOTE_MIN})</Label>
+                  <Textarea
+                    id="proposal-retire-note"
+                    value={retireNote}
+                    onChange={(e) => setRetireNote(e.target.value)}
+                    rows={3}
+                    placeholder={IDEA_RETIRE_REASON_OPTIONS.find((o) => o.value === retireReason)?.hint}
+                    data-testid="input-retire-note"
+                  />
+                  {retireNoteHint ? (
+                    <p className={retireNoteHint.className} data-testid="text-retire-note-length-hint">
+                      {retireNoteHint.text}
+                    </p>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+                  onClick={() => setRetireAdvanced((v) => !v)}
+                  data-testid="button-retire-advanced"
+                >
+                  {retireAdvanced ? "Hide advanced" : "Read more (advanced)"}
+                </button>
+                {retireAdvanced ? (
+                  <ul className="list-disc space-y-1 pl-5 text-xs text-muted-foreground">
+                    <li>
+                      Stored as <code>close_reason</code> <code>{retireReason}</code>; status stays finished. The
+                      reserved page (<code>accepted_entry</code>) stays on record but no longer blocks other ideas.
+                    </li>
+                    <li>
+                      The original accept note is kept. <strong>Restore to accepted</strong> brings it back, unless
+                      another idea has taken the page since.
+                    </li>
+                    <li>
+                      Refused while an edit for this idea is still open, or once one was applied. Same four-eyes
+                      rule as accept: the agent role that proposed the idea cannot retire it.
+                    </li>
+                    <li>Left out of the outcome review queue. Agents filing a similar idea see this note.</li>
+                  </ul>
+                ) : null}
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setRetireOpen(false)}
+                  data-testid="button-cancel-retire-idea"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  disabled={mut.isPending || !retireNoteOk}
+                  onClick={() => {
+                    mut.mutate(
+                      {
+                        action: "retire",
+                        body: { retire_reason: retireReason, close_note: retireNote.trim() },
+                      },
+                      { onSuccess: () => setRetireOpen(false) },
+                    );
+                  }}
+                  data-testid="button-confirm-retire-idea"
+                >
+                  Retire idea
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -3428,6 +3932,8 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 setAcceptContentType("");
                 setAcceptSlug("");
                 setAcceptLocale("");
+                setAcceptUrlSlug("");
+                setAcceptSlugAck(false);
               }
             }}
           >
@@ -3437,8 +3943,12 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 <DialogDescription asChild>
                   <div className="space-y-2 text-sm text-muted-foreground">
                     <p>
-                      You’re greenlighting this brief and locking the page (and locale) this work
+                      You’re greenlighting this brief and reserving the page (and locale) this work
                       will use. Accepting finishes the idea — it does not publish or write YAML.
+                    </p>
+                    <p>
+                      You also pick the web address this language will use. If this page already exists
+                      in another language, it needs its own address word.
                     </p>
                     <p>Open needs-change notes must be cleared first.</p>
                   </div>
@@ -3477,6 +3987,52 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                 </div>
               </div>
               <div className="space-y-1">
+                <Label htmlFor="proposal-accept-url-slug">Web address for this language</Label>
+                <Input
+                  id="proposal-accept-url-slug"
+                  value={acceptUrlSlug}
+                  onChange={(e) => {
+                    setAcceptUrlSlug(e.target.value);
+                    setAcceptSlugAck(false);
+                  }}
+                  placeholder={acceptSlug.trim() || "que-es-grok"}
+                  data-testid="input-accept-url-slug"
+                />
+                <p className="text-xs text-muted-foreground">
+                  The last part of this language&apos;s URL. Required when the page already exists in
+                  another language, so it gets its own address word. Leave empty for a brand-new page to
+                  use the slug above.
+                </p>
+                {acceptAddressHint ? (
+                  <div className="space-y-1" data-testid="text-accept-url-slug-hint">
+                    <p className="text-xs text-status-away">{acceptAddressHint}</p>
+                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Checkbox
+                        checked={acceptSlugAck}
+                        onCheckedChange={(v) => setAcceptSlugAck(v === true)}
+                        data-testid="checkbox-accept-slug-ack"
+                      />
+                      Keep it, it&apos;s a name that works in every language
+                    </label>
+                  </div>
+                ) : null}
+                <Collapsible>
+                  <CollapsibleTrigger className="text-xs text-muted-foreground underline-offset-2 hover:underline">
+                    Read more (advanced)
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="mt-1 text-xs text-muted-foreground space-y-1">
+                    <p>
+                      Stored as <code>accepted_entry.url_slug</code>. The follow-up edit&apos;s draft is
+                      seeded with it as <code>slug:</code> in <code>{"{locale}"}.yml</code>.
+                    </p>
+                    <p>
+                      Slug stays the folder name, the page&apos;s ID in every language. A different
+                      address later needs a written reason on the edit.
+                    </p>
+                  </CollapsibleContent>
+                </Collapsible>
+              </div>
+              <div className="space-y-1">
                 <Label htmlFor="proposal-accept-next-step">Next step</Label>
                 <Textarea
                   id="proposal-accept-next-step"
@@ -3491,23 +4047,42 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                   </p>
                 ) : null}
               </div>
+              {overridingBlockers ? (
+                <BlockerOverrideField
+                  blockers={openBlockers}
+                  reason={overrideReason}
+                  onReasonChange={setOverrideReason}
+                  verb="accept"
+                  testIdPrefix="accept"
+                />
+              ) : null}
               <DialogFooter>
                 <Button type="button" variant="ghost" onClick={() => setAcceptOpen(false)}>
                   Cancel
                 </Button>
                 <Button
                   type="button"
-                  disabled={mut.isPending || blockersOpen || !acceptNextStepOk || !acceptEntryOk}
+                  disabled={
+                    mut.isPending ||
+                    approveBlocked ||
+                    !overrideReasonOk ||
+                    !acceptNextStepOk ||
+                    !acceptEntryOk ||
+                    (acceptAddressHint !== null && !acceptSlugAck)
+                  }
                   onClick={() => {
                     mut.mutate(
                       {
                         action: "accept",
                         body: {
+                          ...overrideBody,
                           next_step: acceptNextStep.trim(),
                           accepted_entry: {
                             contentType: acceptContentType.trim(),
                             slug: acceptSlug.trim(),
                             locale: acceptLocale.trim(),
+                            ...(acceptUrlSlug.trim() ? { url_slug: acceptUrlSlug.trim() } : {}),
+                            ...(acceptSlugAck ? { slug_language_ack: true } : {}),
                           },
                         },
                       },
@@ -3518,6 +4093,9 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                           setAcceptContentType("");
                           setAcceptSlug("");
                           setAcceptLocale("");
+                          setAcceptUrlSlug("");
+                          setAcceptSlugAck(false);
+                          setOverrideReason("");
                         },
                       },
                     );
@@ -3525,7 +4103,7 @@ export function ProposalDetailPanel({ id }: { id: string }) {
                   data-testid="button-confirm-accept-idea"
                 >
                   <IconCheck className="h-4 w-4" aria-hidden />
-                  Accept idea
+                  {overridingBlockers ? "Accept anyway" : "Accept idea"}
                 </Button>
               </DialogFooter>
             </DialogContent>

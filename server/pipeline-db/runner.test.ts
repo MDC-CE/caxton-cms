@@ -1183,6 +1183,127 @@ describe("pipeline-db runner", () => {
     rmSite(site);
   });
 
+  it("adds applies_after_proposal_id + index and dependent_overdue_flagged_at when upgrading from v36", () => {
+    const site = `${TEST_PREFIX}-v36-applies-after-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 36);
+      CREATE TABLE content_proposals (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        supersedes_proposal_id TEXT,
+        blocked_flagged_at TEXT
+      );
+      INSERT INTO content_proposals (id, site, status, updated_at) VALUES ('p-1', 'site_test', 'open', 1);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const row = db
+      .prepare(
+        `SELECT status, applies_after_proposal_id, dependent_overdue_flagged_at FROM content_proposals WHERE id = 'p-1'`,
+      )
+      .get() as Record<string, unknown>;
+    expect(row.status).toBe("open");
+    expect(row.applies_after_proposal_id).toBeNull();
+    expect(row.dependent_overdue_flagged_at).toBeNull();
+    const idx = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_content_proposals_applies_after'`)
+      .get();
+    expect(idx).toBeTruthy();
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds url_slug_override_json when upgrading from v38", () => {
+    const site = `${TEST_PREFIX}-v38-url-slug-override-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 38);
+      CREATE TABLE content_proposals (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        seo_target_override_json TEXT,
+        applies_after_proposal_id TEXT,
+        dependent_overdue_flagged_at TEXT
+      );
+      INSERT INTO content_proposals (id, site, status, updated_at) VALUES ('p-1', 'site_test', 'open', 1);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const row = db
+      .prepare(`SELECT status, url_slug_override_json FROM content_proposals WHERE id = 'p-1'`)
+      .get() as Record<string, unknown>;
+    expect(row.status).toBe("open");
+    expect(row.url_slug_override_json).toBeNull();
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds content_proposal_blockers.staff_summary when upgrading from v39", () => {
+    const site = `${TEST_PREFIX}-v39-blocker-staff-summary-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 39);
+      CREATE TABLE content_proposal_blockers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proposal_id TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'blocker',
+        body TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        author TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER,
+        resolved_by TEXT,
+        resolve_note TEXT,
+        agent_session_id TEXT,
+        author_actor_json TEXT,
+        resolved_by_actor_json TEXT
+      );
+      INSERT INTO content_proposal_blockers (proposal_id, body, author, created_at)
+        VALUES ('p-1', 'old technical blocker', 'agent', 1);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const row = db
+      .prepare(`SELECT body, staff_summary FROM content_proposal_blockers WHERE proposal_id = 'p-1'`)
+      .get() as Record<string, unknown>;
+    expect(row.body).toBe("old technical blocker");
+    expect(row.staff_summary).toBeNull();
+    db.close();
+    rmSite(site);
+  });
+
   it("adds data_migration_runs when upgrading from v31-shaped DB", () => {
     const site = `${TEST_PREFIX}-v31-data-migration-runs-${Date.now()}`;
     rmSite(site);
@@ -1302,6 +1423,80 @@ describe("pipeline-db runner", () => {
       const idx = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`).get(name);
       expect(idx).toBeTruthy();
     }
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds product and persona columns to lead_submissions when upgrading from v40", () => {
+    const site = `${TEST_PREFIX}-v40-lead-persona-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 40);
+      CREATE TABLE lead_submissions (
+        submission_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        conversion_path TEXT,
+        product_id TEXT,
+        product_slug TEXT,
+        is_test INTEGER NOT NULL DEFAULT 0,
+        is_repeat INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO lead_submissions (submission_id, created_at, conversion_path, product_slug)
+      VALUES ('s-1', 1, '/en/x', 'ai-engineering');
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const row = db.prepare(`SELECT * FROM lead_submissions WHERE submission_id = 's-1'`).get() as Record<string, unknown>;
+    expect(row.product_slug).toBe("ai-engineering");
+    expect(row).toHaveProperty("product", null);
+    expect(row).toHaveProperty("persona", null);
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds the product_persona column to lead_submissions when upgrading from v41", () => {
+    const site = `${TEST_PREFIX}-v41-lead-pairs-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 41);
+      CREATE TABLE lead_submissions (
+        submission_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        conversion_path TEXT,
+        product_id TEXT,
+        product_slug TEXT,
+        product TEXT,
+        persona TEXT,
+        is_test INTEGER NOT NULL DEFAULT 0,
+        is_repeat INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO lead_submissions (submission_id, created_at, product, persona)
+      VALUES ('s-1', 1, 'ai-engineering,ai-flex', 'the-developer');
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const row = db.prepare(`SELECT * FROM lead_submissions WHERE submission_id = 's-1'`).get() as Record<string, unknown>;
+    expect(row.product).toBe("ai-engineering,ai-flex");
+    expect(row.persona).toBe("the-developer");
+    expect(row).toHaveProperty("product_persona", null);
     db.close();
     rmSite(site);
   });
@@ -1828,6 +2023,166 @@ describe("pipeline-db runner", () => {
       fs.rmSync(workDir, { recursive: true, force: true });
       rmSite(site);
     }
+  });
+
+  it("adds evidence_dismissals_json and evidence_check_json when upgrading from v42", () => {
+    const site = `${TEST_PREFIX}-v42-evidence-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 42);
+      CREATE TABLE content_proposals (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        site_facts_check_json TEXT
+      );
+      INSERT INTO content_proposals (id, site, status, updated_at) VALUES ('p-1', 'site_test', 'open', 1);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const row = db
+      .prepare(`SELECT status, evidence_dismissals_json, evidence_check_json FROM content_proposals WHERE id = 'p-1'`)
+      .get() as Record<string, unknown>;
+    expect(row.status).toBe("open");
+    expect(row.evidence_dismissals_json).toBe("[]");
+    expect(row.evidence_check_json).toBeNull();
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds accept_snapshot_json when upgrading from v43", () => {
+    const site = `${TEST_PREFIX}-v43-accept-snapshot-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 43);
+      CREATE TABLE content_proposals (
+        id TEXT PRIMARY KEY,
+        site TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        close_reason TEXT,
+        evidence_dismissals_json TEXT NOT NULL DEFAULT '[]',
+        evidence_check_json TEXT
+      );
+      INSERT INTO content_proposals (id, site, status, updated_at, close_reason)
+        VALUES ('p-1', 'site_test', 'finished', 1, 'accepted');
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site), { readonly: true });
+    const row = db
+      .prepare(`SELECT status, close_reason, accept_snapshot_json FROM content_proposals WHERE id = 'p-1'`)
+      .get() as Record<string, unknown>;
+    expect(row.status).toBe("finished");
+    expect(row.close_reason).toBe("accepted");
+    expect(row.accept_snapshot_json).toBeNull();
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds lead_outbox and lead_delivery_attempts when upgrading from v44", () => {
+    const site = `${TEST_PREFIX}-v44-lead-outbox-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 44);
+      CREATE TABLE lead_submissions (
+        submission_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        form TEXT,
+        browser_hash TEXT,
+        is_test INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO lead_submissions (submission_id, created_at, form) VALUES ('lead-1', 1, 'apply');
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site));
+    db.prepare(
+      `INSERT INTO lead_outbox (submission_id, status, url_host, created_at, updated_at) VALUES ('lead-1', 'delivered', 'crm.example.com', 1, 1)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO lead_delivery_attempts (submission_id, attempt, started_at, http_status) VALUES ('lead-1', 1, 1, 200)`,
+    ).run();
+    const outbox = db.prepare(`SELECT status, attempts, is_test, pulled_from_production FROM lead_outbox`).get();
+    expect(outbox).toEqual({ status: "delivered", attempts: 0, is_test: 0, pulled_from_production: 0 });
+    const attempt = db.prepare(`SELECT http_status, trigger FROM lead_delivery_attempts`).get();
+    expect(attempt).toEqual({ http_status: 200, trigger: "submit" });
+    expect((db.prepare(`SELECT form FROM lead_submissions WHERE submission_id = 'lead-1'`).get() as { form: string }).form).toBe("apply");
+    db.close();
+    rmSite(site);
+  });
+
+  it("adds public URL change log tables when upgrading from v45", () => {
+    const site = `${TEST_PREFIX}-v45-public-urls-${Date.now()}`;
+    rmSite(site);
+    fs.mkdirSync(siteDir(site), { recursive: true });
+    const raw = new Database(dbPath(site));
+    raw.exec(`
+      CREATE TABLE pipeline_schema_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version INTEGER NOT NULL
+      );
+      INSERT INTO pipeline_schema_version (id, version) VALUES (1, 45);
+      CREATE TABLE lead_outbox (
+        submission_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        url_host TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO lead_outbox (submission_id, status, created_at, updated_at) VALUES ('lead-1', 'delivered', 1, 1);
+    `);
+    raw.close();
+
+    ensurePipelineDb(site, { skipBackup: true });
+    expect(getPipelineSchemaVersion(site)).toBe(PIPELINE_SCHEMA_VERSION);
+    const db = new Database(dbPath(site));
+    db.prepare(
+      `INSERT INTO public_url_state (url, first_seen_at, last_seen_at) VALUES ('https://example.com/en/a', 1, 1)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO public_url_changes (url, kind, detected_at) VALUES ('https://example.com/en/a', 'published', 1)`,
+    ).run();
+    db.prepare(`INSERT INTO public_url_consumers (consumer) VALUES ('indexnow')`).run();
+    db.prepare(`INSERT INTO public_url_scan_state (id) VALUES (1)`).run();
+    db.prepare(
+      `INSERT INTO public_url_pending_updates (url, queued_at) VALUES ('https://example.com/en/a', 1)`,
+    ).run();
+    const consumer = db
+      .prepare(`SELECT last_change_id, last_submitted_count, stopped_at FROM public_url_consumers`)
+      .get();
+    expect(consumer).toEqual({ last_change_id: 0, last_submitted_count: 0, stopped_at: null });
+    const scan = db.prepare(`SELECT held_removed_count, release_next_drop FROM public_url_scan_state`).get();
+    expect(scan).toEqual({ held_removed_count: 0, release_next_drop: 0 });
+    expect((db.prepare(`SELECT status FROM lead_outbox`).get() as { status: string }).status).toBe("delivered");
+    db.close();
+    rmSite(site);
   });
 
   it("fails fast when migration cannot write", () => {

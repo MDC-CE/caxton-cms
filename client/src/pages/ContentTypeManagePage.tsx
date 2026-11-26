@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { typeUsesSharedTemplate } from "@shared/sharedLayoutPaths";
 import { AlertTriangle, Archive, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ArrowUpDown, Asterisk, Check, CircleDashed, Clipboard, Clock, Code, Copy, Crosshair, Database, Download, ExternalLink, Eye, EyeOff, FileText, Filter, Folder, GitBranch, Globe, HelpCircle, History, Image as ImageIcon, Info, LayoutList, Link as LinkIcon, List, Loader2, Megaphone, MoreVertical, Pencil, Plus, RefreshCw, Search, Shuffle, SlidersHorizontal, Table2, Trash2, Wand2, X } from "lucide-react";
 import { ContentTypeAdsList } from "@/components/ads/ContentTypeAdsList";
-import { IconChess, IconChevronDown, IconChevronRight, IconExternalLink } from "@tabler/icons-react";
+import { IconChess, IconChevronDown, IconChevronRight, IconExternalLink, IconWebhook } from "@tabler/icons-react";
 import { queryClient } from "@/lib/queryClient";
 import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from "react";
 import {
@@ -103,6 +103,7 @@ import {
   SharedLayoutEnableFields,
 } from "@/components/editing/SharedLayoutEnableDialog";
 import { LinkedDatabaseExplainDialog } from "@/components/editing/LinkedDatabaseExplainDialog";
+import { AdsFirstCard } from "@/components/editing/AdsFirstCard";
 import { ItemEditModal } from "@/components/databases/ItemEditModal";
 import { EditorTypeDialog, type EditorHint } from "@/components/editing/EditorTypeDialog";
 import {
@@ -125,6 +126,8 @@ import {
   decodeFunctionMapping,
   encodeFunctionMapping,
 } from "@shared/functionEncoding";
+import { fieldMappingSource, isRowsFilterMapping, parseRowsFilters, rowsFilterSummary, type RowsFilter } from "@shared/validateEditorFieldTypes";
+import { RowsFiltersDialog } from "@/components/editing/RowsFiltersDialog";
 
 const RawFileEditorPanel = lazy(() => import("@/components/editing/RawFileEditorPanel"));
 
@@ -290,7 +293,7 @@ interface ContentTypeConfig {
   name: string;
   label: string;
   directory: string;
-  field_mapping?: Record<string, string | { source: string; default: string | null }>;
+  field_mapping?: Record<string, string | { source: string; default: string | null } | { rows_filters: RowsFilter[] }>;
   editor?: Record<string, {
     type?: string;
     options?: (string | { value: string; label: string })[];
@@ -315,6 +318,7 @@ interface ContentTypeConfig {
   funnel?: { enforcement?: boolean } | null;
   products?: { allow_sellable_entries?: boolean; coerced_from_inventory?: boolean } | null;
   strategy?: { purpose: string; constraints?: string[] } | null;
+  ads?: { optimize?: boolean } | null;
 }
 
 interface SchemaOrgCoverageRow {
@@ -1712,6 +1716,7 @@ function DataSourceDialog({
         const modes: Record<string, boolean> = {};
         for (const [k, v] of Object.entries(config.field_mapping)) {
           if (!k.startsWith("_")) {
+            if (isRowsFilterMapping(v)) continue;
             const raw = typeof v === "object" ? v.source : v;
             if (raw && raw.startsWith("function:")) {
               try {
@@ -1729,7 +1734,7 @@ function DataSourceDialog({
         setTransformerModes(modes);
 
         const sm = config.field_mapping._slug;
-        const smVal = sm ? (typeof sm === "object" ? sm.source : sm) : "";
+        const smVal = fieldMappingSource(sm) ?? "";
         if (smVal && smVal.startsWith("function:")) {
           try {
             setSlugField(decodeFunctionMapping(smVal));
@@ -1743,7 +1748,7 @@ function DataSourceDialog({
         }
 
         const lm = config.field_mapping._locale;
-        const lmVal = lm ? (typeof lm === "object" ? lm.source : lm) : "";
+        const lmVal = fieldMappingSource(lm) ?? "";
         if (lmVal && lmVal.startsWith("function:")) {
           try {
             setLocaleField(decodeFunctionMapping(lmVal));
@@ -1757,7 +1762,7 @@ function DataSourceDialog({
         }
 
         const hm = config.field_mapping._hreflangs;
-        const hmVal = hm ? (typeof hm === "object" ? hm.source : hm) : "";
+        const hmVal = fieldMappingSource(hm) ?? "";
         if (hmVal && hmVal.startsWith("function:")) {
           try {
             setHreflangsField(decodeFunctionMapping(hmVal));
@@ -1883,7 +1888,7 @@ function DataSourceDialog({
   const handleSave = async () => {
     setSaving(true);
     try {
-      const fullMapping: Record<string, string> = {};
+      const fullMapping: Record<string, string | { rows_filters: RowsFilter[] }> = {};
       if (slugField) {
         fullMapping._slug = slugIsTransformer ? encodeFunctionMapping(slugField) : slugField;
       }
@@ -1906,6 +1911,12 @@ function DataSourceDialog({
           if (!transformerModes[k] && localeSource && v === localeSource) continue;
           if (!transformerModes[k] && hreflangsSource && v === hreflangsSource) continue;
           fullMapping[k] = transformerModes[k] ? encodeFunctionMapping(v) : v;
+        }
+      }
+
+      if (config?.field_mapping) {
+        for (const [k, v] of Object.entries(config.field_mapping)) {
+          if (isRowsFilterMapping(v)) fullMapping[k] = v;
         }
       }
 
@@ -3441,13 +3452,16 @@ function ComputeModeMenu({
   onNotComputed,
   onPickField,
   onPickFunction,
+  onPickRows,
   testId,
 }: {
   fieldKey: string;
-  mode: "none" | "field" | "function";
+  mode: "none" | "field" | "function" | "rows";
   onNotComputed: () => void;
   onPickField: () => void;
   onPickFunction: () => void;
+  /** Other rows from this database. Omitted in the setup wizard. */
+  onPickRows?: () => void;
   /** Override trigger test id (wizard uses button-toggle-transform-*). */
   testId?: string;
 }) {
@@ -3459,7 +3473,7 @@ function ComputeModeMenu({
   };
 
   const items: {
-    id: "none" | "field" | "function";
+    id: "none" | "field" | "function" | "rows";
     label: string;
     info: string;
     testIdSuffix: string;
@@ -3486,6 +3500,15 @@ function ComputeModeMenu({
       testIdSuffix: "function",
       onSelect: onPickFunction,
     },
+    ...(onPickRows
+      ? [{
+          id: "rows" as const,
+          label: "Rows from database",
+          info: "Fill this field with other rows from the same database that match column filters. At most 50 rows.",
+          testIdSuffix: "rows",
+          onSelect: onPickRows,
+        }]
+      : []),
   ];
 
   return (
@@ -3665,6 +3688,9 @@ function FieldMappingDialog({
   const [showAddField, setShowAddField] = useState(false);
   const [pendingDeleteKey, setPendingDeleteKey] = useState<string | null>(null);
   const [transformerModes, setTransformerModes] = useState<Record<string, boolean>>({});
+  const [rowsFilterModes, setRowsFilterModes] = useState<Record<string, boolean>>({});
+  const [rowsFilters, setRowsFilters] = useState<Record<string, RowsFilter[]>>({});
+  const [rowsFilterDialogField, setRowsFilterDialogField] = useState<string | null>(null);
   const [customModes, setCustomModes] = useState<Record<string, boolean>>({});
   /** YAML: show source picker for a field (map from another field). */
   const [remapModes, setRemapModes] = useState<Record<string, boolean>>({});
@@ -3765,10 +3791,18 @@ function FieldMappingDialog({
     }
     const fm: Record<string, string> = {};
     const tmodes: Record<string, boolean> = {};
+    const rowModes: Record<string, boolean> = {};
+    const rowFilters: Record<string, RowsFilter[]> = {};
     const optFields: Record<string, boolean> = {};
     const defaults: Record<string, string | null> = {};
     if (config.field_mapping) {
       for (const [k, v] of Object.entries(config.field_mapping)) {
+        if (isRowsFilterMapping(v)) {
+          fm[k] = "";
+          rowModes[k] = true;
+          rowFilters[k] = parseRowsFilters(v);
+          continue;
+        }
         if (typeof v === "string") {
           if (v.startsWith("function:")) {
             fm[k] = decodeFunctionMapping(v);
@@ -3822,6 +3856,8 @@ function FieldMappingDialog({
     setMappings(fm);
     setFieldDefaults(defaults);
     setTransformerModes(tmodes);
+    setRowsFilterModes(rowModes);
+    setRowsFilters(rowFilters);
     setOptionalFields(optFields);
     setNewOptional(false);
     // A source is "custom" if it contains a dot (dotted path like author.name)
@@ -4030,10 +4066,14 @@ function FieldMappingDialog({
   const handleSave = async () => {
     setSaving(true);
     try {
-      const fullMapping: Record<string, string | { source: string; default: string | null }> = {};
+      const fullMapping: Record<string, string | { source: string; default: string | null } | { rows_filters: RowsFilter[] }> = {};
       for (const [k, v] of Object.entries(mappings)) {
         if (FORBIDDEN_SCHEMA_FIELDS.has(k)) continue;
         if (k.startsWith("seo.") || k === "seo.pillar") continue;
+        if (rowsFilterModes[k]) {
+          fullMapping[k] = { rows_filters: rowsFilters[k] ?? [] };
+          continue;
+        }
         // Static regular fields: force identity (no rename)
         const sourceValue = !isDbBacked && !k.startsWith("_") && !transformerModes[k] && !SEO_DB_MAPPING_KEYS.has(k)
           ? k
@@ -4213,7 +4253,40 @@ function FieldMappingDialog({
     return "(value, item) => value";
   };
 
+  const clearRowsMode = (key: string) => {
+    setRowsFilterModes((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const enterRowsMode = (key: string) => {
+    setTransformerModes((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    setRemapModes((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    setCustomModes((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    setRowsFilterModes((prev) => ({ ...prev, [key]: true }));
+    setRowsFilters((prev) => ({
+      ...prev,
+      [key]: prev[key]?.length ? prev[key] : [{ rows_property_slug: "", value_from_current_row: "" }],
+    }));
+    setRowsFilterDialogField(key);
+  };
+
   const enterFunctionMode = (key: string) => {
+    clearRowsMode(key);
     setCustomModes((prev) => {
       const next = { ...prev };
       delete next[key];
@@ -4262,6 +4335,7 @@ function FieldMappingDialog({
   };
 
   const enterRemapMode = (key: string) => {
+    clearRowsMode(key);
     setTransformerModes((prev) => {
       const next = { ...prev };
       delete next[key];
@@ -4282,6 +4356,7 @@ function FieldMappingDialog({
   };
 
   const resetComputeMode = (key: string) => {
+    clearRowsMode(key);
     setTransformerModes((prev) => {
       const next = { ...prev };
       delete next[key];
@@ -4893,8 +4968,9 @@ function FieldMappingDialog({
                 <div className="space-y-1">
                   {regularKeys.map((key) => {
                     const isFn = !!transformerModes[key];
+                    const isRows = !!rowsFilterModes[key];
                     const isRemap = !!remapModes[key] || showSourceEditor;
-                    const showComputeEditor = isFn || isRemap;
+                    const showComputeEditor = !isRows && (isFn || isRemap);
                     const vResult = isFn ? null : validation[key];
                     const currentSrc = mappings[key] || "";
                     const deprecatedCfg = parseDeprecated(editorHints[key]);
@@ -4910,7 +4986,16 @@ function FieldMappingDialog({
                             {key}
                           </span>
                           <ArrowRight className="h-3 w-3 text-muted-foreground flex-shrink-0" />
-                          {showComputeEditor ? (
+                          {isRows ? (
+                            <button
+                              type="button"
+                              className="flex-1 min-w-0 text-left text-xs font-mono truncate rounded-md border px-2 py-1.5 hover:bg-muted"
+                              onClick={() => setRowsFilterDialogField(key)}
+                              data-testid={`button-rows-summary-${key}`}
+                            >
+                              {rowsFilterSummary(rowsFilters[key] ?? [])}
+                            </button>
+                          ) : showComputeEditor ? (
                             <div className="flex-1 flex flex-col gap-1 min-w-0">
                               <div className="flex items-center gap-2 min-w-0">
                                 {renderSourceEditor(key)}
@@ -4937,15 +5022,18 @@ function FieldMappingDialog({
                           <ComputeModeMenu
                             fieldKey={key}
                             mode={
-                              isFn
-                                ? "function"
-                                : !!remapModes[key] || (showSourceEditor && currentSrc !== key)
-                                  ? "field"
-                                  : "none"
+                              isRows
+                                ? "rows"
+                                : isFn
+                                  ? "function"
+                                  : !!remapModes[key] || (showSourceEditor && currentSrc !== key)
+                                    ? "field"
+                                    : "none"
                             }
                             onNotComputed={() => resetComputeMode(key)}
                             onPickField={() => enterRemapMode(key)}
                             onPickFunction={() => enterFunctionMode(key)}
+                            onPickRows={isDbBacked ? () => enterRowsMode(key) : undefined}
                           />
                           {(isDbBacked || isFn || currentSrc === key || !showComputeEditor) && (
                             <FieldValidationIndicator result={vResult} optional={optionalFields[key]} />
@@ -5366,6 +5454,21 @@ function FieldMappingDialog({
           return { ...prev, [field]: merged };
         });
         setHintDialogField(null);
+      }}
+    />
+    <RowsFiltersDialog
+      fieldName={rowsFilterDialogField ?? ""}
+      open={rowsFilterDialogField !== null}
+      columns={mergedSourceOptions}
+      initial={rowsFilterDialogField ? (rowsFilters[rowsFilterDialogField] ?? []) : []}
+      onOpenChange={(next) => {
+        if (!next) setRowsFilterDialogField(null);
+      }}
+      onApply={(filters) => {
+        const field = rowsFilterDialogField;
+        if (!field) return;
+        setRowsFilterModes((prev) => ({ ...prev, [field]: true }));
+        setRowsFilters((prev) => ({ ...prev, [field]: filters }));
       }}
     />
     <RequiredFieldConfirmDialog
@@ -6073,6 +6176,110 @@ function SeoSettingsDialog({
   );
 }
 
+function filterListHits(contentType: string, list: string[] | undefined): boolean {
+  if (!list || list.length === 0) return false;
+  const key = contentType.toLowerCase();
+  return list.some((value) => {
+    const needle = value.toLowerCase();
+    if (needle.endsWith("*")) {
+      const prefix = needle.slice(0, -1);
+      return prefix.length === 0 || key.startsWith(prefix);
+    }
+    return key === needle;
+  });
+}
+
+function hookSendsThisContentType(
+  contentType: string,
+  filter: { content_types?: string[]; exclude_content_types?: string[] } | undefined,
+): boolean {
+  if (filterListHits(contentType, filter?.exclude_content_types)) return false;
+  const included = filter?.content_types ?? [];
+  if (included.length === 0) return true;
+  return filterListHits(contentType, included);
+}
+
+/** Points staff at outbound event webhooks for saves of this content type. */
+function ContentTypeWebhooksCard({ contentType }: { contentType: string }) {
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["/api/admin/event-webhooks"],
+    queryFn: async () => {
+      const res = await apiFetch("/api/admin/event-webhooks");
+      if (!res.ok) throw new Error("Failed to load webhooks");
+      return res.json() as Promise<{
+        config: {
+          subscriptions: Record<
+            string,
+            Array<{
+              enabled?: boolean;
+              url?: string;
+              filter?: { content_types?: string[]; exclude_content_types?: string[] };
+            }>
+          >;
+        };
+      }>;
+    },
+    staleTime: 30_000,
+  });
+
+  let sending = 0;
+  if (data?.config?.subscriptions) {
+    for (const [eventType, hooks] of Object.entries(data.config.subscriptions)) {
+      if (eventType.startsWith("proposal_")) continue;
+      for (const hook of hooks) {
+        if (!hook.enabled || !hook.url) continue;
+        if (hookSendsThisContentType(contentType, hook.filter)) sending += 1;
+      }
+    }
+  }
+
+  const badgeLabel =
+    sending === 0
+      ? "No webhooks set"
+      : sending === 1
+        ? "1 webhook set"
+        : `${sending} webhooks set`;
+
+  return (
+    <Card data-testid="card-kpi-event-webhooks">
+      <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
+        <CardTitle className="text-sm font-medium text-muted-foreground">Webhooks</CardTitle>
+        <IconWebhook className="h-4 w-4 text-muted-foreground" aria-hidden />
+      </CardHeader>
+      <CardContent className="space-y-2">
+        <p className="text-xs text-muted-foreground leading-relaxed">
+          When someone saves an entry of this type, the site can notify another system. Open Webhooks to
+          choose the address and which saves to send.
+        </p>
+        <div className="flex flex-col items-start gap-2">
+          {isLoading || isError ? (
+            <p className="text-xs text-muted-foreground" data-testid="text-event-webhooks-status">
+              {isLoading
+                ? "Checking which webhooks send saves of this type."
+                : "Webhook settings could not be loaded."}
+            </p>
+          ) : (
+            <Badge
+              variant={sending > 0 ? "secondary" : "outline"}
+              className="text-xs font-medium"
+              data-testid="badge-event-webhooks-status"
+            >
+              {badgeLabel}
+            </Badge>
+          )}
+          <Link
+            href="/private/agents/webhooks"
+            className="text-xs text-primary hover:underline"
+            data-testid="link-content-type-webhooks"
+          >
+            Open webhooks
+          </Link>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function ContentTypeManagePage() {
   const { toast } = useToast();
   const [, params] = useRoute("/private/type/:contentType");
@@ -6728,7 +6935,7 @@ export default function ContentTypeManagePage() {
     const staticFallback = typeConfig?.database?.slug ? null : "lang";
     const raw = typeConfig?.field_mapping?._locale;
     if (!raw) return staticFallback;
-    const val = typeof raw === "object" ? raw.source : raw;
+    const val = fieldMappingSource(raw);
     if (typeof val === "string" && val.startsWith("function:")) {
       const fm = typeConfig?.field_mapping || {};
       const localeLike = ["lang", "locale", "language"];
@@ -6743,7 +6950,7 @@ export default function ContentTypeManagePage() {
   const hreflangsSource = (() => {
     const raw = typeConfig?.field_mapping?._hreflangs;
     if (!raw) return "translations";
-    const val = typeof raw === "object" ? raw.source : raw;
+    const val = fieldMappingSource(raw);
     if (typeof val === "string" && val.startsWith("function:")) return "translations";
     return typeof val === "string" && val.trim() ? val : "translations";
   })();
@@ -7774,7 +7981,14 @@ export default function ContentTypeManagePage() {
         toast({ title: data.error || "Failed to create version", variant: "destructive" });
         return;
       }
-      toast({ title: `Version "${createVersionSlug}" created`, description: data.filePath });
+      const carriedFunnel = Array.isArray(data.warnings)
+        && data.warnings.some((w: { code?: string }) => w.code === "funnel_carried_from_language_file");
+      toast({
+        title: `Version "${createVersionSlug}" created`,
+        description: carriedFunnel
+          ? "This language had its own funnel, different from the page's. The draft keeps it; publishing makes it the funnel for every language."
+          : data.filePath,
+      });
       setCreateVersionOpen(false);
       setVersionsData(prev => { const next = { ...prev }; delete next[createVersionEntry.slug]; return next; });
       queryClient.invalidateQueries({ queryKey: ["/api/content-types", contentType, "static-entries"] });
@@ -8177,6 +8391,11 @@ export default function ContentTypeManagePage() {
               </p>
             </CardContent>
           </Card>
+          <AdsFirstCard
+            contentType={contentType}
+            enabled={typeConfig?.ads?.optimize === true}
+            loading={typeConfig === undefined}
+          />
           <Card data-testid="card-kpi-products-allow-sellable">
             <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
@@ -8237,6 +8456,7 @@ export default function ContentTypeManagePage() {
               </div>
             </CardContent>
           </Card>
+          <ContentTypeWebhooksCard contentType={contentType} />
           <EntryPreviewCard
             contentType={contentType}
             preview={typeConfig?.preview}

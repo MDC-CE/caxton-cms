@@ -142,10 +142,110 @@ Site-wide **leads by traffic source** (`get_analytics_report` → `traffic_sourc
 | Event Name            | Description                        |
 |-----------------------|------------------------------------|
 | `page_view`           | Fired on each page navigation      |
-| `experiment_exposure` | A/B test variant assignment        |
+| `experiment_exposure` | Page test version this visitor saw (see Page tests below) |
 | `cta_click`           | User clicks a call-to-action       |
-| `video_play`          | User plays a video                 |
+| `video_play`          | Reserved. Not sent. YouTube plays are `gtm.video` from Tag Manager; files use the events below. |
+| `video_start`         | A file or other embed started for real. Not the muted card. Not YouTube. |
+| `video_progress`      | File playback crossed 10, 25, 50, or 75 percent. `video_percent` says which. |
+| `video_complete`      | File playback reached the end, once, even if it loops. |
 | `scroll_depth`        | User scrolls to a depth threshold  |
+
+### Video playback
+
+YouTube and files are measured differently. Leave GA4 **Enhanced measurement → Video engagement** on. The site does not push events for YouTube. Do not turn on the Tag Manager option that adds the YouTube JavaScript API to every embed.
+
+- **YouTube without the listen card** follows autoplay. When autoplay is on, a muted player starts on load at `www.youtube.com` with `enablejsapi=1`, and the page hooks it so Tag Manager counts that play (`gtm.video` on load). When autoplay is off, the thumbnail stays until click, and that click opens the same counting player. The site does not push `video_start`. Tag Manager pushes `gtm.video` (shown as YouTube Video). The dataLayer event name stays `gtm.video`; Video Status is `start`, `progress`, or `complete`. A scrub that jumps past a percent does not send that progress mark. YouTube embeds never loop, so the player can end and Tag Manager can send complete.
+- **YouTube with the muted card** previews on `youtube-nocookie.com` without `enablejsapi`. Loading the page does not count. The click opens the `youtube.com` player, the page hooks that one, and Tag Manager counts from there.
+- **A file** (`.mp4`, `.webm`, `.mov`, `.ogg`, `.m4v`, or a path starting with `/`) pushes `video_start`, `video_progress`, and `video_complete` through `track()`. The muted card does not push `video_start`. Autoplay without that card does. Each progress percent is sent once per play, when playback passes it. Dragging past a percent does not send it. Closing the player and opening it again, restarting after the end, or a loop sends `video_start`, progress, and `video_complete` again.
+- **Another embed** (Vimeo, or a non-file URL) pushes only `video_start` on the play click.
+
+File events use the same video fields Tag Manager already sends for YouTube: `video_url`, `video_title`, `video_provider` (`file`), `video_duration`, `video_current_time`, `visible`, and on progress `video_percent`. `user_id` is the anonymous browser id added by `track()`, not an email.
+
+In the web GTM container, forward `gtm.video` to the server by Video Status (`start` → `video_start`, `progress` → `video_progress`, `complete` → `video_complete`). Do not also forward a `video_start` from the page for YouTube. Files still need a custom-event trigger and a GA4 event tag for `video_start`, `video_progress`, and `video_complete`.
+
+Check Tag Assistant on a YouTube landing. With a listen card, `gtm.video` is absent on load and appears after the click. Without a card and with autoplay on, `gtm.video` can appear on load. `video_start` from the page does not appear for YouTube.
+
+### Page tests (A/B versions)
+
+Page tests run only after **Settings → Tracking → A/B testing → Setup** passes for the site. Until then every visitor sees Default.
+
+**What the site sends**
+
+- `experiment_exposure` with `experiment_id` and `variant`, once per page and version. Sent for every test participant, including the Default group (`variant: "default"`).
+- `experiment_id` is `contentType:slug:locale@YYYY-MM-DD` (the test run's start date). Tests started before run dates existed have no `@date`. Two tests started the same day on the same page share an id.
+- Before Tag Manager loads, tested pages write `{ experiment_id, variant }` into the dataLayer (no event), so `page_view` and every later event can read them.
+- Conversion pushes (form submissions and other conversions) carry the visit's **first** test: `experiment_id` and `variant` from the `4g_visit_exp` cookie (30 minutes, refreshed on activity, shared across tabs, like a GA4 session). The CRM lead uses the same rule and the same field names (`experiment_id` / `variant`).
+- Staff, bots, and forced previews (`?force_variant=`) are never put in a test and send no exposure.
+
+**Web container**
+
+1. Data Layer Variables: `DLV - experiment_id` → `experiment_id`, `DLV - variant` → `variant`.
+2. GA4 event tag `experiment_exposure`, triggered by the custom event `experiment_exposure`, with event parameters `experiment_id` and `variant`.
+3. Add both as shared event parameters on the Google tag (so `page_view` carries them) and as event parameters on conversion tags.
+
+**Server container**
+
+The GA4 client and GA4 tag pass event parameters through. Check that no parameter filter or transformation strips `experiment_id` / `variant`.
+
+**GA4**
+
+- Register event-scoped custom dimensions `experiment_id` and `variant`: from **Settings → Tracking → A/B testing → Google Analytics** (Create them) or by hand in GA4 Admin → Custom definitions. Without them, GA4 reports can't split by version; the BigQuery export still has the parameters.
+- Per-version Explorations: segment sessions that include `experiment_exposure` with `variant` = `b` (and one for `default`), then compare sessions, engagement and key events.
+- Keep the event and parameter names: `server/ads/paid-detection.ts` reads `experiment_exposure` / `experiment_id` / `variant` from BigQuery for the paid and organic per-version numbers.
+
+**Known gap**
+
+Web GTM loads on first interaction or after 15 s. Visitors who leave sooner are in the server counts but never reach GA4.
+
+### Product and persona
+
+Every event carries the page's product and persona, once the site's tracking switch is on (Settings → Tracking → Events → Product & persona on events; staff setup steps are in that card's **Setup instructions**).
+
+**What the site sends**
+
+| Key | Value |
+|---|---|
+| `product` | Product short codes, comma-joined (`afx,aie`) |
+| `persona` | Persona short codes (`cc,exp`) |
+| `product_persona` | `product:persona` code pairs (`afx:exp,aie:cc`); `aie:` = product without persona |
+| `funnel_stage` | `awareness`, `consideration`, `decision`, `post-enrollment` |
+| `content_key` | Page `type:slug` (`landing:apply`) |
+| `tracking_truncated` | `true` when a list was cut |
+
+- Lists are cut at a whole code to 100 characters (GA4's limit per value). The cut keeps the funnel's first codes; the kept codes are then **sorted**, so the same audience always sends the same string. Events sent before 2026-10-25 may hold the same set in two orders.
+- `all` = the page's funnel covers every product; `none` = a content page without a funnel.
+- The server writes these keys into the dataLayer before Tag Manager loads (`server/utils/html-inject.ts`), so the first `page_view` carries them; later events add them on every push (`client/src/lib/tracking.ts`).
+- Leads and the CRM get full ids (`ai-engineering`, `the-career-changer`), sorted and never cut. Translate codes with **Download code list** on the same card.
+
+**Web container**
+
+1. One Data Layer Variable per key (version 2): name `DLV - product`, Data Layer Variable Name `product`, and so on for all six.
+2. A Google Tag: Event Settings variable with the six event parameters (name = key, value = `{{DLV - <key>}}`), attached to the Google tag under Shared event settings (so `page_view` carries them) and to every GA4 event tag under Event Settings Variable.
+
+**Server container**
+
+Nothing to add: the GA4 client turns the parameters into event data and the GA4 tag forwards them. Check that no "exclude parameters" or "allow parameters" transformation drops the six keys. Other server-side tags (Meta CAPI, Ads) need Event Data variables only if they should send these values.
+
+**GA4**
+
+- Register the six as event-scoped custom dimensions: **Create them** on the card, or GA4 Admin → Custom definitions. Not retroactive.
+- A value is one string per event, so `cc,exp` is its own row. To include every event with one code, filter with **matches regex** `(^|,)cc(,|$)` (plain "contains" also matches longer codes that contain `cc`).
+
+**BigQuery**
+
+Split lists before counting; never group by the raw string:
+
+```sql
+SELECT code, COUNT(*) AS events
+FROM `project.analytics_<property_id>.events_*`,
+  UNNEST(SPLIT((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'persona'), ',')) AS code
+WHERE _TABLE_SUFFIX BETWEEN '20261001' AND '20261031'
+  AND code NOT IN ('', 'all', 'none')
+GROUP BY code
+ORDER BY events DESC
+```
+
+In app code, use `parseTrackingList` / `decodeTrackingCodes` / `decodeTrackingPairs` from `shared/tracking-context.ts`. Persona full ids can repeat across products: take the product from `product_persona`; a shared id without a pair has no product (never guessed). Lead counts by product / persona: Leads page cards **Product on page** and **Persona**, or `get_leads_breakdown` (`funnel_products`, `funnel_personas`).
 
 ---
 

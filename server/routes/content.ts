@@ -152,10 +152,9 @@ import {
 import { bindingManager } from "../bindings";
 import {
   escapeTemplateVars,
-  escapeObjectVars,
   unescapeObjectVars,
-  unescapeYamlDump,
 } from "@shared/templateVars";
+import { dumpContentYaml } from "../content-yaml";
 import {
   getVersioningManager,
   readUserId,
@@ -229,6 +228,8 @@ import {
   resolveStaticEntryUpdatedAt,
   isKnownSeoFieldPath,
 } from "../content-types";
+import { diffPublicContentTypes } from "../jobs/definitions/content-type-html-scope";
+import { emitContentTypeChanged } from "../content-events";
 import { resolveFieldValue, applyTransformIfNeeded } from "../transform";
 import { resolveAllTemplateVars, buildContentDeliveryParamBag } from "../resolve-template-vars";
 import {
@@ -321,6 +322,7 @@ import {
   withTrafficCtr,
   type OrganicEntrySortable,
 } from "../organic-entries";
+import { withoutAbCheckPage } from "../ab-testing/state";
 import { mergeSingleTemplate, attachVariableFieldsToSections } from "../database-single-loader";
 import { loadEntryForDelivery } from "../entry-delivery";
 import { layoutOwnerForEntry, typeUsesSharedTemplate } from "../layout-owner";
@@ -373,6 +375,7 @@ import {
   resolveVariantAssignment,
   resolveAssignedVariantSlug,
   invalidateContentCaches,
+  invalidateContentCachesWithoutHtml,
   createValidationFixRun,
   appendValidationRunLog,
   applyFixerProgress,
@@ -395,6 +398,7 @@ import {
   buildSingleEntryFromContent,
   listTemplatePages,
   detectLanguageFromRequest,
+  markServedPage,
   ValidationFixRunState,
   ValidationFixRunLogEntry,
   FixerItemStatus,
@@ -484,6 +488,7 @@ export function registerContentRoutes(app: Express): void {
 
   app.get("/api/career-programs/:slug", async (req, res) => {
     const { slug } = req.params;
+    markServedPage(res, "program", slug);
     const locale = normalizeLocale(req.query.locale as string);
     const forceVariant = req.query.force_variant as string | undefined;
     const forceVersion = req.query.force_version
@@ -544,6 +549,7 @@ export function registerContentRoutes(app: Express): void {
         resolveAllTemplateVars(programData, {
           singleEntry,
           param,
+          contentType: "program",
           contentRoot: getContentRoot(res),
           context: { locale },
         }) as Record<string, unknown>,
@@ -553,6 +559,7 @@ export function registerContentRoutes(app: Express): void {
         programData,
         resolveAllTemplateVars(programData, {
           param,
+          contentType: "program",
           contentRoot: getContentRoot(res),
           context: { locale },
         }) as Record<string, unknown>,
@@ -576,6 +583,7 @@ export function registerContentRoutes(app: Express): void {
 
   app.get("/api/landings/:slug", async (req, res) => {
     const { slug } = req.params;
+    markServedPage(res, "landing", slug);
     const forceVariant = req.query.force_variant as string | undefined;
     const forceVersion = req.query.force_version
       ? parseInt(req.query.force_version as string, 10)
@@ -662,6 +670,7 @@ export function registerContentRoutes(app: Express): void {
         resolveAllTemplateVars(landingData, {
           singleEntry,
           param,
+          contentType: "landing",
           contentRoot: getContentRoot(res),
           context: { locale },
         }) as Record<string, unknown>,
@@ -671,6 +680,7 @@ export function registerContentRoutes(app: Express): void {
         landingData,
         resolveAllTemplateVars(landingData, {
           param,
+          contentType: "landing",
           contentRoot: getContentRoot(res),
           context: { locale },
         }) as Record<string, unknown>,
@@ -703,6 +713,7 @@ export function registerContentRoutes(app: Express): void {
 
   app.get("/api/locations/:slug", async (req, res) => {
     const { slug } = req.params;
+    markServedPage(res, "location", slug);
     const locale = normalizeLocale(req.query.locale as string);
     const forceVariant = req.query.force_variant as string | undefined;
 
@@ -762,6 +773,7 @@ export function registerContentRoutes(app: Express): void {
         resolveAllTemplateVars(locationData, {
           singleEntry,
           param,
+          contentType: "location",
           contentRoot: getContentRoot(res),
           context: { locale },
         }) as Record<string, unknown>,
@@ -771,6 +783,7 @@ export function registerContentRoutes(app: Express): void {
         locationData,
         resolveAllTemplateVars(locationData, {
           param,
+          contentType: "location",
           contentRoot: getContentRoot(res),
           context: { locale },
         }) as Record<string, unknown>,
@@ -809,11 +822,13 @@ export function registerContentRoutes(app: Express): void {
     const cpLayout = resolveLayout("page", cpRaw.data || {}, getContentRoot(res));
     injectCanonicalIfMissing(cpPageData, "page", locale);
     const { layout: _cpStripLayout, ...cpRest } = cpPageData;
+    markServedPage(res, "page", "career-programs");
     res.json({ ...cpRest, layout: cpLayout });
   });
 
   // Special handler for apply page (includes programs and locations from _common.yml)
   app.get("/api/pages/apply", (req, res) => {
+    markServedPage(res, "page", "apply");
     const locale = normalizeLocale(req.query.locale as string);
     const forceVariant = req.query.force_variant as string | undefined;
 
@@ -862,6 +877,7 @@ export function registerContentRoutes(app: Express): void {
   // Apply form submission endpoint
   app.get("/api/pages/:slug", async (req, res) => {
     const { slug } = req.params;
+    markServedPage(res, "page", slug);
     const locale = normalizeLocale(req.query.locale as string);
     const forceVariant = req.query.force_variant as string | undefined;
 
@@ -921,6 +937,7 @@ export function registerContentRoutes(app: Express): void {
     const resolvedPage = resolveAllTemplateVars(pageData, {
       singleEntry: singleEntry || undefined,
       param,
+      contentType: "page",
       contentRoot: getContentRoot(res),
       context: { locale },
     }) as Record<string, unknown>;
@@ -943,6 +960,7 @@ export function registerContentRoutes(app: Express): void {
     }
 
     const slug = resolvePreviewBaseSlug(requestSlug, contentType, getCI(res));
+    markServedPage(res, contentType, slug);
     const emptyRoot = getContentRoot(res);
     if (
       !skipEmptyLocaleGateForForceVariant(forceVariant) &&
@@ -1023,6 +1041,7 @@ export function registerContentRoutes(app: Express): void {
       const resolvedPage = resolveAllTemplateVars(pageData, {
         ...(singleEntry && Object.keys(singleEntry).length > 0 ? { singleEntry } : {}),
         param,
+        contentType,
         contentRoot: root,
         context: { locale },
       }) as Record<string, unknown>;
@@ -1085,6 +1104,7 @@ export function registerContentRoutes(app: Express): void {
         const resolved = resolveAllTemplateVars(variantPage, {
           singleEntry: variantSingleEntry,
           param,
+          contentType,
           contentRoot: getContentRoot(res),
           context: { locale },
         }) as Record<string, unknown>;
@@ -1092,6 +1112,7 @@ export function registerContentRoutes(app: Express): void {
       } else {
         const resolved = resolveAllTemplateVars(variantPage, {
           param,
+          contentType,
           contentRoot: getContentRoot(res),
           context: { locale },
         }) as Record<string, unknown>;
@@ -1153,6 +1174,7 @@ export function registerContentRoutes(app: Express): void {
       const resolved = resolveAllTemplateVars(genericPageData, {
         singleEntry,
         param,
+        contentType,
         contentRoot: getContentRoot(res),
         context: { locale },
       }) as Record<string, unknown>;
@@ -1160,6 +1182,7 @@ export function registerContentRoutes(app: Express): void {
     } else {
       const resolved = resolveAllTemplateVars(genericPageData, {
         param,
+        contentType,
         contentRoot: getContentRoot(res),
         context: { locale },
       }) as Record<string, unknown>;
@@ -1273,6 +1296,7 @@ export function registerContentRoutes(app: Express): void {
   app.get("/api/blog/posts/:slug", async (req, res) => {
     try {
       const { slug } = req.params;
+      markServedPage(res, "blog", slug);
       const locale = req.query.locale as string | undefined;
       const normalizedLocale = locale ? normalizeLocale(locale) : undefined;
       const blogRoot = getContentRoot(res);
@@ -1557,10 +1581,22 @@ export function registerContentRoutes(app: Express): void {
       const authorName =
         auth.author || (requestAuthor && typeof requestAuthor === "string" ? requestAuthor : undefined);
 
-      writeRawContentTypesYml(content, getContentRoot(res), authorName);
-      getCI(res).refresh();
+      const contentRoot = getContentRoot(res);
+      const ci = getCI(res);
+      const siteId = getContentRootName(res);
+      const beforeTypes = structuredClone(getAllConfigs(contentRoot));
+      writeRawContentTypesYml(content, contentRoot, authorName);
+      ci.refresh();
       clearSitemapCache();
-      invalidateContentCaches(undefined, getCI(res));
+      const diffs = diffPublicContentTypes(beforeTypes, getAllConfigs(contentRoot));
+      for (const diff of diffs) {
+        invalidateContentCachesWithoutHtml(diff.type, ci);
+        emitContentTypeChanged(
+          siteId,
+          diff.type,
+          diff.urlPatternChanged ? { previousUrlPattern: diff.previousUrlPattern ?? null } : undefined,
+        );
+      }
 
       res.json({ success: true, path: `${getContentRootName(res)}/content-types.yml` });
     } catch (err) {
@@ -1649,6 +1685,7 @@ export function registerContentRoutes(app: Express): void {
           };
         })(),
         strategy: config.strategy || null,
+        ads: config.ads?.optimize ? { optimize: true } : null,
         static_entry_count: getCI(res).findByType(type).length,
       });
     } catch (err) {
@@ -2120,6 +2157,17 @@ export function registerContentRoutes(app: Express): void {
         }
       }
 
+      if (body.ads !== undefined) {
+        if (body.ads === null) {
+          update.ads = null;
+        } else if (typeof body.ads === "object") {
+          update.ads = (body.ads as Record<string, unknown>).optimize === true ? { optimize: true } : null;
+        } else {
+          res.status(400).json({ error: "ads must be an object or null" });
+          return;
+        }
+      }
+
       // Gate: required fields need a valid CT strategy (merged post-update view).
       {
         const {
@@ -2176,15 +2224,8 @@ export function registerContentRoutes(app: Express): void {
 
       let enableBootstrap: ReturnType<typeof enableSharedLayoutFromEntry> | null = null;
       if (enablingShared) {
-        const { escapeObjectVars, unescapeYamlDump } = await import("@shared/templateVars");
-        const yaml = await import("js-yaml");
-        const dumpYaml = (d: unknown) => {
-          const { escaped, map } = escapeObjectVars(d);
-          return unescapeYamlDump(
-            yaml.dump(escaped, { lineWidth: -1, noRefs: true, quotingType: '"', forceQuotes: false }),
-            map,
-          );
-        };
+        const dumpYaml = (d: unknown) =>
+          dumpContentYaml(d, { lineWidth: -1, noRefs: true, quotingType: '"', forceQuotes: false });
         enableBootstrap = enableSharedLayoutFromEntry({
           contentType: type,
           contentRoot: getContentRoot(res),
@@ -2222,6 +2263,7 @@ export function registerContentRoutes(app: Express): void {
         }
       }
 
+      const beforeEntry = structuredClone(config);
       try {
         updateContentTypeConfig(type, update, getContentRoot(res));
       } catch (err) {
@@ -2233,6 +2275,28 @@ export function registerContentRoutes(app: Express): void {
         throw err;
       }
       getCI(res).invalidateCommonFields(type);
+      const afterEntry = getContentTypeConfig(type, ctRoot(res));
+      for (const diff of diffPublicContentTypes({ [type]: beforeEntry }, { [type]: afterEntry })) {
+        emitContentTypeChanged(
+          getContentRootName(res),
+          diff.type,
+          diff.urlPatternChanged ? { previousUrlPattern: diff.previousUrlPattern ?? null } : undefined,
+        );
+      }
+
+      if (body.ads !== undefined) {
+        const wasOn = beforeEntry?.ads?.optimize === true;
+        const isOn = afterEntry?.ads?.optimize === true;
+        if (wasOn !== isOn) {
+          try {
+            const { recordAdsOptimizeChange } = await import("../analytics/first-party/windows");
+            const { getType } = await import("../content-types");
+            recordAdsOptimizeChange(getContentRootName(res), getType(type, ctRoot(res)), isOn);
+          } catch (adsErr) {
+            log.warn({ adsErr, type }, "ads-first on/off period not recorded");
+          }
+        }
+      }
 
       if (body.seo_monitoring !== undefined) {
         try {
@@ -2279,17 +2343,10 @@ export function registerContentRoutes(app: Express): void {
         typeof body.shared_layout_base_locale === "string" &&
         body.shared_layout_base_locale
       ) {
-        const { escapeObjectVars, unescapeYamlDump } = await import("@shared/templateVars");
-        const yaml = await import("js-yaml");
         const folder = getFolder(type, getContentRoot(res));
         const templateDir = path.join(getContentRoot(res), folder);
-        const dumpYaml = (d: unknown) => {
-          const { escaped, map } = escapeObjectVars(d);
-          return unescapeYamlDump(
-            yaml.dump(escaped, { lineWidth: -1, noRefs: true, quotingType: '"', forceQuotes: false }),
-            map,
-          );
-        };
+        const dumpYaml = (d: unknown) =>
+          dumpContentYaml(d, { lineWidth: -1, noRefs: true, quotingType: '"', forceQuotes: false });
         alignResult = alignSiblingSinglesToBase({
           templateDir,
           baseLocale: body.shared_layout_base_locale,
@@ -2817,10 +2874,7 @@ export function registerContentRoutes(app: Express): void {
         if (Object.keys(sd).length === 0) delete merged.section_defaults;
         else merged.section_defaults = sd;
       }
-      const { escaped, map } = escapeObjectVars(merged);
-      const dumped = yaml.dump(escaped, { lineWidth: 120, noRefs: true });
-      const yamlStr = unescapeYamlDump(dumped, map);
-      fs.writeFileSync(filePath, yamlStr, "utf-8");
+      fs.writeFileSync(filePath, dumpContentYaml(merged, { lineWidth: 120, noRefs: true }, filePath), "utf-8");
       const author = (req.body as Record<string, unknown>).author as string | undefined;
       markFileAsModified(filePath, author || "api");
       invalidateContentCaches(name, getCI(res));
@@ -3120,12 +3174,14 @@ export function registerContentRoutes(app: Express): void {
         }
       }
 
+      const listed = withoutAbCheckPage(results, type, root);
+
       if (!pagination.paginate) {
-        res.json({ count: results.length, results });
+        res.json({ count: listed.length, results: listed });
         return;
       }
 
-      let filtered = results as Array<{
+      let filtered = listed as Array<{
         slug: string;
         title: string;
         locales?: string[];
@@ -3310,7 +3366,7 @@ export function registerContentRoutes(app: Express): void {
         entries: Array<Record<string, unknown>>,
         source: "yaml" | "db",
       ) => {
-        const filtered = applySharedFilters(entries, source);
+        const filtered = applySharedFilters(withoutAbCheckPage(entries, type, root), source);
         if (!pagination.paginate) {
           res.json({ ...base, count: filtered.length, entries: filtered });
           return;
@@ -3620,7 +3676,7 @@ export function registerContentRoutes(app: Express): void {
       };
 
       const finish = (entries: FunnelEntryRow[], source: "yaml" | "db") => {
-        let filtered = entries.filter(funnelMatchesQuery);
+        let filtered = withoutAbCheckPage(entries, type, root).filter(funnelMatchesQuery);
         if (localeFilter) {
           filtered = filtered.filter((e) => e.locale === localeFilter);
         }
@@ -3963,7 +4019,7 @@ export function registerContentRoutes(app: Express): void {
       };
 
       const finish = (raw: OrganicEntryRow[], source: "yaml" | "db") => {
-        let filtered = raw.filter(matchesQuery);
+        let filtered = withoutAbCheckPage(raw, type, root).filter(matchesQuery);
         if (publishDateRange) {
           filtered = filtered.filter((e) => {
             const publishedAt = normalizeFlexibleDate(

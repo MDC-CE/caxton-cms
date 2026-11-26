@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   CONSENT_SETTINGS_SPLIT_MIGRATION,
+  DATABASES_VIEW_CONTENT_EDITORS_MIGRATION,
   ensureAdsSettingsOnSeoSettingsRoles,
+  ensureDatabasesViewOnContentEditors,
+  grantsAllowDatabasesBrowse,
   ensureConsentSettingsOnAdsSettingsRoles,
   getBuiltInRoleCodeDefinition,
   ensureContentViewOnEditorRoles,
@@ -72,6 +75,20 @@ describe("ensureContentViewOnEditorRoles", () => {
     expect(redirectsOnly.redirect_ops.capabilities[0]).toEqual({
       name: "content_view",
       contentTypes: "*",
+    });
+  });
+
+  it("adds content_view with the same scope for edit_page_redirects", () => {
+    const roles: Record<string, RoleDefinition> = {
+      ppc_editor: {
+        label: "PPC Content Editor",
+        capabilities: [{ name: "edit_page_redirects", contentTypes: ["landing"] }],
+      },
+    };
+    expect(ensureContentViewOnEditorRoles(roles)).toBe(true);
+    expect(roles.ppc_editor.capabilities[0]).toEqual({
+      name: "content_view",
+      contentTypes: ["landing"],
     });
   });
 
@@ -245,6 +262,15 @@ describe("built-in ads roles", () => {
     const steward = getBuiltInRoleCodeDefinition("platform_steward")!.capabilities.map((g) => g.name);
     expect(steward).toEqual(expect.arrayContaining(["ads_settings", "ads_edit", "consent_settings"]));
   });
+
+  it("only Platform Steward gets A/B testing setup", () => {
+    const steward = getBuiltInRoleCodeDefinition("platform_steward")!.capabilities.map((g) => g.name);
+    expect(steward).toContain("ab_testing_settings");
+    for (const id of ["ads_manager", "metrics_viewer", "content_viewer", "platform_ops", "user_admin"]) {
+      const caps = getBuiltInRoleCodeDefinition(id)!.capabilities.map((g) => g.name);
+      expect(caps).not.toContain("ab_testing_settings");
+    }
+  });
 });
 
 describe("grantsCanMutateMetrics", () => {
@@ -323,6 +349,99 @@ describe("ensureDatabasesEditDataOnAllContentEditors", () => {
     expect(ensureDatabasesEditDataOnAllContentEditors(roles)).toBe(false);
     expect(
       roles.platform_steward.capabilities.some((g) => g.name === "databases_edit_data"),
+    ).toBe(false);
+  });
+});
+
+describe("ensureDatabasesViewOnContentEditors (one-time)", () => {
+  it("adds databases_view to custom roles that can edit text at any scope", () => {
+    const roles: Record<string, RoleDefinition> = {
+      blog_editor: {
+        label: "Blog editor",
+        capabilities: [
+          { name: "content_view", contentTypes: ["blog"] },
+          { name: "content_edit_text", contentTypes: ["blog"] },
+        ],
+      },
+      seo_only: {
+        label: "SEO only",
+        capabilities: [{ name: "seo_edit", contentTypes: "*" }],
+      },
+    };
+    const applied: string[] = [];
+    expect(ensureDatabasesViewOnContentEditors(roles, applied)).toBe(true);
+    expect(roles.blog_editor.capabilities).toContainEqual({ name: "databases_view" });
+    expect(roles.seo_only.capabilities.some((g) => g.name === "databases_view")).toBe(false);
+    expect(applied).toContain(DATABASES_VIEW_CONTENT_EDITORS_MIGRATION);
+  });
+
+  it("skips roles that already browse databases, built-ins, and agentic roles", () => {
+    const roles: Record<string, RoleDefinition> = {
+      row_editor: {
+        label: "Row editor",
+        capabilities: [
+          { name: "content_edit_text", contentTypes: "*" },
+          { name: "databases_edit_data", databases: "*" },
+        ],
+      },
+      manager: {
+        label: "Manager",
+        capabilities: [
+          { name: "content_edit_text", contentTypes: ["blog"] },
+          { name: "databases_manage" },
+        ],
+      },
+      content_viewer: {
+        label: "Content Viewer",
+        capabilities: [{ name: "content_edit_text", contentTypes: "*" }],
+      },
+      copy_editor: {
+        label: "Copy Editor",
+        agentic: true,
+        capabilities: [{ name: "content_edit_text", contentTypes: "*" }],
+      },
+    };
+    ensureDatabasesViewOnContentEditors(roles, []);
+    for (const id of Object.keys(roles)) {
+      expect(roles[id].capabilities.some((g) => g.name === "databases_view"), id).toBe(false);
+    }
+  });
+
+  it("does not re-add after staff removal once recorded", () => {
+    const roles: Record<string, RoleDefinition> = {
+      editor: {
+        label: "Editor",
+        capabilities: [{ name: "content_edit_text", contentTypes: ["blog"] }],
+      },
+    };
+    const applied: string[] = [];
+    ensureDatabasesViewOnContentEditors(roles, applied);
+    roles.editor.capabilities = roles.editor.capabilities.filter((g) => g.name !== "databases_view");
+    expect(ensureDatabasesViewOnContentEditors(roles, applied)).toBe(false);
+    expect(roles.editor.capabilities.some((g) => g.name === "databases_view")).toBe(false);
+  });
+});
+
+describe("grantsAllowDatabasesBrowse", () => {
+  it("allows databases_view, databases_manage, or edit-data with a scope", () => {
+    expect(grantsAllowDatabasesBrowse([{ name: "databases_view" }])).toBe(true);
+    expect(grantsAllowDatabasesBrowse([{ name: "databases_manage" }])).toBe(true);
+    expect(
+      grantsAllowDatabasesBrowse([{ name: "databases_edit_data", databases: ["faq"] }]),
+    ).toBe(true);
+  });
+
+  it("fails closed otherwise", () => {
+    expect(grantsAllowDatabasesBrowse([])).toBe(false);
+    expect(grantsAllowDatabasesBrowse([{ name: "content_view", contentTypes: "*" }])).toBe(false);
+    expect(grantsAllowDatabasesBrowse([{ name: "databases_edit_data", databases: [] }])).toBe(
+      false,
+    );
+  });
+
+  it("databases_view stays view-only (does not unlock metrics jobs)", () => {
+    expect(
+      grantsCanMutateMetrics([{ name: "content_view", contentTypes: "*" }, { name: "databases_view" }]),
     ).toBe(false);
   });
 });

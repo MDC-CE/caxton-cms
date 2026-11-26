@@ -1,15 +1,15 @@
 // section-spacing: self-padded
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, lazy, Suspense } from "react";
 import { Check, Loader2 } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Turnstile } from "@marsidev/react-turnstile";
 import { normalizeLocale } from "@/lib/locale";
+import { leadSubmitErrorMessage } from "@/lib/leadSubmitError";
 import { localeFromPath } from "@shared/runtime-issues";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
 import {
   Form,
   FormControl,
@@ -22,12 +22,19 @@ import { useSession, useLocation as useSessionLocation, useUTM } from "@/context
 import { useSectionContext } from "@/contexts/SectionContext";
 import { useLocation } from "wouter";
 import { apiRequest, apiRequestWithAuth, apiFetch, queryClient } from "@/lib/queryClient";
-import { buildLeadAdContext, newSubmissionId, staffLeadHeaders } from "@/lib/leadAdContext";
+import {
+  buildLeadAdContext,
+  needsStaffSubmitConfirm,
+  newSubmissionId,
+  skipStaffSubmitConfirmThisSession,
+  staffLeadHeaders,
+} from "@/lib/leadAdContext";
 import { getApiPath } from "@shared/api-paths";
 import type { Country } from "react-phone-number-input";
 import { trackFormSubmission, trackConversion, resolveWebhook, hashEmail, getEcommerceProductLookup, type ConversionName, type FormSubmissionTrackingData, type TrackingSettingsResponse } from "@/lib/tracking";
-import { ensureEcommerceProductLookup } from "@/lib/ecommerceProductMap";
+import { ensureEcommerceProductLookup, ensureTrackingKeys } from "@/lib/ecommerceProductMap";
 import { usePageFunnel } from "@/contexts/PageFunnelContext";
+import { resolveFormTrackingContext, type PageTrackingContext } from "@shared/tracking-context";
 import {
   DEFAULT_ECOMMERCE_PRODUCT_FIELD,
   resolveConversionProduct,
@@ -45,7 +52,8 @@ import {
   parseAuthConversionEventConfig,
 } from "@shared/authConversionEvents";
 import { resolveFormDefaults } from "@shared/resolveFormDefaults";
-import { resolveConsentCopy, extraConsentYamlFieldsFromObject, consentKeyFromYamlField, isBlankConsentHtml, parseConsentSettingsResponse, shouldShowFallbackConsent } from "@shared/consent-settings";
+import { isUsVisitor } from "@shared/usVisitor";
+import { resolveConsentCopy, extraConsentYamlFieldsFromObject, consentKeyFromYamlField, isBlankConsentHtml, parseConsentSettingsResponse, resolveConsentRequirement } from "@shared/consent-settings";
 import { RichTextContent } from "@/components/ui/rich-text-content";
 import {
   applyLeadFormOverrideOutcome,
@@ -82,6 +90,8 @@ import {
   type FormFieldOption as RelationFormFieldOption,
 } from "@shared/resolveFormFieldRelationSource";
 import type { RelationEditorHint } from "@shared/relation-field";
+
+const StaffLeadConfirmDialog = lazy(() => import("@/components/lead_form/StaffLeadConfirmDialog"));
 
 /** Runtime defaults when YAML omits `fields.*.component_renderer`. */
 const SELECT_DEFAULT_FIELDS = new Set(["program", "plan", "location", "region"]);
@@ -323,7 +333,7 @@ interface LeadFormProps {
 
 interface FormOptions {
   programs: Array<{ slug: string; title: string; bc_slug?: string }>;
-  locations: Array<{ slug: string; name: string; city: string; country: string; region: string }>;
+  locations: Array<{ slug: string; name: string; city: string; country: string; country_code?: string; region: string }>;
   regions: Array<{ slug: string; label: string }>;
 }
 
@@ -352,7 +362,8 @@ interface ConsentSectionProps {
   form: ReturnType<typeof useForm<FormValues>>;
   locale: string;
   formOptions?: FormOptions;
-  sessionLocation: { slug: string; region: string; country?: string } | null;
+  sessionLocation: { slug: string; region: string; country?: string; country_code?: string } | null;
+  geo?: { country_code?: string } | null;
   consentSettings?: Record<string, Record<string, string> | string>;
   fallbackKey?: string | null;
 }
@@ -369,6 +380,10 @@ function ConsentMessage({ html, testId }: { html: string; testId?: string }) {
       data-testid={testId}
     />
   );
+}
+
+function consentRequiredMessage(locale: string): string {
+  return locale === "es" ? "Por favor marca esta casilla para continuar" : "Please check this box to continue";
 }
 
 function FallbackConsentField({
@@ -388,11 +403,7 @@ function FallbackConsentField({
     <FormField
       control={form.control}
       name={fallbackKey}
-      rules={{
-        validate: (value) => value === true || (locale === "es"
-          ? "Por favor marca esta casilla para continuar"
-          : "Please check this box to continue")
-      }}
+      rules={{ validate: (value) => value === true || consentRequiredMessage(locale) }}
       render={({ field, fieldState }) => (
         <FormItem className={className ?? "flex flex-col space-y-2"}>
           <div className="flex flex-row items-start space-x-3">
@@ -424,53 +435,35 @@ function FallbackConsentField({
   );
 }
 
-function ConsentSection({ consent, form, locale, formOptions, sessionLocation, consentSettings, fallbackKey }: ConsentSectionProps) {
+function ConsentSection({ consent, form, locale, formOptions, sessionLocation, geo, consentSettings, fallbackKey }: ConsentSectionProps) {
   const selectedLocationSlug = form.watch("location");
-  
-  const isUSALocation = (): boolean => {
-    if (consent.sms_usa_only === false) return true;
-    
-    if (selectedLocationSlug && formOptions?.locations) {
-      const selectedLoc = formOptions.locations.find(loc => loc.slug === selectedLocationSlug);
-      if (selectedLoc) {
-        return selectedLoc.country === "United States" || 
-               selectedLoc.slug.endsWith("-usa") ||
-               selectedLoc.region === "north-america";
-      }
-    }
-    
-    if (sessionLocation) {
-      if (sessionLocation.country === "United States" || 
-          sessionLocation.country === "US" ||
-          sessionLocation.slug?.endsWith("-usa")) {
-        return true;
-      }
-      if (sessionLocation.region === "north-america") {
-        return true;
-      }
-    }
-    
-    return false;
-  };
+  const selectedLocation = selectedLocationSlug
+    ? formOptions?.locations.find((loc) => loc.slug === selectedLocationSlug)
+    : undefined;
 
-  const showSmsConsent = consent.sms && (!consent.sms_usa_only || isUSALocation());
+  const showSmsConsent =
+    consent.sms && (!consent.sms_usa_only || isUsVisitor({ selectedLocation, sessionLocation, geo }));
 
   const defaultMarketingText = resolveConsentCopy("consent_marketing", consentSettings?.consent_marketing, locale);
   const defaultSmsText = resolveConsentCopy("consent_sms", consentSettings?.consent_sms, locale);
   const defaultEmailText = resolveConsentCopy("consent_email", consentSettings?.consent_email, locale);
   const defaultWhatsappText = resolveConsentCopy("consent_whatsapp", consentSettings?.consent_whatsapp, locale);
-  const showFallback = shouldShowFallbackConsent(consent, fallbackKey);
-  const fallbackCopy = fallbackKey
-    ? resolveConsentCopy(fallbackKey, consentSettings?.[fallbackKey], locale)
+  const requirement = resolveConsentRequirement(consent, fallbackKey, { locale, messages: consentSettings });
+  const requiredRule = (yamlField: string) =>
+    requirement.required.includes(yamlField)
+      ? { validate: (value: unknown) => value === true || consentRequiredMessage(locale) }
+      : undefined;
+  const fallbackCopy = requirement.fallbackKey
+    ? resolveConsentCopy(requirement.fallbackKey, consentSettings?.[requirement.fallbackKey], locale)
     : "";
 
   return (
     <div className="space-y-4">
-      {showFallback && fallbackKey && (
+      {requirement.showFallback && requirement.fallbackKey && (
         <FallbackConsentField
           form={form}
           locale={locale}
-          fallbackKey={fallbackKey}
+          fallbackKey={requirement.fallbackKey}
           html={fallbackCopy}
         />
       )}
@@ -479,11 +472,7 @@ function ConsentSection({ consent, form, locale, formOptions, sessionLocation, c
         <FormField
           control={form.control}
           name="consent_email"
-          rules={{ 
-            validate: (value) => value === true || (locale === "es" 
-              ? "Por favor marca esta casilla para continuar" 
-              : "Please check this box to continue")
-          }}
+          rules={requiredRule("marketing")}
           render={({ field, fieldState }) => (
             <FormItem className="flex flex-col space-y-2">
               <div className="flex flex-row items-start space-x-3">
@@ -605,13 +594,7 @@ function ConsentSection({ consent, form, locale, formOptions, sessionLocation, c
             key={yamlField}
             control={form.control}
             name={`consent_${yamlField}`}
-            rules={{
-              validate: (value) =>
-                value === true ||
-                (locale === "es"
-                  ? "Por favor marca esta casilla para continuar"
-                  : "Please check this box to continue"),
-            }}
+            rules={requiredRule(yamlField)}
             render={({ field, fieldState }) => (
               <FormItem className="flex flex-col space-y-2">
                 <div className="flex flex-row items-start space-x-3">
@@ -646,6 +629,26 @@ function ConsentSection({ consent, form, locale, formOptions, sessionLocation, c
   );
 }
 
+/** Public, non-secret subset of a conversion event (GET /api/settings/tracking/conversion-events). */
+type PublicConversionEventConfig = Pick<
+  TrackingSettingsResponse["conversion_events"][number],
+  "name" | "tags" | "automations" | "consent" | "success"
+>;
+
+/** GET /api/settings/tracking/conversion-events — public list; no webhooks or staff intent. */
+type PublicConversionEventsResponse = {
+  events: PublicConversionEventConfig[];
+  auth: Record<string, unknown>;
+};
+
+function findPublicConversionEvent(
+  events: PublicConversionEventConfig[] | undefined,
+  name: string | undefined,
+): PublicConversionEventConfig | undefined {
+  if (!name || !events?.length) return undefined;
+  return events.find((event) => event.name === name);
+}
+
 type EffectiveWebhook = {
   url?: string;
   method?: "POST" | "GET";
@@ -657,7 +660,7 @@ type EffectiveWebhook = {
 function buildEffectiveSubmitConfig(
   formData: LeadFormData,
   values: Record<string, unknown>,
-  trackingSettings: TrackingSettingsResponse | null | undefined,
+  events: PublicConversionEventConfig[] | undefined,
   resolveValue?: (raw: string) => unknown,
   entry?: Record<string, unknown> | null,
 ): {
@@ -667,7 +670,6 @@ function buildEffectiveSubmitConfig(
   automations: string;
   /** Delivery override when url is set. */
   formWebhook: EffectiveWebhook | null;
-  eventWebhook: EffectiveWebhook | null;
 } {
   const override = resolveLeadFormOverride(values, formData.form_overrides, {
     resolveValue,
@@ -679,13 +681,10 @@ function buildEffectiveSubmitConfig(
   ) as LeadFormData;
 
   const conversionName = overlaid.conversion_name;
-  const eventEntry = conversionName
-    ? trackingSettings?.conversion_events?.find((e) => e.name === conversionName)
-    : undefined;
+  const eventEntry = findPublicConversionEvent(events, conversionName) ?? null;
 
   let resolved: LeadFormData = overlaid;
   if (eventEntry) {
-    const eventWebhookUrl = eventEntry.webhook?.url;
     const wrapped = resolveFormDefaults(
       { _f: overlaid } as Record<string, unknown>,
       {
@@ -693,14 +692,6 @@ function buildEffectiveSubmitConfig(
         automations: eventEntry.automations,
         tags: eventEntry.tags,
         consent: eventEntry.consent,
-        webhook: eventWebhookUrl
-          ? {
-              url: eventWebhookUrl,
-              method: eventEntry.webhook?.method,
-              headers: eventEntry.webhook?.headers,
-              fail_silently: eventEntry.webhook?.fail_silently,
-            }
-          : undefined,
         success: eventEntry.success,
       },
       "_f",
@@ -720,17 +711,6 @@ function buildEffectiveSubmitConfig(
           ...(wh.fail_silently === true ? { fail_silently: true } : {}),
         }
       : null;
-  const eventWebhook: EffectiveWebhook | null =
-    eventEntry?.webhook?.url
-      ? {
-          url: eventEntry.webhook.url,
-          method: (eventEntry.webhook.method === "GET" ? "GET" : "POST") as "POST" | "GET",
-          ...(eventEntry.webhook.headers && Object.keys(eventEntry.webhook.headers).length > 0
-            ? { headers: eventEntry.webhook.headers }
-            : {}),
-          ...(eventEntry.webhook.fail_silently === true ? { fail_silently: true } : {}),
-        }
-      : null;
 
   return {
     conversion_name: resolved.conversion_name ?? conversionName,
@@ -738,7 +718,6 @@ function buildEffectiveSubmitConfig(
     tags: normalizeLeadFormTags(resolved.tags),
     automations: resolved.automations || "strong",
     formWebhook,
-    eventWebhook,
   };
 }
 
@@ -768,6 +747,7 @@ export default function LeadForm({
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [showTurnstileModal, setShowTurnstileModal] = useState(false);
   const [pendingFormData, setPendingFormData] = useState<FormValues | null>(null);
+  const [staffConfirmValues, setStaffConfirmValues] = useState<FormValues | null>(null);
   const [loginMode, setLoginMode] = useState(false);
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
@@ -787,9 +767,18 @@ export default function LeadForm({
   const turnstileMisconfigured =
     turnstileEnabled && !turnstileSiteKeyLoading && !turnstileSiteKey?.siteKey;
 
-  const { data: trackingSettings } = useQuery<TrackingSettingsResponse>({
-    queryKey: ["/api/settings/tracking"],
+  // Public, non-secret defaults for every conversion event. The full /api/settings/tracking
+  // is admin-only (metrics_view) and is intentionally NOT used here, so anonymous visitors,
+  // staff and local dev all get identical behavior. One list covers form_overrides that
+  // switch conversion_name, and forms without a name still get `auth` for signup/login.
+  const { data: publicConversionEvents } = useQuery<PublicConversionEventsResponse>({
+    queryKey: ["/api/settings/tracking/conversion-events"],
+    staleTime: 5 * 60 * 1000,
   });
+  const conversionEventConfig = findPublicConversionEvent(
+    publicConversionEvents?.events,
+    data.conversion_name,
+  );
 
   const { data: legalSettings } = useQuery<{ legal_terms_url: string; legal_privacy_url: string }>({
     queryKey: ["/api/settings/legal"],
@@ -819,9 +808,7 @@ export default function LeadForm({
   });
   const { data: variableDefinitions } = useVariableDefinitions();
   const variableContext = useVariableContext();
-  const authConversionCfg = parseAuthConversionEventConfig(
-    (trackingSettings ?? {}) as Record<string, unknown>,
-  );
+  const authConversionCfg = parseAuthConversionEventConfig(publicConversionEvents?.auth ?? {});
   // Account create path: needs field_map. Login-only gate does not.
   const signupActive =
     isSignupRequested &&
@@ -928,13 +915,10 @@ export default function LeadForm({
   const fields = data.fields || {};
 
   // Apply per-event defaults via resolveFormDefaults (form-level YAML values always win)
-  const eventEntry = data.conversion_name
-    ? trackingSettings?.conversion_events?.find((e) => e.name === data.conversion_name)
-    : undefined;
+  const eventEntry = data.conversion_name ? conversionEventConfig : undefined;
 
   const resolvedData: LeadFormData = (() => {
     if (!eventEntry) return data;
-    const eventWebhookUrl = eventEntry.webhook?.url;
     const wrapped = resolveFormDefaults(
       { _f: data } as Record<string, unknown>,
       {
@@ -942,14 +926,6 @@ export default function LeadForm({
         automations: eventEntry.automations,
         tags: eventEntry.tags,
         consent: eventEntry.consent,
-        webhook: eventWebhookUrl
-          ? {
-              url: eventWebhookUrl,
-              method: eventEntry.webhook?.method,
-              headers: eventEntry.webhook?.headers,
-              fail_silently: eventEntry.webhook?.fail_silently,
-            }
-          : undefined,
         success: eventEntry.success,
       },
       "_f"
@@ -1567,6 +1543,30 @@ export default function LeadForm({
     return resolved;
   };
 
+  /**
+   * Product / persona for this submit: the page funnel, unless the form overrides them with
+   * hidden `product` / `persona` fields (full id or short code). GTM gets codes once the site's
+   * tracking switch is on; the lead ledger / CRM always get full ids.
+   */
+  const resolveLeadTracking = async (fields: Record<string, LeadFormFieldDefault>) => {
+    const { ready, keys } = await ensureTrackingKeys();
+    const override = {
+      product: typeof fields.product === "string" ? fields.product : undefined,
+      persona: typeof fields.persona === "string" ? fields.persona : undefined,
+    };
+    const page = { contentType: contentType || "page", contentSlug: slug || "" };
+    const pick = (ctx: PageTrackingContext) =>
+      Object.fromEntries(
+        (["product", "persona", "product_persona", "tracking_truncated"] as const)
+          .filter((k) => ctx[k] !== undefined)
+          .map((k) => [k, ctx[k]]),
+      ) as Record<string, string | boolean>;
+    return {
+      codes: ready ? pick(resolveFormTrackingContext(pageFunnel, page, keys, override)) : null,
+      ids: pick(resolveFormTrackingContext(pageFunnel, page, keys, override, { mode: "ids" })),
+    };
+  };
+
   /** Same dataLayer body for signup and every other form conversion. */
   const trackLeadConversion = async (
     eventName: ConversionName,
@@ -1575,6 +1575,7 @@ export default function LeadForm({
     submissionId: string,
   ) => {
     const resolvedProduct = await resolveSubmitProduct(fields);
+    const leadTracking = await resolveLeadTracking(fields);
     const tracking: FormSubmissionTrackingData = {
       email: formValues.email,
       first_name: formValues.first_name,
@@ -1605,6 +1606,7 @@ export default function LeadForm({
       ...Object.fromEntries(
         Object.entries(fields).filter(([, value]) => isNonEmptyLeadFormWireScalar(value)),
       ),
+      ...(leadTracking.codes ?? {}),
       submission_id: submissionId,
     };
     await trackFormSubmission(eventName, tracking);
@@ -1619,7 +1621,7 @@ export default function LeadForm({
       const effective = buildEffectiveSubmitConfig(
         data,
         fields,
-        trackingSettings,
+        publicConversionEvents?.events,
         resolveConditionValue,
         singleEntry as Record<string, unknown> | undefined,
       );
@@ -1634,6 +1636,7 @@ export default function LeadForm({
       );
       const submissionId = newSubmissionId();
       const submitProduct = await resolveSubmitProduct(fields);
+      const leadTracking = await resolveLeadTracking(fields);
       const payload = {
         ...restValues,
         ...fieldScalars,
@@ -1663,7 +1666,7 @@ export default function LeadForm({
         utm_plan: utm.utm_plan,
         ppc_tracking_id: utm.ppc_tracking_id,
         referral: utm.referral || utm.ref,
-        tags: effective.tags,
+        ...(effective.tags ? { tags: effective.tags } : {}),
         automations: effective.automations,
         conversion_name: effective.conversion_name,
         token: turnstileToken,
@@ -1671,6 +1674,7 @@ export default function LeadForm({
         ...(submitProduct.ok
           ? { ledger_product_id: submitProduct.item_id, ledger_product_slug: submitProduct.program_id }
           : {}),
+        ...leadTracking.ids,
       };
 
       // Token written during this submit (signup) — cookie may lag React state; prefer this.
@@ -1782,18 +1786,12 @@ export default function LeadForm({
         ).text;
       };
 
-      // Webhook priority: per-form (YAML) → per-event → global.
-      const formWebhook = effective.formWebhook;
-      const eventWebhook = effective.eventWebhook;
-      const globalWebhook = trackingSettings?.webhook?.url ? trackingSettings.webhook : null;
+      // Single submission path: POST /api/leads/webhook-delivery. The section (form YAML)
+      // webhook is resolved here (form_overrides + {{ visitor.* }} / {{ entry.* }} templates)
+      // and sent along; otherwise the server resolves event → global → DEFAULT_WEBHOOK_URL.
+      const deliveryOverride = effective.formWebhook?.url ? effective.formWebhook : null;
 
-      const deliveryOverride = formWebhook?.url
-        ? formWebhook
-        : eventWebhook?.url
-          ? eventWebhook
-          : null;
-
-      let response: Response;
+      const body: Record<string, unknown> = { payload };
       if (deliveryOverride?.url) {
         const resolvedUrl = resolveTemplatedUrl(deliveryOverride.url) || deliveryOverride.url;
         const resolvedHeaders: Record<string, string> = {};
@@ -1803,38 +1801,22 @@ export default function LeadForm({
             resolvedHeaders[hk] = resolveTemplatedUrl(hv) || hv;
           }
         }
-        const body: Record<string, unknown> = {
-          payload,
-          webhook: {
-            url: resolvedUrl,
-            method: deliveryOverride.method || "POST",
-            ...(Object.keys(resolvedHeaders).length > 0 ? { headers: resolvedHeaders } : {}),
-            ...(deliveryOverride.fail_silently === true ? { fail_silently: true } : {}),
-          },
+        body.webhook = {
+          url: resolvedUrl,
+          method: deliveryOverride.method || "POST",
+          ...(Object.keys(resolvedHeaders).length > 0 ? { headers: resolvedHeaders } : {}),
+          ...(deliveryOverride.fail_silently === true ? { fail_silently: true } : {}),
         };
-        response = await fetch("/api/leads/webhook-delivery", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...staffLeadHeaders() },
-          body: JSON.stringify(body),
-          credentials: "same-origin",
-        });
-        if (!response.ok) {
-          const errText = await response.text().catch(() => "");
-          throw new Error(`${response.status}: ${errText || response.statusText}`);
-        }
-      } else if (globalWebhook) {
-        response = await fetch("/api/leads/webhook-delivery", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...staffLeadHeaders() },
-          body: JSON.stringify({ payload }),
-          credentials: "same-origin",
-        });
-        if (!response.ok) {
-          const errText = await response.text().catch(() => "");
-          throw new Error(`${response.status}: ${errText || response.statusText}`);
-        }
-      } else {
-        response = await apiRequestWithAuth("POST", "/api/leads", payload);
+      }
+      const response = await fetch("/api/leads/webhook-delivery", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...staffLeadHeaders() },
+        body: JSON.stringify(body),
+        credentials: "same-origin",
+      });
+      if (!response.ok) {
+        const errText = await response.text().catch(() => "");
+        throw new Error(`${response.status}: ${errText || response.statusText}`);
       }
 
       return { response, fields, effective, resolveTemplatedUrl, submissionId };
@@ -1858,17 +1840,13 @@ export default function LeadForm({
         // The secondary curated webhook is only fired when ALL three webhook levels
         // are unconfigured (i.e., primary submission went to Breathecode).
         // When any webhook level was used above, the full payload was already delivered.
-        const hasAnyWebhook = !!(
-          effective.formWebhook?.url ||
-          effective.eventWebhook?.url ||
-          trackingSettings?.webhook?.url
-        );
+        const hasAnyWebhook = !!effective.formWebhook?.url;
         if (!hasAnyWebhook) {
           try {
             const resolvedWebhook = resolveWebhook(
               effective.formWebhook?.url ? effective.formWebhook : null,
               effective.conversion_name,
-              trackingSettings ?? null,
+              null, // full tracking settings are admin-only; not available in the form
             );
             if (resolvedWebhook) {
               const webhookPayload: Record<string, unknown> = {
@@ -1909,7 +1887,9 @@ export default function LeadForm({
       if (effective.success?.url) {
         const successUrl =
           resolveTemplatedUrl(effective.success.url) || effective.success.url;
-        nav.navigate(successUrl);
+        // Submit already awaited the lead request, so a new tab is outside the
+        // tap and mobile browsers block it. Stay in this tab instead.
+        nav.navigate(successUrl, { external: "same-tab" });
       } else {
         setIsSuccess(true);
         setSuccessMessage(effective.success?.message || (locale === "es" 
@@ -1919,77 +1899,37 @@ export default function LeadForm({
     },
     onError: (error: Error) => {
       console.error("Lead submission error:", error);
-
-      const defaultErrorMessage = locale === "es"
-        ? "Hubo un problema al enviar tu información. Por favor intenta de nuevo."
-        : "There was a problem submitting your information. Please try again.";
-
-      const isTechnicalErrorMessage = (msg: string) =>
-        /upstream webhook returned a non-2xx/i.test(msg) ||
-        /failed to deliver webhook/i.test(msg) ||
-        /failed to deliver/i.test(msg);
-
-      const preferUserFacing = (msg: string | undefined | null): string | null => {
-        if (typeof msg !== "string") return null;
-        const trimmed = msg.trim();
-        if (!trimmed || isTechnicalErrorMessage(trimmed)) return null;
-        return trimmed;
-      };
-
-      let errorMessage = defaultErrorMessage;
-      try {
-        const jsonMatch = error.message.match(/^\d+:\s*(.+)$/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[1]) as {
-            error?: unknown;
-            details?: unknown;
-          };
-          if (typeof parsed.details === "string") {
-            if (parsed.details.includes("<!DOCTYPE") || parsed.details.includes("<html")) {
-              errorMessage = defaultErrorMessage;
-            } else {
-              try {
-                const details = JSON.parse(parsed.details) as { detail?: unknown; message?: unknown };
-                const fromDetails = preferUserFacing(
-                  typeof details.detail === "string"
-                    ? details.detail
-                    : typeof details.message === "string"
-                      ? details.message
-                      : null,
-                );
-                if (fromDetails) {
-                  errorMessage = fromDetails;
-                }
-              } catch {
-                const fromRawDetails = preferUserFacing(parsed.details);
-                if (fromRawDetails) errorMessage = fromRawDetails;
-              }
-            }
-          } else if (
-            parsed.details &&
-            typeof parsed.details === "object" &&
-            "detail" in parsed.details &&
-            typeof (parsed.details as { detail: unknown }).detail === "string"
-          ) {
-            const fromObj = preferUserFacing((parsed.details as { detail: string }).detail);
-            if (fromObj) errorMessage = fromObj;
-          }
-          // Never surface internal webhook labels (e.g. "Upstream webhook returned a non-2xx…")
-          // — keep default unless details already provided a user-facing message.
-        }
-      } catch {
-        // keep default
-      }
-
-      if (errorMessage.length > 200 || /<[^>]+>/.test(errorMessage)) {
-        errorMessage = defaultErrorMessage;
-      }
-
-      setSubmitError(errorMessage);
+      setSubmitError(leadSubmitErrorMessage(error.message, locale));
     },
   });
 
   const onSubmit = (values: FormValues) => {
+    // Read at submit time: the staff token and the session opt-out live in browser storage.
+    if (needsStaffSubmitConfirm()) {
+      setStaffConfirmValues(values);
+      return;
+    }
+    submitLead(values);
+  };
+
+  const confirmStaffSubmit = (skipForSession: boolean) => {
+    const values = staffConfirmValues;
+    setStaffConfirmValues(null);
+    if (skipForSession) skipStaffSubmitConfirmThisSession();
+    if (values) submitLead(values);
+  };
+
+  const staffConfirmDialog = staffConfirmValues ? (
+    <Suspense fallback={null}>
+      <StaffLeadConfirmDialog
+        locale={locale}
+        onConfirm={confirmStaffSubmit}
+        onCancel={() => setStaffConfirmValues(null)}
+      />
+    </Suspense>
+  ) : null;
+
+  const submitLead = (values: FormValues) => {
     setTurnstileError(null);
     setSubmitError(null);
 
@@ -2514,44 +2454,25 @@ export default function LeadForm({
                 {emailConfig.helper_text}
               </p>
             )}
-            {showLegalAndConsent && allRequiredFieldsFilled && shouldShowFallbackConsent(consent, consentFallbackKey) && consentFallbackKey && (
-              <FallbackConsentField
-                form={form}
-                locale={locale}
-                fallbackKey={consentFallbackKey}
-                html={resolveConsentCopy(consentFallbackKey, consentSettings?.[consentFallbackKey], locale)}
-                className="flex flex-col space-y-2 mt-3"
-              />
-            )}
-            {showLegalAndConsent && allRequiredFieldsFilled && consent.email && (
-              <FormField
-                control={form.control}
-                name="consent_email"
-                render={({ field }) => (
-                  <FormItem className="flex flex-row items-start space-x-3 space-y-0 mt-3">
-                    <FormControl>
-                      <Checkbox
-                        checked={field.value}
-                        onCheckedChange={field.onChange}
-                        data-testid="checkbox-consent-email"
-                      />
-                    </FormControl>
-                    <div className="space-y-1 leading-none">
-                      <Label className="text-xs text-muted-foreground cursor-pointer" htmlFor="consent_email">
-                        {locale === "es"
-                          ? "Acepto recibir información por correo electrónico sobre talleres, eventos, cursos y otros materiales de marketing."
-                          : "I agree to receive information via email about workshops, events, courses, and other marketing materials."
-                        }
-                      </Label>
-                    </div>
-                  </FormItem>
-                )}
-              />
+            {showLegalAndConsent && allRequiredFieldsFilled && (
+              <div className="mt-3">
+                <ConsentSection
+                  consent={consent}
+                  form={form}
+                  locale={locale}
+                  formOptions={formOptions}
+                  sessionLocation={sessionLocation}
+                  geo={session.geo}
+                  consentSettings={consentSettings}
+                  fallbackKey={consentFallbackKey}
+                />
+              </div>
             )}
           </form>
         </Form>
         {signupLoginPrompt}
         {switchAccountPrompt}
+        {staffConfirmDialog}
       </div>
     );
   }
@@ -2997,6 +2918,7 @@ export default function LeadForm({
               locale={locale}
               formOptions={formOptions}
               sessionLocation={sessionLocation}
+              geo={session.geo}
               consentSettings={consentSettings}
               fallbackKey={consentFallbackKey}
             />
@@ -3082,6 +3004,7 @@ export default function LeadForm({
       </Form>
       {signupLoginPrompt}
       {switchAccountPrompt}
+      {staffConfirmDialog}
     </div>
   );
 }

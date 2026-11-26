@@ -40,6 +40,9 @@ if (isDirectRun) {
 async function runPrebuild(): Promise<void> {
   loadDotenv({ quiet: true });
   process.env.NODE_ENV = "production";
+  // Rendering touches the global content index, which would enqueue index_refresh.
+  // That opens the live Sidequest database and this process never exits.
+  process.env.PREBUILD_HTML = "1";
 
   const { requireSiteConfigs } = await import("../server/site-config");
   const { renderHubHtml } = await import("../server/render-hub-html");
@@ -101,6 +104,19 @@ async function runPrebuild(): Promise<void> {
             );
             continue;
           }
+          const { AUDIENCE_LLM_VARIANT } = await import("../shared/llm-html-audience");
+          const llm = await renderHubHtml({
+            site: runtime,
+            pathname: job.pathname,
+            variantKey: AUDIENCE_LLM_VARIANT,
+            writeCache: true,
+          });
+          if (llm && llm.status !== 200 && llm.status !== 204) {
+            log.warn(
+              { pathname: job.pathname, siteId: job.siteId, status: llm.status },
+              `prebuild audience-llm skipped ${job.pathname}: status ${llm.status}`,
+            );
+          }
           wrote += 1;
           if (wrote % 25 === 0) {
             console.log(`[prebuild-html] wrote ${wrote}/${jobs.length}`);
@@ -123,6 +139,10 @@ async function runPrebuild(): Promise<void> {
   for (const site of sites) {
     const runtime = buildHtmlRebuildSite(site.contentFolder, site.contentFolder);
     runtimes.set(site.contentFolder, runtime);
+    // The slow index holds redirects. Building it here means refreshCustomRedirects
+    // does not enqueue index_refresh. That enqueue opens the live Sidequest
+    // database and this process never exits, so the deploy never flips traffic.
+    runtime.contentIndex.scanSlow();
     const redirects = createPublicUrlResolver(runtime.contentIndex, { freshRedirects: true });
     const seen = new Set<string>();
     for (const row of getSitemapUrls(toActiveSiteCtx(runtime), true)) {

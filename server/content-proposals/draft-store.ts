@@ -35,7 +35,6 @@ import {
   readVariantData,
   relFromCwd,
   safeDumpYaml,
-  stripDraftMetaFromRaw,
   writeDraftMeta,
   writeVariantFile,
   type DraftProposalLink,
@@ -46,17 +45,23 @@ import {
   checkTranslationSource,
   commonPathOf,
   draftPathOf,
+  draftSeedFromLive,
   forgetDraftBase,
+  funnelCarriedWarning,
   livePathOf,
   rebuildDraftFromBase,
   recordDraftBase,
   recordTranslationSource,
+  scopeOptionsOf,
   type AuthorDiff,
   type DraftBaseCheck,
   type DraftRef,
   type RebuildResult,
   type TranslationSourceCheck,
 } from "../versioning/draft-base";
+
+/** Bump when the draft diff logic changes so cached proposal views are rebuilt. */
+const DERIVED_VIEW_VERSION = "v2";
 
 export type ProposalDraftRef = {
   contentType: string;
@@ -98,14 +103,14 @@ export type ProposalDraftStore = {
       newEntry?: { funnel?: Record<string, unknown> | null };
       seo?: Record<string, unknown> | null;
     },
-  ): { ok: true } | { ok: false; code: string; error: string };
+  ): { ok: true; warnings?: Array<{ code: string; message: string }> } | { ok: false; code: string; error: string };
   /** Allocation in versioning.yml; null when not registered (a draft). */
   allocation(ref: ProposalDraftRef): number | null;
   /** Post that uses the shared template (drafts may only change fields). */
   isAttached(contentType: string, slug: string): boolean;
   structureError(ref: ProposalDraftRef): string | null;
   /** Replace the draft body with today's live (`{}` when unpublished), keep `_draft`, and record a new base. */
-  reset(ref: ProposalDraftRef, author: string): void;
+  reset(ref: ProposalDraftRef, author: string): Array<{ code: string; message: string }> | void;
   snapshotRaw(ref: ProposalDraftRef): string | null;
   restoreRaw(ref: ProposalDraftRef, raw: string, author: string): void;
   write(ref: ProposalDraftRef, updates: DraftFieldUpdate[], author: string): Promise<DraftWriteResult>;
@@ -154,7 +159,7 @@ export function draftStoreForSite(ctx: SiteContext): ProposalDraftStore {
       slug,
     );
 
-  function registerVariant(ref: ProposalDraftRef, versioningSlug: string): void {
+  function registerVariant(ref: ProposalDraftRef, versioningSlug: string, author?: string | null): void {
     const vm = ctx.versioningManager;
     const existing = vm.getVersioningForContent(ref.contentType, versioningSlug) || {};
     const localeData = existing[ref.locale]
@@ -163,7 +168,27 @@ export function draftStoreForSite(ctx: SiteContext): ProposalDraftStore {
     if (!localeData.variants.some((v: { slug: string }) => v.slug === ref.variant)) {
       localeData.variants.push({ slug: ref.variant, allocation: 0 });
     }
-    vm.updateVersioning(ref.contentType, versioningSlug, { ...existing, [ref.locale]: localeData });
+    vm.updateVersioning(ref.contentType, versioningSlug, { ...existing, [ref.locale]: localeData }, {
+      author,
+      contentRoot,
+    });
+  }
+
+  function seedFromLive(
+    ref: ProposalDraftRef,
+    livePath: string,
+  ): { content: string; warnings: Array<{ code: string; message: string }> } {
+    const commonPath = commonPathOf(withRoot(ref));
+    const seeded = draftSeedFromLive(fs.readFileSync(livePath, "utf-8"), {
+      ...scopeOptionsOf(withRoot(ref)),
+      commonRaw: fs.existsSync(commonPath) ? fs.readFileSync(commonPath, "utf-8") : null,
+    });
+    if (!seeded.carried.includes("funnel")) return { content: seeded.content, warnings: [] };
+    const warning = funnelCarriedWarning(ref.locale);
+    return {
+      content: seeded.content,
+      warnings: [{ ...warning, message: `${ref.contentType}/${ref.slug} (${ref.locale}): ${warning.message}` }],
+    };
   }
 
   const store: ProposalDraftStore = {
@@ -288,8 +313,9 @@ export function draftStoreForSite(ctx: SiteContext): ProposalDraftStore {
         return { ok: false, code: "entry_not_found", error: resolved.error };
       }
       const livePath = livePathOf(withRoot(ref));
-      const content = fs.existsSync(livePath)
-        ? stripDraftMetaFromRaw(fs.readFileSync(livePath, "utf-8"))
+      const seeded = fs.existsSync(livePath) ? seedFromLive(ref, livePath) : null;
+      const content = seeded
+        ? seeded.content
         : opts.seo && Object.keys(opts.seo).length > 0
           ? safeDumpYaml({ seo: opts.seo })
           : "{}\n";
@@ -300,10 +326,10 @@ export function draftStoreForSite(ctx: SiteContext): ProposalDraftStore {
         meta: null,
       });
       const versioningSlug = resolved.ok ? resolved.slug : ref.slug;
-      registerVariant(ref, versioningSlug);
+      registerVariant(ref, versioningSlug, opts.author);
       recordDraftBase(withRoot(ref), { author: opts.author });
       if (opts.newEntry) ctx.contentIndex.refresh();
-      return { ok: true };
+      return { ok: true, warnings: seeded?.warnings ?? [] };
     },
 
     allocation(ref) {
@@ -328,11 +354,10 @@ export function draftStoreForSite(ctx: SiteContext): ProposalDraftStore {
     reset(ref, author) {
       const draftPath = draftPathOf(withRoot(ref));
       const livePath = livePathOf(withRoot(ref));
-      const content = fs.existsSync(livePath)
-        ? stripDraftMetaFromRaw(fs.readFileSync(livePath, "utf-8"))
-        : "{}\n";
-      writeVariantFile(draftPath, content, { author, contentRoot, relPath: relFromCwd(draftPath) });
+      const seeded = fs.existsSync(livePath) ? seedFromLive(ref, livePath) : null;
+      writeVariantFile(draftPath, seeded?.content ?? "{}\n", { author, contentRoot, relPath: relFromCwd(draftPath) });
       recordDraftBase(withRoot(ref), { author });
+      return seeded?.warnings ?? [];
     },
 
     snapshotRaw(ref) {
@@ -410,7 +435,7 @@ export function draftStoreForSite(ctx: SiteContext): ProposalDraftStore {
       if (existing) {
         const { data, isEmpty } = pruneVersioningAfterVariantRemove(existing, ref.locale, ref.variant);
         if (isEmpty) vm.deleteVersioningConfig(ref.contentType, versioningSlug, author, contentRoot);
-        else vm.updateVersioning(ref.contentType, versioningSlug, data);
+        else vm.updateVersioning(ref.contentType, versioningSlug, data, { author, contentRoot });
       }
       if (templateMode) return { entryDeleted: false };
       const dir = entryDir(ref.contentType, ref.slug);
@@ -443,6 +468,7 @@ export function draftStoreForSite(ctx: SiteContext): ProposalDraftStore {
         ? hashFileOrNull(livePathOf({ ...r, locale: meta.translated_from.locale }))
         : null;
       return [
+        DERIVED_VIEW_VERSION,
         hashVariantFileContents(raw),
         meta?.based_on?.locale ?? "-",
         meta?.based_on?.common ?? "-",

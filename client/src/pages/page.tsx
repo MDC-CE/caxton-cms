@@ -20,10 +20,10 @@ import Staff404Recovery, { Staff404SwitchToEditHint } from "@/components/editing
 import { MenuVisualContextProvider } from "@/contexts/MenuVisualContext";
 import { useMenuConfig } from "@/hooks/useMenuConfig";
 import { getMenuChromeHeights } from "@/lib/menuChrome";
-import { normalizeFunnelBlock } from "@shared/funnel";
 import { useEditModeOptional } from "@/contexts/EditModeContext";
 import { useEagerSectionsReady } from "@/hooks/useEagerSectionsReady";
 import { usePageVersionExposure } from "@/hooks/usePageVersionExposure";
+import { usePageTrackingContext } from "@/hooks/usePageTrackingContext";
 
 const RawFileEditorPanel = lazy(() => import("@/components/editing/RawFileEditorPanel"));
 
@@ -79,6 +79,7 @@ export default function Page() {
     enabled: !!slug,
   });
   usePageVersionExposure(page, { skip: !!forceVariant || isStaff });
+  usePageTrackingContext(page, { contentType: "page", slug, skip: !!forceVariant || isStaff });
 
   const { data: rawFileCheck } = useQuery<{ exists: boolean }>({
     queryKey: ["/api/content/raw-file", "page", slug, locale],
@@ -234,7 +235,7 @@ export default function Page() {
           singleEntry={page.singleEntry}
           meta={page.meta as Record<string, unknown> | undefined}
           param={(page as { param?: Record<string, unknown> }).param}
-          funnel={normalizeFunnelBlock((page as Record<string, unknown>).funnel)}
+          funnel={(page as Record<string, unknown>).funnel}
         />
       </MenuVisualContextProvider>
       <div className="group relative">

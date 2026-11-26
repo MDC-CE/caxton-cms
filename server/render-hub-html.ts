@@ -10,14 +10,23 @@ import { applyEntryModulePreload } from "./utils/html-transforms";
 import { buildEntryPreloadTags, getEntryAssets } from "./utils/vite-manifest";
 import { assembleSsrDocument, contentTypesReadyForHtmlCache, isMeaningfulSsrAppHtml } from "./utils/ssr-html";
 import { injectGtmWebContainerId } from "./gtm-web-inject";
+import { injectPageTrackingDataLayer, injectPageVersionDataLayer } from "./utils/html-inject";
+import { initialDataAssignmentForHtmlKey } from "./html-variant-key";
+
+function llmAudienceKey(variantKey: string): boolean {
+  return variantKey === AUDIENCE_LLM_VARIANT;
+}
 import {
   buildHtmlCacheKey,
   canonicalHtmlCachePath,
   getCachedHtml,
+  invalidateHtmlPageCacheKey,
   setCachedHtml,
 } from "./html-page-cache";
 import type { SiteContext } from "./site-manager";
 import { child as loggerChild } from "./logger";
+import { AUDIENCE_LLM_VARIANT, initialDataBranchesForLlm } from "../shared/llm-html-audience";
+import { llmLocationCatalog } from "./llm-location-catalog";
 
 const log = loggerChild({ module: "render-hub-html" });
 
@@ -110,18 +119,20 @@ function takeHtmlCacheMeta(payload: InitialDataPayload | null): { skipCacheWrite
  * The visitor miss path and Sidequest both call this.
  */
 export async function buildAnonymousPageHtml(opts: {
-  render: (url: string, payload: unknown) => Promise<string>;
+  render: (url: string, payload: unknown, options?: { llmAudience?: boolean }) => Promise<string>;
   indexHtml: string;
   initialData: InitialDataPayload | null;
   url: string;
   contentRoot?: string;
   ssrSchemaHtml?: string;
+  llmAudience?: boolean;
 }): Promise<AnonymousPageHtml | null> {
   const meta = takeHtmlCacheMeta(opts.initialData);
-  let appHtml = await opts.render(opts.url, opts.initialData);
+  const renderOptions = opts.llmAudience ? { llmAudience: true } : undefined;
+  let appHtml = await opts.render(opts.url, opts.initialData, renderOptions);
   if (!isMeaningfulSsrAppHtml(appHtml)) {
     log.warn({ url: opts.url, appHtmlLength: appHtml?.length ?? 0 }, "SSR returned empty body, retrying once");
-    appHtml = await opts.render(opts.url, opts.initialData);
+    appHtml = await opts.render(opts.url, opts.initialData, renderOptions);
   }
   if (!isMeaningfulSsrAppHtml(appHtml)) {
     log.warn({ url: opts.url, appHtmlLength: appHtml?.length ?? 0 }, "SSR returned empty body after retry");
@@ -138,6 +149,8 @@ export async function buildAnonymousPageHtml(opts: {
   html = applyEntryModulePreload(html);
   html = injectEntryPreloadTags(html);
   html = injectGtmWebContainerId(html, opts.contentRoot);
+  html = injectPageVersionDataLayer(html, opts.initialData);
+  html = injectPageTrackingDataLayer(html, opts.initialData);
   if (opts.contentRoot) html = injectThemeOverrides(html, opts.contentRoot);
   if (!contentTypesReadyForHtmlCache(opts.initialData)) {
     log.warn({ url: opts.url }, "content type list missing; not storing this HTML copy");
@@ -171,7 +184,7 @@ export async function renderHubHtml(opts: {
     opts.site.contentRootName || opts.site.contentRoot || opts.site.config.domain || "default";
   const cacheKey = buildHtmlCacheKey(siteId, clean, variantKey);
 
-  if (opts.generation == null) {
+  if (opts.generation == null && variantKey !== AUDIENCE_LLM_VARIANT) {
     const cached = getCachedHtml(cacheKey);
     if (cached && !urlBakesStoredPageQuery(clean, opts.site.contentIndex as ContentIndex | undefined)) {
       return { html: cached.html, status: cached.status, fromCache: true };
@@ -188,6 +201,7 @@ export async function renderHubHtml(opts: {
     opts.site.contentIndex as Parameters<typeof resolveInitialData>[1],
     opts.site.database as Parameters<typeof resolveInitialData>[2],
     opts.site,
+    llmAudienceKey(variantKey) ? undefined : initialDataAssignmentForHtmlKey(opts.site, clean, variantKey),
   ).catch(() => null);
 
   const status = resolvePublicHtmlStatus({
@@ -202,6 +216,13 @@ export async function renderHubHtml(opts: {
 
   if (status !== 200) {
     return { html: "", status, fromCache: false };
+  }
+
+  const llmAudience = variantKey === AUDIENCE_LLM_VARIANT;
+  const pageLocale = clean === "/es" || clean.startsWith("/es/") ? "es" : "en";
+  if (llmAudience && !initialDataBranchesForLlm(initialDataPayload, pageLocale, llmLocationCatalog)) {
+    if (opts.writeCache !== false) invalidateHtmlPageCacheKey(cacheKey);
+    return { html: "", status: 204, fromCache: false };
   }
 
   try {
@@ -219,6 +240,7 @@ export async function renderHubHtml(opts: {
       url,
       contentRoot: opts.site.contentRoot,
       ssrSchemaHtml: head.schemaHtml || undefined,
+      llmAudience,
     });
     if (!built) return null;
     if (opts.writeCache !== false && !built.skipCacheWrite) {

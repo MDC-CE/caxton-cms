@@ -8,6 +8,7 @@
 import { getSiteSqlite } from "../db";
 import { ensurePipelineDb } from "../pipeline-db/runner";
 import { ledgerCollectingSince } from "./lead-ledger";
+import { funnelBreakdowns, funnelFilterLabels, funnelFilterSql, type FunnelIndex, type FunnelRow } from "./leads-funnel";
 import { utmViolations, type UtmGrace } from "@shared/ads-diagnostics-rules";
 import { DEFAULT_UTM_CONVENTION, type UtmConvention } from "@shared/ads-settings";
 import { PAID_LOOKBACK_DAYS, PAID_MEDIUMS } from "@shared/paid-traffic";
@@ -16,6 +17,7 @@ import {
   LEADS_BREAKDOWN_TOP,
   LEADS_DAILY_MAX_DAYS,
   LEADS_DAY_MS,
+  LEADS_DELIVERY_FILTER_STATUSES,
   LEADS_NONE,
   LEADS_PAGE_SIZE,
   LEADS_TTL_BOUNDS,
@@ -28,12 +30,14 @@ import {
   utcDayKey,
   type LeadDetail,
   type LeadsBreakdownRow,
+  type LeadsDeliveryFilter,
   type LeadsFilters,
   type LeadsListResponse,
   type LeadsListRow,
   type LeadsLocalCopy,
   type LeadsOffConventionValue,
   type LeadsQuery,
+  type LeadsShow,
   type LeadsStatsResponse,
   type LeadsTimelinePoint,
   type LeadsTimelineSeries,
@@ -84,14 +88,24 @@ function nullableEq(column: string, value: string, conds: string[], params: (str
   }
 }
 
-/** Parameterized WHERE for the include_test toggle, filter chips and an optional time window. */
+/**
+ * Parameterized WHERE for the show selector, filter chips and an optional time window.
+ * `trackingIndex` resolves persona ids for the funnel_persona filter on rows without pairs.
+ */
 export function buildLeadsWhere(
-  q: { include_test: boolean; filters: LeadsFilters },
+  q: { show: LeadsShow; filters: LeadsFilters; delivery?: LeadsDeliveryFilter },
   window?: Window | null,
+  trackingIndex?: FunnelIndex,
 ): Where {
   const conds: string[] = [];
   const params: (string | number)[] = [];
-  if (!q.include_test) conds.push("is_test = 0 AND is_repeat = 0");
+  if (q.show === "real") conds.push("is_test = 0 AND is_repeat = 0");
+  else if (q.show === "test") conds.push("is_test = 1");
+  if (q.delivery) {
+    const statuses = LEADS_DELIVERY_FILTER_STATUSES[q.delivery];
+    conds.push(`submission_id IN (SELECT submission_id FROM lead_outbox WHERE status IN (${statuses.map(() => "?").join(", ")}))`);
+    params.push(...statuses);
+  }
   if (window) {
     conds.push("created_at >= ?");
     params.push(window.startMs);
@@ -124,6 +138,7 @@ export function buildLeadsWhere(
       params.push(f.product, f.product);
     }
   }
+  funnelFilterSql(f, trackingIndex, conds, params);
   if (f.ttl) {
     const [min, max] = LEADS_TTL_BOUNDS[f.ttl];
     conds.push("first_paid_at IS NOT NULL");
@@ -144,17 +159,24 @@ function and(where: Where, extra: string): string {
 }
 
 /** Newest-first page of 20 leads for the current range, toggle and filters. */
-export function listLeadsPage(site: string, q: LeadsQuery, nowMs: number = Date.now()): LeadsListResponse {
+export function listLeadsPage(
+  site: string,
+  q: LeadsQuery,
+  nowMs: number = Date.now(),
+  trackingIndex?: FunnelIndex,
+): LeadsListResponse {
   ensurePipelineDb(site);
   const db = getSiteSqlite(site);
   const bounds = leadsRangeBounds(q.range, nowMs, ledgerCollectingSince(site));
-  const where = buildLeadsWhere(q, q.range === "all" ? null : { startMs: bounds.startMs });
+  const where = buildLeadsWhere(q, q.range === "all" ? null : { startMs: bounds.startMs }, trackingIndex);
   const total = (db.prepare(`SELECT COUNT(*) AS n FROM lead_submissions ${where.sql}`).get(...where.params) as { n: number }).n;
   const totalPages = Math.max(1, Math.ceil(total / LEADS_PAGE_SIZE));
   const page = Math.min(Math.max(1, q.page), totalPages);
   const rows = db
     .prepare(
-      `SELECT ${LIST_COLUMNS.join(", ")} FROM lead_submissions ${where.sql}
+      `SELECT ${LIST_COLUMNS.join(", ")},
+         (SELECT o.status FROM lead_outbox o WHERE o.submission_id = lead_submissions.submission_id) AS delivery_status
+       FROM lead_submissions ${where.sql}
        ORDER BY created_at DESC, submission_id DESC LIMIT ? OFFSET ?`,
     )
     .all(...where.params, LEADS_PAGE_SIZE, (page - 1) * LEADS_PAGE_SIZE) as LeadsListRow[];
@@ -297,10 +319,20 @@ function pathBreakdown(
   return topWithOther(out, whole);
 }
 
-/** "landing:coding-bootcamp:en" + "b" -> "coding-bootcamp (en) · b". */
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * "landing:coding-bootcamp:en" + "b" -> "coding-bootcamp (en) · b".
+ * "landing:coding-bootcamp:en@2026-10-23" + "b" -> "coding-bootcamp (en, from Oct 23) · b".
+ */
 export function experimentLabel(experimentId: string, variant: string | null): string {
-  const parts = experimentId.split(":");
-  const page = parts.length === 3 ? `${parts[1]} (${parts[2]})` : experimentId;
+  const at = experimentId.lastIndexOf("@");
+  const base = at > 0 ? experimentId.slice(0, at) : experimentId;
+  const run = at > 0 ? experimentId.slice(at + 1) : "";
+  const parts = base.split(":");
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(run);
+  const from = m ? `, from ${MONTHS[Number(m[2]) - 1] ?? m[2]} ${Number(m[3])}` : run ? `, run ${run}` : "";
+  const page = parts.length === 3 ? `${parts[1]} (${parts[2]}${from})` : experimentId;
   return `${page} · ${variant ?? "(no variant)"}`;
 }
 
@@ -388,6 +420,15 @@ export function trackingSince(site: string): number | null {
   return row?.first ?? null;
 }
 
+/** First non-test lead with a page funnel product list (since pipeline migration 41). */
+export function funnelSince(site: string): number | null {
+  ensurePipelineDb(site);
+  const row = getSiteSqlite(site)
+    .prepare("SELECT MIN(created_at) AS first FROM lead_submissions WHERE product IS NOT NULL AND is_test = 0")
+    .get() as { first: number | null } | undefined;
+  return row?.first ?? null;
+}
+
 /** First non-test lead with a product (when product recording started). */
 export function productSince(site: string): number | null {
   ensurePipelineDb(site);
@@ -399,20 +440,27 @@ export function productSince(site: string): number | null {
 
 export function getLeadsStats(
   site: string,
-  q: Pick<LeadsQuery, "range" | "include_test" | "filters">,
-  opts: { convention?: UtmConvention; grace?: UtmGrace | null; nowMs?: number; localCopy?: LeadsLocalCopy } = {},
+  q: Pick<LeadsQuery, "range" | "show" | "filters">,
+  opts: {
+    convention?: UtmConvention;
+    grace?: UtmGrace | null;
+    nowMs?: number;
+    localCopy?: LeadsLocalCopy;
+    trackingIndex?: FunnelIndex;
+  } = {},
 ): LeadsStatsResponse {
   ensurePipelineDb(site);
   const db = getSiteSqlite(site);
   const nowMs = opts.nowMs ?? Date.now();
   const convention = opts.convention ?? DEFAULT_UTM_CONVENTION;
+  const trackingIndex = opts.trackingIndex;
   const collectingSince = ledgerCollectingSince(site);
   const bounds = leadsRangeBounds(q.range, nowMs, collectingSince);
-  const where = buildLeadsWhere(q, q.range === "all" ? null : { startMs: bounds.startMs });
+  const where = buildLeadsWhere(q, q.range === "all" ? null : { startMs: bounds.startMs }, trackingIndex);
   const count = (w: Where, extra?: string): number =>
     (db.prepare(`SELECT COUNT(*) AS n FROM lead_submissions ${extra ? and(w, extra) : w.sql}`).get(...w.params) as { n: number }).n;
 
-  const totalAllTime = count(buildLeadsWhere({ include_test: q.include_test, filters: {} }));
+  const totalAllTime = count(buildLeadsWhere({ show: q.show, filters: {} }));
   const kpiRow = db
     .prepare(
       `SELECT COUNT(*) AS n,
@@ -421,7 +469,9 @@ export function getLeadsStats(
               COALESCE(SUM(CASE WHEN channel IS NOT NULL THEN 1 ELSE 0 END), 0) AS tracked,
               COALESCE(SUM(CASE WHEN channel = 'organic_search' AND NOT ${PAID_SQL} THEN 1 ELSE 0 END), 0) AS organic_search,
               COALESCE(SUM(CASE WHEN ${NO_CONSENT_SQL} THEN 1 ELSE 0 END), 0) AS no_consent,
-              COALESCE(SUM(CASE WHEN ${UNCLEAR_SQL} AND NOT ${PAID_SQL} THEN 1 ELSE 0 END), 0) AS meta_unclear
+              COALESCE(SUM(CASE WHEN ${UNCLEAR_SQL} AND NOT ${PAID_SQL} THEN 1 ELSE 0 END), 0) AS meta_unclear,
+              COALESCE(SUM(CASE WHEN is_test = 1 AND test_reason = 'staff_session' THEN 1 ELSE 0 END), 0) AS test_staff,
+              COALESCE(SUM(CASE WHEN is_test = 1 AND test_reason = 'email_pattern' THEN 1 ELSE 0 END), 0) AS test_email
        FROM lead_submissions ${where.sql}`,
     )
     .get(...where.params) as {
@@ -432,9 +482,11 @@ export function getLeadsStats(
     organic_search: number;
     no_consent: number;
     meta_unclear: number;
+    test_staff: number;
+    test_email: number;
   };
   const inRange = kpiRow.n;
-  const previous = bounds.previous ? count(buildLeadsWhere(q, bounds.previous)) : null;
+  const previous = bounds.previous ? count(buildLeadsWhere(q, bounds.previous, trackingIndex)) : null;
 
   const timelineRows = db
     .prepare(
@@ -465,6 +517,15 @@ export function getLeadsStats(
        GROUP BY experiment_id, variant`,
     )
     .all(...where.params) as { experiment_id: string; variant: string | null; n: number }[];
+
+  const funnelRows = db
+    .prepare(
+      `SELECT product, persona, product_persona, COUNT(*) AS n FROM lead_submissions ${where.sql}
+       GROUP BY product, persona, product_persona`,
+    )
+    .all(...where.params) as FunnelRow[];
+  const funnel = funnelBreakdowns(funnelRows, inRange, trackingIndex, topWithOther);
+  const funnelLabels = funnelFilterLabels(q.filters, trackingIndex);
 
   const gapWhere = and(where, "first_paid_at IS NOT NULL");
   const bucketSql = LEADS_TTL_BUCKETS.map((b) => {
@@ -509,9 +570,14 @@ export function getLeadsStats(
       organic_share: sharePct(kpiRow.organic_search, kpiRow.tracked),
       no_consent: kpiRow.no_consent,
       meta_unclear: kpiRow.meta_unclear,
+      test_staff: kpiRow.test_staff,
+      test_email: kpiRow.test_email,
     },
     tracking_since: trackingSince(site),
     product_since: productSince(site),
+    funnel_since: funnelSince(site),
+    funnel_persona_product_unknown: funnel.personaProductUnknown,
+    ...(funnelLabels ? { funnel_filter_labels: funnelLabels } : {}),
     timeline: buildTimeline(timelineRows, bounds.startMs, nowMs, bounds.days),
     breakdowns: {
       source_medium: sourceMediumBreakdown(smRows, inRange, convention, opts.grace ?? null),
@@ -519,6 +585,8 @@ export function getLeadsStats(
       conversion_paths: pathBreakdown(pathRows("conversion_path"), inRange, "conversion_path"),
       landing_paths: pathBreakdown(pathRows("landing_path"), inRange, "landing_path"),
       experiments: experimentBreakdown(expRows),
+      funnel_products: funnel.products,
+      funnel_personas: funnel.personas,
       time_to_lead: {
         paid_with_click: paidWithClick,
         median_days: medianDays,

@@ -3,22 +3,26 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import {
+  buildWebhookBody,
   claimHookBuffer,
   clearHookBuffer,
   clampMaxEventsPerCall,
   computeDroppedBuffersOnSave,
+  EVENT_WEBHOOK_ALLOWLIST,
   EVENT_WEBHOOK_DEBOUNCE_DEFAULT_MS,
   EVENT_WEBHOOK_MAX_WAIT_DEFAULT_MS,
+  eventWebhookFilters,
   flushDueBuffersForSite,
   flushHookIfDue,
   getHookBuffer,
   getProposalForWebhookFilter,
-  hookMatchesEvent,
+  matchProposalFilter,
   isHookDue,
   listEnabledHooksForType,
   loadEventWebhookConfig,
   matchFilterString,
   maybeEnqueueEventWebhook,
+  filterKeysForEventType,
   parseEventWebhookConfig,
   recordDelivery,
   listDeliveries,
@@ -28,6 +32,7 @@ import {
   setHookBuffer,
   slimEventForWebhook,
   stopEventWebhookDueScanForTests,
+  WEBHOOK_PAYLOAD_TEXT_MAX,
   type EventWebhookConfig,
   type EventWebhookHook,
   type EventWebhookProposalSummary,
@@ -35,6 +40,8 @@ import {
 import { emitEvent } from "./event-store";
 import { ensurePipelineDb, resetPipelineDbCache } from "../pipeline-db/runner";
 import { clearSiteSqliteCacheForTests, getSiteSqlite } from "../db";
+import { buildServerPageTracking } from "../tracking-page-context";
+import { getSiteConfigs } from "../site-config";
 import type { ContentEvent } from "./types";
 
 const TEST_SITE = `site_event-webhooks-test-${Date.now()}`;
@@ -42,6 +49,22 @@ const TEST_SITE = `site_event-webhooks-test-${Date.now()}`;
 vi.mock("../jobs/queue", () => ({
   enqueueJob: vi.fn(async () => ({ queued: true })),
 }));
+
+vi.mock("../tracking-page-context", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../tracking-page-context")>();
+  return {
+    ...actual,
+    buildServerPageTracking: vi.fn(() => null),
+  };
+});
+
+vi.mock("../site-config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../site-config")>();
+  return {
+    ...actual,
+    getSiteConfigs: vi.fn(() => actual.getSiteConfigs()),
+  };
+});
 
 function rmSite() {
   const dir = path.join("data", TEST_SITE.replace(/\//g, "-"));
@@ -129,13 +152,18 @@ describe("event-webhooks", () => {
     stopEventWebhookDueScanForTests();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     stopEventWebhookDueScanForTests();
     resetPipelineDbCache();
     clearSiteSqliteCacheForTests();
     rmSite();
     fs.rmSync(tmpRoot, { recursive: true, force: true });
     vi.clearAllMocks();
+    const siteActual = await vi.importActual<typeof import("../site-config")>("../site-config");
+    vi.mocked(getSiteConfigs).mockReset();
+    vi.mocked(getSiteConfigs).mockImplementation(() => siteActual.getSiteConfigs());
+    vi.mocked(buildServerPageTracking).mockReset();
+    vi.mocked(buildServerPageTracking).mockImplementation(() => null);
   });
 
   it("parses multi-hook yaml and rejects unknown types / duplicate ids", () => {
@@ -161,7 +189,7 @@ describe("event-webhooks", () => {
     expect(() =>
       parseEventWebhookConfig({
         version: 1,
-        subscriptions: { entry_locale_saved: [{ id: "x", enabled: true, url: "https://x.com" }] },
+        subscriptions: { entry_deleted: [{ id: "x", enabled: true, url: "https://x.com" }] },
       }),
     ).toThrow(/disallowed/);
 
@@ -615,6 +643,70 @@ describe("event-webhooks", () => {
     } as ContentEvent;
     const slim = slimEventForWebhook(event);
     expect(slim.payload).toEqual({ proposal_id: "abc" });
+
+    const rejected = slimEventForWebhook(
+      baseEvent({ type: "proposal_rejected", payload: { proposal_id: "abc", reject_kind: "harmful" } }),
+    );
+    expect(rejected.payload).toEqual({ proposal_id: "abc" });
+  });
+
+  it("allowlists blocker events with the full proposal filter set", () => {
+    for (const type of ["proposal_blocker_added", "proposal_blocker_resolved", "proposal_blocker_reopened"]) {
+      expect(EVENT_WEBHOOK_ALLOWLIST).toContain(type);
+      expect(filterKeysForEventType(type)).toEqual(filterKeysForEventType("proposal_created"));
+    }
+  });
+
+  it("slimEventForWebhook passes blocker fields through and cuts off long text", () => {
+    const long = "x".repeat(WEBHOOK_PAYLOAD_TEXT_MAX + 50);
+    const added = slimEventForWebhook(
+      baseEvent({
+        type: "proposal_blocker_added",
+        payload: { proposal_id: "p1", blocker_id: 7, staff_summary: "Plain words", body: long, extra: "no" },
+      }),
+    );
+    expect(added.payload).toEqual({
+      proposal_id: "p1",
+      blocker_id: 7,
+      staff_summary: "Plain words",
+      body: "x".repeat(WEBHOOK_PAYLOAD_TEXT_MAX),
+      body_truncated: true,
+    });
+
+    const resolved = slimEventForWebhook(
+      baseEvent({
+        type: "proposal_blocker_resolved",
+        payload: {
+          proposal_id: "p1",
+          blocker_id: 7,
+          staff_summary: "Plain words",
+          resolve_note: "Fixed the CTA.",
+          open_blocker_count: 0,
+          blocker_author: "blake",
+          blocker_author_actor_type: "mcp",
+          body: "not sent on resolve",
+        },
+      }),
+    );
+    expect(resolved.payload).toEqual({
+      proposal_id: "p1",
+      blocker_id: 7,
+      staff_summary: "Plain words",
+      resolve_note: "Fixed the CTA.",
+      open_blocker_count: 0,
+      blocker_author: "blake",
+      blocker_author_actor_type: "mcp",
+    });
+  });
+
+  it("exclude_event_authors drops a blocker event from that author", () => {
+    const event = baseEvent({
+      type: "proposal_blocker_added",
+      attribution: [{ author: "reviewer-bot", actor: { type: "mcp" } }],
+    });
+    const h = (filter: EventWebhookHook["filter"]) => hook({ id: "b", url: "https://example.com/b", filter });
+    expect(matchProposalFilter(event, h({ exclude_event_authors: ["reviewer-bot"] }), null, true).ok).toBe(false);
+    expect(matchProposalFilter(event, h({ exclude_event_authors: ["someone-else"] }), null, true).ok).toBe(true);
   });
 
   it("parses filter and rejects unknown keys / invalid kinds", () => {
@@ -679,7 +771,7 @@ describe("event-webhooks", () => {
     expect(matchFilterString("Grok", ["grok"])).toBe(true);
   });
 
-  it("hookMatchesEvent ANDs fields; empty filter matches; excludes work", () => {
+  it("matchProposalFilter ANDs fields; empty filter matches; excludes work", () => {
     const proposal: EventWebhookProposalSummary = {
       id: "p1",
       kind: "edits",
@@ -694,7 +786,7 @@ describe("event-webhooks", () => {
     });
 
     expect(
-      hookMatchesEvent(
+      matchProposalFilter(
         event,
         hook({ id: "any", url: "https://x.com" }),
         proposal,
@@ -703,7 +795,7 @@ describe("event-webhooks", () => {
     ).toBe(true);
 
     expect(
-      hookMatchesEvent(
+      matchProposalFilter(
         event,
         hook({
           id: "ok",
@@ -722,7 +814,7 @@ describe("event-webhooks", () => {
     ).toBe(true);
 
     expect(
-      hookMatchesEvent(
+      matchProposalFilter(
         event,
         hook({
           id: "and-fail",
@@ -735,7 +827,7 @@ describe("event-webhooks", () => {
     ).toEqual({ ok: false, reason: "no_match" });
 
     expect(
-      hookMatchesEvent(
+      matchProposalFilter(
         event,
         hook({
           id: "ex",
@@ -748,7 +840,7 @@ describe("event-webhooks", () => {
     ).toEqual({ ok: false, reason: "no_match" });
 
     expect(
-      hookMatchesEvent(
+      matchProposalFilter(
         event,
         hook({
           id: "model-miss",
@@ -964,7 +1056,7 @@ describe("event-webhooks", () => {
     const match = (
       filter: EventWebhookHook["filter"],
       proposal: EventWebhookProposalSummary = ideaBase,
-    ) => hookMatchesEvent(ev, hook({ id: "h", url: "https://x.com", filter }), proposal, true).ok;
+    ) => matchProposalFilter(ev, hook({ id: "h", url: "https://x.com", filter }), proposal, true).ok;
 
     it("stage include / exclude", () => {
       expect(match({ funnel_stages: ["decision"] })).toBe(true);
@@ -1062,6 +1154,287 @@ describe("event-webhooks", () => {
       );
       expect((slim.proposal as { funnel: unknown }).funnel).toEqual(loaded?.funnel);
     });
+  });
+
+  it("entry_common_saved matches the page content type and does not load a proposal", () => {
+    expect(eventWebhookFilters.proposal_created).toBe(eventWebhookFilters.proposal_revised);
+    expect(eventWebhookFilters.entry_common_saved).not.toBe(eventWebhookFilters.proposal_created);
+
+    const proposal: EventWebhookProposalSummary = {
+      id: "p1",
+      kind: "edits",
+      proposer_username: "writer",
+      proposer_actor: { type: "ui" },
+      content_types: ["workshop"],
+      locales: ["en"],
+      funnel: null,
+    };
+    const proposalEvent = baseEvent({
+      type: "proposal_created",
+      resource: { contentType: "blog" },
+    });
+    expect(
+      matchProposalFilter(
+        proposalEvent,
+        hook({ id: "p", url: "https://example.com/p", filter: { content_types: ["workshop"] } }),
+        proposal,
+        true,
+      ).ok,
+    ).toBe(true);
+    expect(
+      matchProposalFilter(
+        proposalEvent,
+        hook({ id: "p", url: "https://example.com/p", filter: { content_types: ["blog"] } }),
+        proposal,
+        true,
+      ).ok,
+    ).toBe(false);
+
+    saveEventWebhookConfig(tmpRoot, {
+      version: 1,
+      subscriptions: {
+        entry_common_saved: [
+          hook({
+            id: "workshops",
+            url: "https://example.com/w",
+            filter: { content_types: ["Workshop"] },
+          }),
+        ],
+      },
+    });
+
+    const hit = emitEvent({
+      site: TEST_SITE,
+      type: "entry_common_saved",
+      resource: { contentType: "workshop", slug: "el-mapa", layer: "common" },
+      payload: { parts: ["identity"], layer: "common" },
+    });
+    maybeEnqueueEventWebhook(hit, tmpRoot);
+    expect(getHookBuffer(TEST_SITE, "entry_common_saved", "workshops").pendingEventIds).toContain(
+      hit.id,
+    );
+    expect(listDeliveries(TEST_SITE, { status: "skipped" })).toHaveLength(0);
+
+    const miss = emitEvent({
+      site: TEST_SITE,
+      type: "entry_common_saved",
+      resource: { contentType: "blog", slug: "post", layer: "common" },
+      payload: { parts: ["identity"], layer: "common" },
+    });
+    maybeEnqueueEventWebhook(miss, tmpRoot);
+    expect(getHookBuffer(TEST_SITE, "entry_common_saved", "workshops").pendingEventIds).toEqual([
+      hit.id,
+    ]);
+
+    expect(filterKeysForEventType("entry_common_saved")).not.toContain("locales");
+    expect(filterKeysForEventType("entry_common_saved")).not.toContain("exclude_locales");
+    expect(filterKeysForEventType("entry_locale_saved")).toContain("locales");
+  });
+
+  it("rejects proposal-only filter keys on entry_common_saved", () => {
+    expect(() =>
+      parseEventWebhookConfig({
+        version: 1,
+        subscriptions: {
+          entry_common_saved: [
+            {
+              id: "bad",
+              enabled: true,
+              url: "https://example.com/w",
+              filter: { kinds: ["idea"] },
+            },
+          ],
+        },
+      }),
+    ).toThrow(/not allowed for this event/);
+
+    expect(() =>
+      parseEventWebhookConfig({
+        version: 1,
+        subscriptions: {
+          entry_common_saved: [
+            {
+              id: "bad-funnel",
+              enabled: true,
+              url: "https://example.com/w",
+              filter: { funnel_stages: ["awareness"] },
+            },
+          ],
+        },
+      }),
+    ).toThrow(/not allowed for this event/);
+
+    expect(() =>
+      parseEventWebhookConfig({
+        version: 1,
+        subscriptions: {
+          entry_common_saved: [
+            {
+              id: "bad-locale",
+              enabled: true,
+              url: "https://example.com/w",
+              filter: { locales: ["en"] },
+            },
+          ],
+        },
+      }),
+    ).toThrow(/not allowed for this event/);
+
+    const cfg = parseEventWebhookConfig({
+      version: 1,
+      subscriptions: {
+        entry_common_saved: [
+          {
+            id: "ok",
+            enabled: true,
+            url: "https://example.com/w",
+            filter: { content_types: ["workshop"] },
+          },
+        ],
+      },
+    });
+    expect(cfg.subscriptions.entry_common_saved?.[0]?.filter).toEqual({
+      content_types: ["workshop"],
+    });
+  });
+
+  it("entry_common_saved body includes tracking ids and omits tracking when it is off", () => {
+    vi.mocked(getSiteConfigs).mockReturnValue([
+      { domain: "test.example", contentFolder: tmpRoot },
+    ]);
+    const site = path.relative(process.cwd(), tmpRoot);
+    const event = baseEvent({
+      type: "entry_common_saved",
+      site,
+      resource: {
+        contentType: "workshop",
+        slug: "el-mapa",
+        layer: "common",
+        path: "workshop/el-mapa/_common.yml",
+      },
+      payload: { parts: ["funnel"], layer: "common" },
+    });
+    const h = hook({ id: "w", url: "https://example.com/w" });
+
+    vi.mocked(buildServerPageTracking).mockReturnValue({
+      product: "ai-engineering",
+      persona: "the-career-changer",
+      product_persona: "ai-engineering:the-career-changer",
+      funnel_stage: "awareness",
+      content_key: "workshop:el-mapa",
+    });
+    const on = buildWebhookBody({
+      site,
+      eventType: "entry_common_saved",
+      hook: h,
+      events: [event],
+      source: "live",
+    });
+    const onItem = (on.events as Record<string, unknown>[])[0];
+    expect(onItem).toMatchObject({
+      id: event.id,
+      type: "entry_common_saved",
+      created_at: event.created_at,
+      resource: event.resource,
+      tracking: { product: "ai-engineering", persona: "the-career-changer" },
+    });
+    expect(onItem).not.toHaveProperty("payload");
+    expect(buildServerPageTracking).toHaveBeenCalledWith({
+      contentRoot: tmpRoot,
+      contentType: "workshop",
+      slug: "el-mapa",
+      mode: "ids",
+    });
+
+    vi.mocked(buildServerPageTracking).mockReturnValue(null);
+    const off = buildWebhookBody({
+      site,
+      eventType: "entry_common_saved",
+      hook: h,
+      events: [event],
+      source: "live",
+    });
+    const offItem = (off.events as Record<string, unknown>[])[0];
+    expect(offItem).not.toHaveProperty("tracking");
+    expect(offItem.resource).toEqual(event.resource);
+    expect(off.event_type).toBe("entry_common_saved");
+  });
+
+  it("entry_locale_saved body includes the active test the way a served page does", () => {
+    expect(eventWebhookFilters.entry_locale_saved).toBe(eventWebhookFilters.entry_common_saved);
+    vi.mocked(getSiteConfigs).mockReturnValue([
+      { domain: "test.example", contentFolder: tmpRoot },
+    ]);
+    const site = path.relative(process.cwd(), tmpRoot);
+    const dir = path.join(tmpRoot, "workshop", "el-mapa");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "versioning.yml"),
+      ["en:", "  started_at: '2026-10-01'", "  variants:", "    - slug: b", "      allocation: 50", ""].join("\n"),
+      "utf-8",
+    );
+    const h = hook({ id: "w", url: "https://example.com/w" });
+    const variantEvent = baseEvent({
+      type: "entry_locale_saved",
+      site,
+      resource: {
+        contentType: "workshop",
+        slug: "el-mapa",
+        locale: "en",
+        layer: "variant",
+        path: "workshop/el-mapa/b.en.yml",
+      },
+      payload: {},
+    });
+    const variantBody = buildWebhookBody({
+      site,
+      eventType: "entry_locale_saved",
+      hook: h,
+      events: [variantEvent],
+      source: "live",
+    });
+    expect((variantBody.events as Record<string, unknown>[])[0]).toMatchObject({
+      type: "entry_locale_saved",
+      experiment_id: "workshop:el-mapa:en@2026-10-01",
+      variant: "b",
+    });
+
+    const liveEvent = baseEvent({
+      type: "entry_locale_saved",
+      site,
+      resource: {
+        contentType: "workshop",
+        slug: "el-mapa",
+        locale: "en",
+        layer: "live",
+        path: "workshop/el-mapa/en.yml",
+      },
+      payload: {},
+    });
+    const liveBody = buildWebhookBody({
+      site,
+      eventType: "entry_locale_saved",
+      hook: h,
+      events: [liveEvent],
+      source: "live",
+    });
+    expect((liveBody.events as Record<string, unknown>[])[0]).toMatchObject({
+      experiment_id: "workshop:el-mapa:en@2026-10-01",
+      variant: "default",
+    });
+
+    fs.rmSync(path.join(dir, "versioning.yml"));
+    const quiet = buildWebhookBody({
+      site,
+      eventType: "entry_locale_saved",
+      hook: h,
+      events: [variantEvent],
+      source: "live",
+    });
+    const quietItem = (quiet.events as Record<string, unknown>[])[0];
+    expect(quietItem).not.toHaveProperty("experiment_id");
+    expect(quietItem).not.toHaveProperty("variant");
+    expect(quietItem).not.toHaveProperty("tracking");
   });
 });
 

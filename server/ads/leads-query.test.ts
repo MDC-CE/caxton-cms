@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LedgerRow } from "./lead-ledger";
+import type { TrackingKeyIndex } from "@shared/tracking-keys";
 
 vi.mock("../settings", () => ({
   getAdsSettings: () => ({ meta: { enabled: false, ad_account_ids: [], alert_thresholds: {} }, test_email_patterns: [] }),
@@ -74,16 +75,20 @@ function row(over: Partial<LedgerRow>): LedgerRow {
 }
 
 function q(over: Partial<LeadsQuery> = {}): LeadsQuery {
-  return { range: "30d", include_test: false, page: 1, filters: {}, ...over };
+  return { range: "30d", show: "real", page: 1, filters: {}, ...over };
 }
 
 describe("leads query (shared helpers)", () => {
   it("parses URL params, normalizes UTM filters and drops defaults when serializing", () => {
-    const parsed = parseLeadsQuery(new URLSearchParams("range=7d&include_test=1&page=3&source= Google &medium=CPC"));
+    const parsed = parseLeadsQuery(new URLSearchParams("range=7d&show=test&page=3&source= Google &medium=CPC"));
     expect(parsed).toEqual({
       ok: true,
-      query: { range: "7d", include_test: true, page: 3, filters: { source: "google", medium: "cpc" } },
+      query: { range: "7d", show: "test", page: 3, filters: { source: "google", medium: "cpc" } },
     });
+    expect(parseLeadsQuery({ include_test: "1" })).toMatchObject({ ok: true, query: { show: "all" } });
+    expect(parseLeadsQuery({ show: "real", include_test: "1" })).toMatchObject({ ok: true, query: { show: "real" } });
+    expect(parseLeadsQuery({ show: "bogus" }).ok).toBe(false);
+    expect(leadsQueryToSearchParams(q({ show: "test" })).toString()).toBe("show=test");
     expect(parseLeadsQuery({ range: "1y" }).ok).toBe(false);
     expect(parseLeadsQuery({ ttl: "nope" }).ok).toBe(false);
     expect(leadsQueryToSearchParams(q()).toString()).toBe("");
@@ -147,10 +152,13 @@ describe("leads query (shared helpers)", () => {
   it("labels experiments by page and variant", () => {
     expect(experimentLabel("landing:coding-bootcamp:en", "b")).toBe("coding-bootcamp (en) · b");
     expect(experimentLabel("odd-id", null)).toBe("odd-id · (no variant)");
+    expect(experimentLabel("landing:coding-bootcamp:en@2026-10-23", "default")).toBe(
+      "coding-bootcamp (en, from Oct 23) · default",
+    );
   });
 
   it("builds parameterized SQL (values never interpolated)", () => {
-    const w = buildLeadsWhere({ include_test: false, filters: { source: "x'; DROP TABLE lead_submissions; --", conversion_path: LEADS_NONE } });
+    const w = buildLeadsWhere({ show: "real", filters: { source: "x'; DROP TABLE lead_submissions; --", conversion_path: LEADS_NONE } });
     expect(w.sql).not.toContain("DROP");
     expect(w.params).toEqual(["x'; drop table lead_submissions; --"]);
     expect(w.sql).toContain("conversion_path IS NULL");
@@ -191,15 +199,22 @@ describe("leads query (database)", () => {
     expect(getLeadDetail(SITE, "missing-lead")).toBeNull();
   });
 
-  it("hides test and repeat leads unless the toggle is on", () => {
+  it("shows real leads by default, everything with all, and only test leads with test", () => {
     insertLedgerRow(SITE, row({}));
     insertLedgerRow(SITE, row({ is_test: 1, test_reason: "staff_session" }));
     insertLedgerRow(SITE, row({ is_repeat: 1, repeat_of: "lead-0001" }));
+    insertLedgerRow(SITE, row({ is_test: 1, test_reason: "email_pattern", is_repeat: 1, repeat_of: "lead-0002" }));
     expect(listLeadsPage(SITE, q(), NOW).total).toBe(1);
-    expect(listLeadsPage(SITE, q({ include_test: true }), NOW).total).toBe(3);
+    expect(listLeadsPage(SITE, q({ show: "all" }), NOW).total).toBe(4);
+    const tests = listLeadsPage(SITE, q({ show: "test" }), NOW);
+    expect(tests.total).toBe(2);
+    expect(tests.rows.every((r) => r.is_test === 1)).toBe(true);
     const s = getLeadsStats(SITE, q(), { nowMs: NOW });
     expect(s.kpis.total_all_time).toBe(1);
-    expect(getLeadsStats(SITE, q({ include_test: true }), { nowMs: NOW }).kpis.total_all_time).toBe(3);
+    expect(s.kpis).toMatchObject({ test_staff: 0, test_email: 0 });
+    expect(getLeadsStats(SITE, q({ show: "all" }), { nowMs: NOW }).kpis.total_all_time).toBe(4);
+    const t = getLeadsStats(SITE, q({ show: "test" }), { nowMs: NOW });
+    expect(t.kpis).toMatchObject({ total_all_time: 2, in_range: 2, test_staff: 1, test_email: 1 });
   });
 
   it("uses UTC day edges for ranges and the timeline", () => {
@@ -408,6 +423,122 @@ describe("leads query (database)", () => {
     expect(getLeadsStats(SITE, q(), { nowMs: NOW }).product_since).toBe(NOW - 2 * DAY);
     expect(parseLeadsQuery({ product: "ai-fluency" })).toMatchObject({ ok: true, query: { filters: { product: "ai-fluency" } } });
     expect(leadsQueryToSearchParams({ filters: { product: "program-ai-fluency" } }).toString()).toBe("product=program-ai-fluency");
+  });
+
+  describe("page funnel product / persona", () => {
+    const trackingIndex: TrackingKeyIndex = {
+      products: [
+        {
+          slug: "ai_engineering",
+          content_type: "program",
+          product_id: "program-ai_engineering",
+          name: "AI Engineering",
+          key: "aie",
+          active: true,
+          personas: [
+            { id: "the-career-changer", name: "The Career Changer", key: "cc" },
+            { id: "the-developer", name: "The Developer", key: "dev" },
+          ],
+          retired: [],
+        },
+        {
+          slug: "ai-flex",
+          content_type: "program",
+          product_id: "program-ai-flex",
+          name: "AI Flex",
+          key: "afx",
+          active: true,
+          personas: [{ id: "the-developer", name: "The Developer (Flex)", key: "fdev" }],
+          retired: [],
+        },
+      ],
+    };
+
+    function seedFunnelLeads(): void {
+      insertLedgerRow(SITE, row({}));
+      insertLedgerRow(SITE, row({ product: "all", persona: "all", product_persona: "all" }));
+      insertLedgerRow(SITE, row({ product: "none", persona: "none", product_persona: "none" }));
+      insertLedgerRow(
+        SITE,
+        row({
+          product: "ai-flex,ai_engineering",
+          persona: "the-career-changer,the-developer",
+          product_persona: "ai-flex:the-developer,ai_engineering:the-career-changer",
+        }),
+      );
+      insertLedgerRow(SITE, row({ product: "ai_engineering", persona: "the-career-changer" }));
+      insertLedgerRow(SITE, row({ product: "ai-flex,ai_engineering", persona: "the-developer" }));
+      insertLedgerRow(SITE, row({ product: "ai-flex", product_persona: "ai-flex:" }));
+    }
+
+    it("counts a lead once per product and labels sentinels", () => {
+      seedFunnelLeads();
+      const s = getLeadsStats(SITE, q(), { nowMs: NOW, trackingIndex });
+      const products = s.breakdowns.funnel_products;
+      expect(products.find((r) => r.key === "ai_engineering")).toMatchObject({ label: "AI Engineering", count: 3 });
+      expect(products.find((r) => r.key === "ai-flex")).toMatchObject({ label: "AI Flex", count: 3 });
+      expect(products.find((r) => r.key === "all")).toMatchObject({ label: "All products (site-wide page)", count: 1 });
+      expect(products.find((r) => r.key === "none")).toMatchObject({ label: "No product on page", count: 1 });
+      expect(products.find((r) => r.key === LEADS_NONE)).toMatchObject({ label: "Not recorded yet", count: 1 });
+      expect(s.funnel_since).toBe(NOW - DAY);
+    });
+
+    it("uses pairs when stored and never guesses a shared persona's product", () => {
+      seedFunnelLeads();
+      const s = getLeadsStats(SITE, q(), { nowMs: NOW, trackingIndex });
+      const personas = s.breakdowns.funnel_personas;
+      expect(personas.find((r) => r.key === "ai_engineering:the-career-changer")).toMatchObject({
+        label: "The Career Changer · AI Engineering",
+        count: 2,
+      });
+      expect(personas.find((r) => r.key === "ai-flex:the-developer")).toMatchObject({
+        label: "The Developer (Flex) · AI Flex",
+        count: 1,
+      });
+      expect(personas.find((r) => r.key === ":the-developer")).toMatchObject({
+        label: "The Developer (product unknown)",
+        count: 1,
+      });
+      expect(personas.find((r) => r.key === "__no_persona__")).toMatchObject({ count: 1, filter: null });
+      expect(personas.find((r) => r.key === LEADS_NONE)).toMatchObject({ count: 1 });
+      expect(s.funnel_persona_product_unknown).toBe(1);
+    });
+
+    it("filters whole list items (ids with _ do not act as wildcards)", () => {
+      seedFunnelLeads();
+      insertLedgerRow(SITE, row({ product: "aiXengineering" }));
+      const total = (filters: LeadsQuery["filters"]) => listLeadsPage(SITE, q({ filters }), NOW, trackingIndex).total;
+      expect(total({ funnel_product: "ai_engineering" })).toBe(3);
+      expect(total({ funnel_product: "all" })).toBe(1);
+      expect(total({ funnel_product: LEADS_NONE })).toBe(1);
+      expect(total({ funnel_persona: "ai_engineering:the-career-changer" })).toBe(2);
+      expect(total({ funnel_persona: "ai-flex:the-developer" })).toBe(1);
+      expect(total({ funnel_persona: ":the-developer" })).toBe(1);
+      expect(total({ funnel_persona: LEADS_NONE })).toBe(1);
+    });
+
+    it("filter counts match the breakdown rows", () => {
+      seedFunnelLeads();
+      const s = getLeadsStats(SITE, q(), { nowMs: NOW, trackingIndex });
+      for (const r of [...s.breakdowns.funnel_products, ...s.breakdowns.funnel_personas]) {
+        if (!r.filter) continue;
+        expect(listLeadsPage(SITE, q({ filters: r.filter }), NOW, trackingIndex).total, r.key).toBe(r.count);
+      }
+    });
+
+    it("names the active funnel filters", () => {
+      seedFunnelLeads();
+      const s = getLeadsStats(SITE, q({ filters: { funnel_product: "ai-flex", funnel_persona: "ai-flex:the-developer" } }), {
+        nowMs: NOW,
+        trackingIndex,
+      });
+      expect(s.funnel_filter_labels).toEqual({ funnel_product: "AI Flex", funnel_persona: "The Developer (Flex) · AI Flex" });
+      expect(getLeadsStats(SITE, q(), { nowMs: NOW, trackingIndex })).not.toHaveProperty("funnel_filter_labels");
+      expect(parseLeadsQuery({ funnel_persona: ":the-developer" })).toMatchObject({
+        ok: true,
+        query: { filters: { funnel_persona: ":the-developer" } },
+      });
+    });
   });
 
   it("only includes local_copy when passed (dev)", () => {

@@ -278,6 +278,48 @@ const EVENT_META: Record<string, EventMeta> = {
     icon: IconPencil,
     iconClass: "text-primary border-primary/40",
   },
+  theme_changed: {
+    label: "Theme Changed",
+    description: "Theme colors or palettes changed. Hot public pages rebuild.",
+    icon: IconActivity,
+    iconClass: "text-primary border-primary/40",
+  },
+  variables_changed: {
+    label: "Variables Changed",
+    description: "A site variable changed. Pages that use it rebuild.",
+    icon: IconActivity,
+    iconClass: "text-primary border-primary/40",
+  },
+  menu_changed: {
+    label: "Menu Changed",
+    description: "Menu structure or translations changed. Hot public pages rebuild.",
+    icon: IconActivity,
+    iconClass: "text-primary border-primary/40",
+  },
+  tag_manager_changed: {
+    label: "Tag Manager Changed",
+    description: "Tag Manager settings changed. Hot public pages are dropped and rebuilt.",
+    icon: IconActivity,
+    iconClass: "text-primary border-primary/40",
+  },
+  database_row_changed: {
+    label: "Database Row Changed",
+    description: "A database row changed. Pages that read that database rebuild.",
+    icon: IconDatabase,
+    iconClass: "text-primary border-primary/40",
+  },
+  database_refreshed: {
+    label: "Database Refreshed",
+    description: "A database snapshot changed. Pages that read it rebuild, and so does each row that changed.",
+    icon: IconDatabase,
+    iconClass: "text-primary border-primary/40",
+  },
+  shared_template_saved: {
+    label: "Shared Template Saved",
+    description: "A shared template changed. Pages that use it rebuild.",
+    icon: IconPencil,
+    iconClass: "text-primary border-primary/40",
+  },
   seo_index_ready: {
     label: "Cluster Index Updated",
     description:
@@ -383,10 +425,24 @@ const EVENT_META: Record<string, EventMeta> = {
     icon: IconLink,
     iconClass: "text-emerald-400 border-emerald-400/40",
   },
+  evidence_archive_done: {
+    label: "Evidence Archive Checked",
+    description:
+      "The Internet Archive copy of an evidence row's source link was saved or found, failed, or the original link was checked.",
+    icon: IconLink,
+    iconClass: "text-emerald-400 border-emerald-400/40",
+  },
   job_failed: {
     label: "Job Failed",
     description:
       "A background job crashed. The save itself may have succeeded, but follow-up work — index rebuild, validation, or sync — did not complete.",
+    icon: IconAlertTriangle,
+    iconClass: "text-red-400 border-red-400/40",
+  },
+  lead_delivery_failed: {
+    label: "Lead Delivery Failed",
+    description:
+      "A lead did not reach the CRM webhook (rejected, misconfigured, or still failing after retries). Fired once per lead; open it on the Leads page to retry.",
     icon: IconAlertTriangle,
     iconClass: "text-red-400 border-red-400/40",
   },
@@ -1959,7 +2015,7 @@ export default function BackgroundPipelinePage() {
               disabled={!site}
               data-testid="button-event-webhooks"
             >
-              <Link href="/private/webhooks/hooks">
+              <Link href="/private/agents/webhooks">
                 <IconWebhook className="w-4 h-4 mr-2" />
                 Event webhooks
               </Link>

@@ -1,7 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { api } from "../rate-limit/api";
 import * as userStore from "../user-store";
-import { requireAnyCapability } from "./_helpers";
+import { isMcpLoopbackRequest, requireAnyCapability } from "./_helpers";
 import {
   proposalServiceForSite,
   exportAllProposals,
@@ -22,8 +22,9 @@ import {
   parseAttentionPerspective,
 } from "../content-proposals/attention";
 import { checkBulkDeleteRequest } from "../content-proposals/bulk-delete-gate";
+import { checkBlockerOverrideRequest } from "../content-proposals/blocker-override-gate";
 import { child } from "../logger";
-import { resolveEventActor } from "./_helpers";
+import { resolveAgentSessionId, resolveEventActor } from "./_helpers";
 import { getProposalSettings } from "../settings";
 
 const log = child({ module: "routes/proposals" });
@@ -78,10 +79,13 @@ const WRITE_ACTIONS = new Set<ProposalUpdateAction>([
   "set_idea_funnel",
   "set_idea_seo_target",
   "set_related_entries",
+  "set_applies_after",
   "escalate",
   "deescalate",
   "review_outcome",
   "set_outcome_lesson",
+  "retire",
+  "unretire",
 ]);
 
 const OUTCOME_ACTIONS = new Set<ProposalUpdateAction>(["review_outcome", "set_outcome_lesson"]);
@@ -105,11 +109,14 @@ const ALL_ACTIONS = new Set<ProposalUpdateAction>([
   "set_idea_funnel",
   "set_idea_seo_target",
   "set_related_entries",
+  "set_applies_after",
   "escalate",
   "deescalate",
   "review_outcome",
   "set_outcome_lesson",
   "revert",
+  "retire",
+  "unretire",
 ]);
 
 export function registerProposalRoutes(app: Express): void {
@@ -404,11 +411,15 @@ export function registerProposalRoutes(app: Express): void {
     const review_context = await svc.classifyLive(proposal, { persistIfMissingSnapshot: true });
     const fresh = svc.get(req.params.id) ?? proposal;
     const content_type_strategies = svc.contentTypeStrategiesFor(fresh);
+    const refs = svc.referencedProposals(fresh);
+    const idea_retire = svc.ideaRetireState(fresh);
     res.json({
       proposal: fresh,
       review_context,
       ...(content_type_strategies ? { content_type_strategies } : {}),
-      deleted_refs: svc.missingReferencedIds(fresh),
+      ...(idea_retire ? { idea_retire } : {}),
+      deleted_refs: refs.missing,
+      referenced_proposals: refs.byId,
     });
   });
 
@@ -472,10 +483,12 @@ export function registerProposalRoutes(app: Express): void {
         result.code === "mixed_risk_bundle" ||
         result.code === "supersedes_already_replaced" ||
         result.code === "supersedes_not_closed" ||
+        result.code === "applies_after_closed" ||
         result.code === "implements_required" ||
         result.code === "idea_already_in_progress" ||
         result.code === "implements_entry_mismatch" ||
         result.code === "implements_not_found" ||
+        result.code === "implements_idea_retired" ||
         result.code === "competing_shared_fields" ||
         result.code === "draft_in_proposal" ||
         result.code === "variant_has_traffic"
@@ -485,6 +498,31 @@ export function registerProposalRoutes(app: Express): void {
       return;
     }
     res.json(result);
+  });
+
+  api.post(app, "/api/admin/proposals/:id/evidence-dismissals", { rate: "staffWrite" }, async (req, res) => {
+    if (isMcpLoopbackRequest(req) || typeof req.headers["x-mcp-author"] === "string") {
+      res.status(403).json({
+        ok: false,
+        code: "staff_only",
+        error: "Only staff can dismiss a name as not a claim about us. Agents cannot dismiss.",
+      });
+      return;
+    }
+    const auth = await requireProposalWrite(req, res);
+    if (!auth) return;
+    const svc = siteService(req, res);
+    if (!svc) return;
+    const name = typeof req.body?.name === "string" ? req.body.name : "";
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+    const result = svc.dismissEvidenceName(req.params.id, { name, reason, by: auth.actor });
+    if (!result.ok) {
+      res.status(result.status).json({ ok: false, code: result.code, error: result.error });
+      return;
+    }
+    const proposal = svc.get(req.params.id);
+    const review_context = proposal ? await svc.classifyLive(proposal) : null;
+    res.json({ ok: true, dismissals: result.dismissals, review_context });
   });
 
   api.post(app, "/api/admin/proposals/:id/:action", { rate: "staffWrite" }, async (req, res) => {
@@ -555,6 +593,22 @@ export function registerProposalRoutes(app: Express): void {
       }
     }
 
+    const overrideBlockers =
+      (action === "apply" || action === "accept") && req.body?.override_blockers === true;
+    if (overrideBlockers) {
+      const gate = checkBlockerOverrideRequest({
+        actorType: actor?.type ?? null,
+        mcpAuthorHeader: typeof req.headers["x-mcp-author"] === "string",
+        hasReviewCapability: Boolean(
+          auth.username && userStore.hasCapability(auth.username, "proposals_review"),
+        ),
+      });
+      if (!gate.ok) {
+        res.status(403).json({ ok: false, code: gate.code, error: gate.error });
+        return;
+      }
+    }
+
     let asStaff = needsWrite && action !== "attach_variant" && action !== "add_blocker";
     if (action === "set_no_auto_retry") {
       // Staff UI may flip without claim; MCP must claim (enforced in service via actor.type).
@@ -564,7 +618,12 @@ export function registerProposalRoutes(app: Express): void {
       // Staff UI may retag; MCP authors must be proposer (enforced in service).
       asStaff = actor?.type !== "mcp";
     }
-    if (action === "set_idea_funnel" || action === "set_idea_seo_target" || action === "set_related_entries") {
+    if (
+      action === "set_idea_funnel" ||
+      action === "set_idea_seo_target" ||
+      action === "set_related_entries" ||
+      action === "set_applies_after"
+    ) {
       asStaff = actor?.type !== "mcp";
     }
     if (action === "escalate" || action === "deescalate" || OUTCOME_ACTIONS.has(action)) {
@@ -643,8 +702,9 @@ export function registerProposalRoutes(app: Express): void {
           ? req.body.agent_session_id
           : typeof req.headers["x-agent-session-id"] === "string"
             ? req.headers["x-agent-session-id"]
-            : undefined,
+            : resolveAgentSessionId(req),
       body: typeof req.body?.body === "string" ? req.body.body : undefined,
+      staff_summary: typeof req.body?.staff_summary === "string" ? req.body.staff_summary : undefined,
       blocker_id:
         typeof req.body?.blocker_id === "number"
           ? req.body.blocker_id
@@ -652,6 +712,11 @@ export function registerProposalRoutes(app: Express): void {
             ? Number(req.body.blocker_id)
             : undefined,
       resolve_note: typeof req.body?.resolve_note === "string" ? req.body.resolve_note : undefined,
+      override_blockers: overrideBlockers,
+      override_reason:
+        overrideBlockers && typeof req.body?.override_reason === "string"
+          ? req.body.override_reason
+          : undefined,
       variant: typeof req.body?.variant === "string" ? req.body.variant : undefined,
       confirm_end_experiment: req.body?.confirm_end_experiment === true,
       confirm_base_unknown: req.body?.confirm_base_unknown === true,
@@ -659,6 +724,10 @@ export function registerProposalRoutes(app: Express): void {
       caller_is_mcp: typeof req.headers["x-mcp-author"] === "string",
       confirm_affected_entries:
         typeof req.body?.confirm_affected_entries === "number" ? req.body.confirm_affected_entries : undefined,
+      robots_on_publish_by_entry:
+        req.body?.robots_on_publish_by_entry && typeof req.body.robots_on_publish_by_entry === "object"
+          ? (req.body.robots_on_publish_by_entry as Record<string, "keep_live" | "use_draft">)
+          : undefined,
       dry_run: req.body?.dry_run === true,
       all_or_nothing:
         typeof req.body?.all_or_nothing === "boolean" ? req.body.all_or_nothing : undefined,
@@ -676,6 +745,7 @@ export function registerProposalRoutes(app: Express): void {
         typeof req.body?.no_auto_retry === "boolean" ? req.body.no_auto_retry : undefined,
       confirm_reject: req.body?.confirm_reject === true,
       reject_kind: typeof req.body?.reject_kind === "string" ? req.body.reject_kind : undefined,
+      retire_reason: typeof req.body?.retire_reason === "string" ? req.body.retire_reason : undefined,
       entries: Array.isArray(req.body?.entries) ? req.body.entries : undefined,
       review_situations: Array.isArray(req.body?.review_situations)
         ? req.body.review_situations
@@ -689,7 +759,14 @@ export function registerProposalRoutes(app: Express): void {
           ? req.body.idea_seo_target
           : undefined,
       seo_target_override: req.body?.seo_target_override ?? undefined,
+      url_slug_override: req.body?.url_slug_override ?? undefined,
       related_entries: Array.isArray(req.body?.related_entries) ? req.body.related_entries : undefined,
+      applies_after_proposal_id:
+        typeof req.body?.applies_after_proposal_id === "string"
+          ? req.body.applies_after_proposal_id
+          : req.body?.applies_after_proposal_id === null
+            ? null
+            : undefined,
       escalated_note:
         typeof req.body?.escalated_note === "string" ? req.body.escalated_note : undefined,
       outcome_review:
@@ -737,7 +814,12 @@ export function registerProposalRoutes(app: Express): void {
                 result.code === "variant_has_traffic" ||
                 result.code === "draft_base_unknown" ||
                 result.code === "confirm_affected_entries" ||
-                result.code === "revert_conflicts"
+                result.code === "revert_conflicts" ||
+                result.code === "predecessor_not_applied" ||
+                result.code === "applies_after_cycle" ||
+                result.code === "implements_edit_open" ||
+                result.code === "idea_already_implemented" ||
+                result.code === "robots_change_on_publish"
               ? 409
               : result.code === "text_limits_exceeded"
                 ? 422

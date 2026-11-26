@@ -5,6 +5,645 @@
 window_days: 6
 
 entries:
+  - date: "2026-11-03"
+    summary: "Staff with proposals_review can approve or accept past open blockers from the staff UI; agents still cannot"
+    agent_impact:
+      - "update_proposal apply / accept from MCP with open blockers is still proposal_blocked; override_blockers from MCP is refused (403 override_staff_only). The proposal_blocked failure now carries a warning saying only staff can override."
+      - "After a staff override, once something went live (apply: >=1 entry newly done, incl. partial; accept: success), every open blocker (incl. predecessor_closed) is resolved with resolve_note 'Overridden on approve by <user>: <reason>' and resolved_by_actor.override: true; event proposal_blocker_resolved carries override: true. Nothing published -> blockers stay open."
+      - "Read the override reason before reopen_blocker; reopen only if the live page still shows the problem. All other apply / accept gates (four-eyes, self-approval, predecessor chain, target missing, stale) are unchanged."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - server/content-proposals/blocker-override-gate.ts
+      - server/routes/proposals.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/tools/proposals.ts
+  - date: "2026-11-03"
+    summary: "New scoped capability edit_page_redirects: live update_redirect for one exact old address on pages of granted types"
+    agent_impact:
+      - "Without edit_redirects, live update_redirect runs in page scope when the caller has edit_page_redirects for the page's content type (add: type of `to`; delete: type of `source` page file). Only one exact old address on that page's {locale}.yml / _common.yml meta.redirects. confirm_live_edit still applies."
+      - "Refused with code page_scope_refused + reason (option_not_allowed for before_from|priority|removed_entry|confirm_overwrite_content, pattern_match, not_a_page, custom_file, live_content, already_redirected, self_redirect, locale_home, invalid_path). Nothing written; warning page_scope_non_effects; next_actions test_redirect. move → denyResponse(edit_redirects). Escalate to a Platform Steward."
+      - "test_redirect is visible with read_redirects or edit_page_redirects (any type). update_redirect visibility adds edit_page_redirects. Reconnect the MCP connector to refresh tools/list."
+    tools_changed: false
+    paths:
+      - shared/capabilities.ts
+      - shared/mcp-tool-catalog.ts
+      - mcp-server/tools/redirects.ts
+      - mcp-server/lib/redirect-update.ts
+      - mcp-server/explain/redirects.md
+      - server/redirect-page-scope.ts
+  - date: "2026-11-02"
+    summary: "Multi-site loopback writes use x-mcp-site (pass tool site as usual)"
+    agent_impact:
+      - "Keep passing site (domain from list_sites) on every tool in multi-site setups. Under the hood, MCP loopback to 127.0.0.1 now sends x-mcp-site so production writes land in the correct content folder (e.g. Florida), not the default site."
+      - "No new tool parameter. Agents do not set HTTP headers themselves. Ship/reconnect so the MCP process and main app both have this change."
+      - "Unknown x-mcp-site values fail the request; omitting the header on global calls (get_current_user, write-pause) remains fine."
+    tools_changed: false
+    paths:
+      - server/site-manager.ts
+      - server/mcp-loopback-auth.ts
+      - mcp-server/lib/loopback.ts
+      - mcp-server/README.md
+  - date: "2026-11-02"
+    summary: "Diagnostics now report dead external links and images (EXTERNAL_LINK_GONE, EXTERNAL_LINK_UNREACHABLE, OWN_MEDIA_GONE); update_issue gains mark_link_ok"
+    agent_impact:
+      - "New entry-local validator external-links reads saved checks in {site}/link-status.json (no network in validators). Only live-server diagnostics jobs re-check URLs: site-wide up to 300 new or >7-day-old; one slug + freshness hard rechecks that page now. GONE/UNREACHABLE need two dead results ≥3 days apart; OWN_MEDIA_GONE (error) = 404 on our storage bucket once. Bot walls / 403 / 429 / 999 / 5xx / timeouts are never reported."
+      - "Issues carry external_link { url, field_paths, media, status, reason (not_found | redirected_to_home | unreachable), final_url, checked_at, gone_streak, other_entries_using_url, archive_lookup }. Fix with get_entry_fields + update_fields; a replaced URL clears on the next pass. update_issue action mark_link_ok (report ≥40 chars of evidence) marks the URL working for every page using it — only after you opened it."
+      - "Diagnostics BROKEN_INTERNAL_LINK now also checks full URLs on our own domain (https://4geeks.com/...); the live-save link gate is unchanged. Cached run_entry_diagnostics responses include external_link_coverage. Drafts and A/B variants are not checked."
+    tools_changed: false
+    paths:
+      - scripts/validation/validators/external-links.ts
+      - server/link-check/
+      - server/link-index.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/explain/seo.md
+  - date: "2026-11-02"
+    summary: "get_or_refresh_seo_research runs with why only (no more \"highlights required\"); keyword_metrics says where difficulty came from"
+    agent_impact:
+      - "Every get_or_refresh_seo_research call was refused with \"highlights required for structural edits\" even though the tool has no highlights arg. It now checks why only (≥40 chars, not boilerplate); session, seo_edit, budget and cache rules are unchanged."
+      - "keyword_metrics data gains kw_difficulty_source (reported | derived_from_competition | null), competition_level and market { location, language }. derived_from_competition means the provider sent no difficulty and we mapped its ad competition (LOW→20, MEDIUM→50, HIGH→80, very high→90; 0–1 ×100) — warning seo_research_difficulty_derived; call it a rough proxy, not a ranking-difficulty score."
+      - "Results use the site's configured research market (Settings → OpenRush location/language, default United States / English), not the page locale — compare data.market before quoting numbers for another country."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/seo-clusters.ts
+      - mcp-server/lib/seo-research-mcp.ts
+      - server/openrush-keyword-difficulty.ts
+      - server/openrush-keyword-cache.ts
+      - shared/agent-report-structured.ts
+  - date: "2026-10-30"
+    summary: "{{ funnel.products }} is the stored list; links use entry.funnel_products_encoded_ids"
+    agent_impact:
+      - "{{ funnel.products }} returns the page funnel list (array or \"all\"), same lookup as meta. It does not URI-encode and does not add the program slug. Missing products leaves the token unresolved."
+      - "CTA query strings use {{ entry.funnel_products_encoded_ids }} on program, landing, and page. That computed field is URI-encoded JSON of product, persona, and product_persona ids (sorted; empty → none; \"all\" → all). Only the program field adds { product: slug } when the list omits it. It does not write the page YAML, _common.yml, or the dataLayer."
+    tools_changed: false
+    paths:
+      - server/resolve-template-vars.ts
+      - client/src/components/SectionRenderer.tsx
+      - site_4geeks-com/content-types.yml
+      - mcp-server/explain/funnel.md
+      - mcp-server/explain/content_system.md
+      - mcp-server/explain/lead-forms.md
+  - date: "2026-10-29"
+    summary: "Evidence rows keep a hidden Internet Archive copy of their source link (_archive); review warns evidence_not_archived"
+    agent_impact:
+      - "On evidence banks the server writes _archive { source_url, status, url, captured_at, original } next to _changed_by. Like the stamp it is dropped from client writes and never reaches pages, listings or MCP item reads. Archiving runs only on the live server after a save and in a weekly sweep; agents cannot trigger it or paste backup links (staff-only Databases page)."
+      - "review_context.evidence.claims[].row gains archive_status (none | not_archived | pending | archived | failed) and archive_url. A sourced claim whose link has no archived copy adds warning evidence_not_archived — warning only, never a blocker."
+      - "A link that already is a saved copy (Wayback snapshot or archive.today / archive.ph snapshot) counts as archived with archive_url = link; Wayback calendar pages (/web/2024*/…) do not."
+    tools_changed: false
+    paths:
+      - shared/evidence-archive.ts
+      - server/content-proposals/review-context.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - mcp-server/tools/databases.ts
+      - mcp-server/explain/local_databases.md
+  - date: "2026-10-29"
+    summary: "Platform Steward can edit press_mentions rows: add/update/delete_database_item(s) now appear on /mcp/role/platform_steward"
+    agent_impact:
+      - "platform_steward gains databases_view and databases_edit_data scoped to press_mentions (same grants as the News Editor role). Row writes to any other database still return forbidden; bank settings and reindex stay on databases_manage."
+      - "Reconnect the platform_steward MCP connector to see the item tools."
+    tools_changed: false
+    paths:
+      - server/user-store.ts
+  - date: "2026-10-29"
+    summary: "Ideas pitch one site change: if/then briefs and tasks for staff are notes, and reviewers close them"
+    agent_impact:
+      - "Authors: an idea is one change the reviewer can accept or close as written. Decide with data you can read (e.g. get_entry_seo include_search_engines for Google status); if the decision needs a check only a person can run (Search Console inspect, request indexing, analytics UI) or staff work (find a link source), file notes instead of a \"do X only if Y\" idea."
+      - "Reviewers: checklist idea_opportunity_harm adds \"One change\" — a procedure brief (branches, person-only preconditions, staff tasks) → close other and tell the author to refile as notes; do not add_blocker asking someone to run the precondition."
+      - "broken_url authors: read the target's Google status before filing; Soft 404 / excluded / foreign canonical is not a redirect target."
+    tools_changed: false
+    paths:
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/review-situations.ts
+      - mcp-server/explain/idea-opportunity-harm-proposals.md
+      - mcp-server/explain/broken-url-proposals.md
+      - mcp-server/explain/proposals.md
+  - date: "2026-10-29"
+    summary: "Promoting a draft that changes a language's effective meta.robots now asks: robots_change_on_publish (keep_live | use_draft) on promote_variant and proposal apply"
+    agent_impact:
+      - "promote_variant: effective meta.robots (locale over _common.yml) differs live vs after publish → action_required confirm_robots_on_publish, code robots_change_on_publish, details.live_robots / draft_robots / locale / paths.locale. Ask the user, retry with robots_on_publish: keep_live (draft published, live robots kept) | use_draft. Drafts missing robots while live is noindex count. New languages (publish_draft, no live file) and priority / change_frequency are not gated."
+      - "update_proposal apply: same check per entry → robots_change_on_publish with details.entries[] { entry_id, live_robots, draft_robots, agent_choice }; retry with robots_on_publish_by_entry { [entry_id]: choice } for every listed entry. propose_change / revise entries[].robots_on_publish only preselects agent_choice for the reviewer."
+      - "Conventions §3: robots_on_publish joins the ask-the-human confirms (CONVENTIONS_VERSION 42)."
+    tools_changed: false
+    paths:
+      - server/versioning/promote-with-teardown.ts
+      - server/versioning/robots-on-publish.ts
+      - server/content-proposals/service.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/lib/respond.ts
+      - mcp-server/explain/content_system.md
+      - mcp-server/explain/proposals.md
+      - mcp-server/agent-conventions.md
+  - date: "2026-10-29"
+    summary: "Draft redirects: update_redirect with variant stages a page's own old addresses on its 0%-traffic draft (seo_edit); they take effect only on publish. update_fields rejects meta.redirects"
+    agent_impact:
+      - "update_redirect draft mode: variant + content_type + slug + locale + from (add|delete; no to/before_from/removed_entry/priority/confirms; no regex; move refused). Cap seo_edit for content_type (live mode still edit_redirects). update_redirect is now visible to seo_edit roles; SEO Specialist and Publisher also gain read_redirects (test_redirect). Refusals: draft_missing (next_actions create_variant), draft_has_traffic, already_in_draft, live_content / already_redirected / pattern_match (except this page's own current address when the draft renames it in that locale). Warning draft_redirect_dormant."
+      - "Draft/variant meta.redirects are never indexed (also on never-published pages); test_redirect shows live only. Traffic save refuses variant_has_redirect_changes for a variant whose old addresses differ from today's live file. Publish merges meta.redirects per address with live changes (conflict only on the same address: meta.redirects[/path]), re-checks added addresses and drops conflicting ones with warning draft_redirects_skipped (details.skipped[]), then flushes redirect cache + queues redirects validation."
+      - "update_fields / update_entry_attributes fail meta_redirects_use_update_redirect for meta.redirects (or a whole meta value containing redirects); next_actions update_redirect. Reconnect the MCP connector so SEO roles see update_redirect."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/redirects.ts
+      - mcp-server/lib/redirect-update.ts
+      - server/redirect-draft.ts
+      - server/redirect-items.ts
+      - server/versioning/draft-base.ts
+      - server/versioning/promote-with-teardown.ts
+      - server/routes/versioning.ts
+      - shared/mcp-tool-catalog.ts
+      - shared/agentic-swarm-roles.ts
+      - mcp-server/explain/redirects.md
+  - date: "2026-10-29"
+    summary: "Any slug names a page: entry tools, propose_change and list_entries accept the page ID or any language's address in any spelling; list_entries returns one row per page with entry_id + locale_slugs"
+    agent_impact:
+      - "Page ID (entry_id) = the entry folder name, stable across renames and languages. Slugs are per-language public addresses ({locale}.yml slug, else _common.yml slug, else the ID). Entry tools (get_entry_content/seo/fields, update_fields, section/variant tools, translate_entry, …) and propose_change entries[] accept either, compared by slugKey (lowercase, accents stripped, non-alphanumerics → -), so array-vacio-javascript or HOW_TO_PRINT_IN_JAVASCRIPT finds the page. A language's slug serves that language when locale is omitted; an explicit locale wins with warning slug_locale_mismatch. Resolutions add warning slug_resolved (slug, entry_id, matched_by, locale) — reuse entry_id afterwards. Stored proposals always hold the page ID."
+      - "Refusals: ambiguous_slug (two pages share the key; details/candidates — pick the exact entry_id via list_entries), index_updating (no match while the site index is rebuilding; retry shortly). Creation never resolves: create_entry / new pages refuse a slug that is another page's address in any spelling (slug_already_owned_by_other_entry); implements_proposal_id edits use the reserved address as written; update_proposal accept refuses idea_slug_matches_existing_page when accepted_entry.slug or url_slug is another spelling of an existing page (next_actions → edits proposal on that page). delete_entries still needs exact page IDs."
+      - "list_entries rows: entry_id, slug (default-language address), locale_slugs { locale: address }, one row per page (database types grouped by hreflang). slugs filter and search match the ID or any address in any spelling. Public site: a mixed-case / underscore / accented spelling of a live address 301s to the official address (only after exact URLs and staff redirects miss). New diagnostics validator slug-identity: ENTRY_ID_NOT_SLUG, COMMON_SLUG_DIFFERS_FROM_ID, SLUG_KEY_COLLISION."
+    tools_changed: false
+    paths:
+      - shared/slug.ts
+      - server/entry-ref.ts
+      - server/content-index.ts
+      - server/redirects.ts
+      - server/routes/internal-content.ts
+      - server/content-proposals/service.ts
+      - mcp-server/lib/entry-ref-mcp.ts
+      - mcp-server/lib/list-entries-resolve.ts
+      - mcp-server/tools/proposals.ts
+      - scripts/validation/validators/slug-identity.ts
+      - mcp-server/explain/content_system.md
+      - mcp-server/explain/proposals.md
+  - date: "2026-10-29"
+    summary: "Funnel lives only in _common.yml: drafts keep a differing legacy language funnel (warning), live language-file funnel writes are refused, migration 010 moves legacy copies"
+    agent_impact:
+      - "Propose funnels as funnel.* ops in the draft; that is not a _common.yml write until a person publishes (publish moves it to _common.yml and strips language files). Do not skip funnel ops because 'bots must not write _common.yml'."
+      - "propose_change / revise_entries (draft created or reset) may return warning funnel_carried_from_language_file: the live en.yml/es.yml still had a legacy funnel that differs from _common.yml, so the draft keeps it (locale merged over common) and it becomes the page funnel for every language on publish. Keep it or replace it with funnel.* ops. The draft then carries a page-level field, so another open proposal on that page cannot also change page-level fields (competing_shared_fields)."
+      - "Live language-file saves that add or change top-level funnel fail errorCode funnel_in_language_file (untouched legacy copies do not block other edits). Duplicated pages start with no funnel. Staff data migration 010_funnel_to_common moves legacy copies (invalid product/persona never wins; persona on every product or all beats bare products; then newest)."
+    tools_changed: false
+    paths:
+      - server/versioning/draft-base.ts
+      - server/content-proposals/draft-store.ts
+      - server/content-editor.ts
+      - server/field-scope-migration.ts
+      - scripts/migrations/010_funnel_to_common.ts
+      - mcp-server/explain/funnel-classification-proposals.md
+  - date: "2026-10-29"
+    summary: "Accepted ideas that no longer need doing can be retired (and restored); similar-proposal matches say when a match was retired"
+    agent_impact:
+      - "update_proposal retire (reviewer toolkit, four-eyes like accept; accepted ideas only): retire_reason already_done | no_longer_relevant + close_note min 20. Status stays finished; close_reason becomes the reason, so the idea leaves stalled, frees its accepted_entry page and hub member claims (idea_page_released_waiting_ideas + list_proposals next_actions for waiting ideas), and is excluded from outcome_review none. No YAML/draft change. Refusals: implements_edit_open (withdraw that edit first; details.open_edit_id), idea_already_implemented, not_accepted_idea, retire_reason_required, retire_note_required."
+      - "update_proposal unretire restores accepted with the original accept note/author/date; refused accepted_entry_taken / idea_seo_target_members_claimed when another idea took the page or hub members since. propose_change with implements_proposal_id of a retired idea refuses implements_idea_retired. Before implementing an accepted idea, compare live — if the change is already there, retire instead of filing a no-op edit."
+      - "similar_proposals rows now carry status, close_reason, real title, and retired { reason, note } for retired ideas (error text names them). already_done → do not re-file; no_longer_relevant → re-file with confirm_distinct only when the context is back. New events proposal_retired / proposal_unretired (webhook-eligible)."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - server/routes/proposals.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+  - date: "2026-10-29"
+    summary: "Apply / accept refuse self-approval across roles (same session, or same user on the same exact model); funnel proposals warn with every product persona"
+    agent_impact:
+      - "update_proposal apply / accept refuse four_eyes_same_session when your agent_session_id filed the proposal (any role, always on while four-eyes is on) and four_eyes_same_model when the same username on the same exact model (trimmed, lowercased; skipped if either side has no model) filed it under another role — site Rules four_eyes.same_model_blocked, default on, steward can turn off. Hand off to a reviewer on a different model or staff UI. Reject is unchanged (username + role only); different exact model strings (e.g. grokbot/writer_tofu/grok-4 vs grokbot/proposal_reviewer/grok-4) count as different agents."
+      - "propose_change and revise_entries return non-blocking warning funnel_persona_alternatives when a funnel.products op binds { product, persona }: details.products[] lists chosen_personas, entries, and every persona on the product (id, label, role, industry_or_context). Pick the persona this page talks to; sibling-page usage is not evidence. Silent for products: all, product-only bindings, and single-persona products."
+      - "funnel_persona_product_stage checklist gains a look_for line (compare every persona; sibling usage is not evidence). explain funnel-classification-proposals adds a developer-landing example (the-frustrated-graduate). No change to tool arguments or the tool list."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - server/content-proposals/funnel-persona-alternatives.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/settings.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/funnel-classification-proposals.md
+  - date: "2026-10-29"
+    summary: "Lead forms submit only through POST /api/leads/webhook-delivery"
+    agent_impact:
+      - "POST /api/leads is removed. The form always posts to /api/leads/webhook-delivery, which still enriches the body (recordLeadSubmission) before buildLeadPayload and delivers to the form webhook, else event, else global, else DEFAULT_WEBHOOK_URL."
+      - "No webhook at any level returns { success: true, skipped: \"no_webhook\" }. Ledger fields and GTM enrichment are unchanged."
+    tools_changed: false
+    paths:
+      - server/routes/forms.ts
+      - server/routes/webhooks.ts
+      - mcp-server/explain/lead-forms.md
+  - date: "2026-10-28"
+    summary: "New blocker events (added / resolved / reopened) for Event Webhooks, with blocker details in the webhook body"
+    agent_impact:
+      - "add_blocker, resolve_blocker and reopen_blocker now emit proposal_blocker_added / proposal_blocker_resolved / proposal_blocker_reopened (payload blocker_id, staff_summary; added + body; resolved + resolve_note; resolved/reopened + open_blocker_count, blocker_author, blocker_author_actor_type). System predecessor_closed blockers also fire proposal_blocker_added (author system:applies-after). Webhook body cuts body / resolve_note at 2000 chars with *_truncated flags."
+      - "Escalated proposals: blocker events are recorded with paused: true but no webhook is sent and nothing is re-sent on release (hook proposal_deescalated). A proposal closed with blockers still open fires no resolved event; watch proposal_rejected / proposal_withdrawn / proposal_closed_abandoned_blocked."
+      - "No change to update_proposal arguments or responses, blocker validation, claim rules, or the blocked-sweep clock. Staff hooks dialog gains an 'Exclude who triggered this event' filter (exclude_event_authors) for proposal events."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - server/events/event-webhooks.ts
+      - server/events/types.ts
+      - client/src/components/pipeline/EventWebhooksDialog.tsx
+      - mcp-server/explain/proposals.md
+  - date: "2026-10-28"
+    summary: "Evidence databases prove named partner / press / award claims in proposal review; unproven new names refuse apply"
+    agent_impact:
+      - "list_proposals review_context.evidence lists each name the text presents as choosing, partnering with, covering or awarding us, with the matched evidence row (own site + fallback_content_folder site) and status sourced | unsourced | unverified | no_evidence | already_live | dismissed. New checklist third_party_evidence; discovery_path adds get_database_item per matched row. Numbers still go to list_variables."
+      - "Apply refuses with code evidence_missing while a new name has no row and no staff dismissal (next_actions: list_databases → add a sourced row, or add_blocker). already_live and unsourced are warnings only. Agents cannot dismiss names or verify rows."
+      - "list_databases returns evidence { proves, proof_field, match_fields, also_used_by_sites } | null. On evidence banks, item writes that add a row or change its link / match fields / title / excerpt return evidence_row_unverified — the row does not prove claims until staff verify it. The server stamps _changed_by; client values are dropped."
+    tools_changed: false
+    paths:
+      - server/content-proposals/evidence-match.ts
+      - server/content-proposals/review-context.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/proposal-discovery-path.ts
+      - mcp-server/tools/databases.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/local_databases.md
+      - mcp-server/explain/idea-opportunity-harm-proposals.md
+  - date: "2026-10-28"
+    summary: "New read-only databases_view cap opens list_databases / list_database_items / get_database_item"
+    agent_impact:
+      - "Database reads now accept databases_view, databases_edit_data (any scope), or databases_manage. Content Viewer, copy_editor, seo_specialist, translator, and proposal_reviewer have databases_view; no row writes or definition changes."
+      - "refresh:true on list_database_items / get_database_item needs databases_edit_data for that slug or databases_manage; otherwise it is ignored and the read returns cache with warning refresh_requires_edit_or_manage."
+      - "Refresh/reconnect the MCP connector so the three read tools appear for roles that just gained databases_view."
+    tools_changed: false
+    paths:
+      - shared/capabilities.ts
+      - shared/mcp-tool-catalog.ts
+      - shared/agentic-swarm-roles.ts
+      - mcp-server/tools/databases.ts
+      - mcp-server/lib/database-items.ts
+      - mcp-server/explain/local_databases.md
+  - date: "2026-10-28"
+    summary: "Missing-language errors name the page's live languages; single-address pages (landings) report their real language"
+    agent_impact:
+      - "get_entry_content / get_entry_seo / update_fields / remove_section / reorder_sections / replace_entry_sections on a page without a live {locale}.yml now fail with code locale_not_available + available_locales, primary_locale (_common.yml locale), suggested_locale. Reads: next_actions retries the same tool in suggested_locale. Writes: next_actions get_entry_content in suggested_locale (editing another language is a different change; translate_entry adds a language). Variant and shared-template targets keep the old file-not-found error."
+      - "get_validation_issues with slug and no locale uses the page's own language when it has no en (warning locale_fallback); an explicit locale that is missing still warns slug_unresolved, now listing live languages."
+      - "get_organic_traffic leaderboard identity and opportunities entry_key use the served language for one-address-for-all-languages types (e.g. landing): a Spanish-only landing is es, not \"default\" / en."
+    tools_changed: false
+    paths:
+      - mcp-server/lib/missing-locale.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/tools/validation-issues.ts
+      - mcp-server/lib/organic-traffic-mcp.ts
+      - server/content-index.ts
+  - date: "2026-10-27"
+    summary: "get_analytics_report page_detail uses the site's own visit counts on Optimize for ads pages; every report is site-aware"
+    agent_impact:
+      - "page_detail picks its source like the staff page-stats drawer and returns source (ga4 | first_party). New optional source arg (page_detail only). first_party: same views/sessions, top_events [], totals.interactions + low_quality_excluded, low_sample below 100 sessions. One session = one counted view, not comparable with GA4."
+      - "first_party never stitches GA4. days passed and reaching outside the latest on-period fails (details.max_days / available_from); days omitted shortens (days_shortened, window_start / window_end). Explicit first_party on a never-flagged type fails; on a switched-off type the window ends on the switch-off day (window_end_shifted)."
+      - "Every get_analytics_report now reads the site it is called for. Before, all sites read the default site's BigQuery settings and pages, so numbers for non-default sites may change or show not_configured."
+    tools_changed: false
+    paths:
+      - server/analytics/reports.ts
+      - server/analytics/first-party/page-detail.ts
+      - server/routes/analytics.ts
+      - mcp-server/tools/analytics.ts
+      - mcp-server/explain/analytics.md
+  - date: "2026-10-27"
+    summary: "get_leads_breakdown kpis add test_staff / test_email; Leads page can show test leads only"
+    agent_impact:
+      - "kpis.test_staff / kpis.test_email count test leads in view by reason (staff_session / email_pattern). Both are 0 unless include_test is true, since test leads are excluded by default. Args unchanged."
+      - "The staff Leads page now has Real leads / All / Test only (URL ?show=real|all|test). The API still accepts include_test=1 as show=all; the tool has no test-only mode."
+    tools_changed: false
+    paths:
+      - shared/leads-query.ts
+      - server/ads/leads-query.ts
+  - date: "2026-10-27"
+    summary: "Lead webhook sends the page test as experiment_id / variant (was page_experiment_id / page_variant)"
+    agent_impact:
+      - "CRM lead fields renamed to match GTM conversion pushes: experiment_id (contentType:slug:locale@YYYY-MM-DD) and variant (slug or default). Same rule: visit's first test, only when it matches the visitor's 4g_versioning_v2 assignment; otherwise both omitted."
+      - "Form bodies cannot set experiment_id / variant themselves (stripped before the CRM). The form still sends page_experiment_id to the server; ledger columns experiment_id / variant are unchanged. Older leads in the CRM carry page_experiment_id / page_variant."
+    tools_changed: false
+    paths:
+      - server/ads/lead-ledger.ts
+      - mcp-server/explain/lead-forms.md
+  - date: "2026-10-27"
+    summary: "get_content_type_info reports ads_optimized (Optimize for ads, staff-only)"
+    agent_impact:
+      - "ads_optimized (boolean) + ads_optimized_note on get_content_type_info. Staff turn it on from the content type dashboard; update_content_type does not set it."
+      - "When true: Tag Manager loads on page open, notice-country visitors count as consented on landing (ask countries unchanged), and page stats use the site's own anonymous visit counts (data/<site>/visits.db) instead of GA4. Page content, the Ads report and platform conversions do not change."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/pages.ts
+      - server/content-types.ts
+      - server/ads/ads-first.ts
+  - date: "2026-10-27"
+    summary: "Lead webhook and every GTM dataLayer push carry is_staff"
+    agent_impact:
+      - "Webhook is_staff (always boolean) is true only for test_reason staff_session (server-verified). Email-pattern test leads stay is_test: true, is_staff: false. is_test / test_reason are unchanged."
+      - "Every dataLayer push (conversions, page context, website-route-change, consent_update) carries is_staff from the browser staff token, so GTM can skip conversion tags or set GA4 traffic_type internal. Needs GTM container setup; no lead ledger column added."
+      - "Staff submitting a lead form now confirm a dialog first (once per browser session if they tick don't ask again). Staff are still never assigned to A/B tests, so their leads have no page_experiment_id / page_variant."
+    tools_changed: false
+    paths:
+      - server/ads/lead-ledger.ts
+      - client/src/lib/tracking.ts
+      - mcp-server/explain/lead-forms.md
+  - date: "2026-10-27"
+    summary: "{{ funnel.products }} is URL-encoded lead-webhook JSON of the page funnel"
+    agent_impact:
+      - "In section/meta URLs, {{ funnel.products }} becomes encodeURIComponent of {product, persona, product_persona} full ids (sorted, all/none sentinels, program page includes itself). Same merge as GTM/webhook; not GTM codes, not experiment/variant."
+      - "Not entry.* / meta.* / Fields picker. Does not write _common.yml or the dataLayer. Hidden form product/persona overrides do not change this token."
+    tools_changed: false
+    paths:
+      - shared/tracking-context.ts
+      - server/resolve-template-vars.ts
+      - mcp-server/explain/content_system.md
+      - mcp-server/explain/funnel.md
+      - mcp-server/explain/lead-forms.md
+  - date: "2026-10-26"
+    summary: "Ads data refreshes daily at 5 AM ET on the live server"
+    agent_impact:
+      - "Worker cron ads_daily_sync (0 5 * * * America/New_York, live server only) queues the regular ads_sync for every site with Meta, Google Ads or GA4. Reads (refresh state, retry wait, worker_down) behave as before."
+      - "On worker start, a site with no refresh started since the latest 5 AM slot gets a catch-up run. A failed morning run is not retried by the schedule; the >24h stale read still queues one refresh after the retry wait."
+    tools_changed: false
+    paths:
+      - server/jobs/definitions/ads-daily-sync.ts
+      - mcp-server/explain/ads.md
+  - date: "2026-10-25"
+    summary: "Product / persona values are sorted; get_leads_breakdown groups and filters by page funnel product and persona"
+    agent_impact:
+      - "dataLayer / GA4 and lead product / persona / product_persona lists are sorted (GA4: cut at 100 chars in funnel order first, then sorted). Read them back with parseTrackingList / decodeTrackingPairs; never group by the raw string (GA4 data before 2026-10-25 can hold one set in two orders)."
+      - "get_leads_breakdown adds breakdowns.funnel_products / funnel_personas, funnel_since, funnel_filter_labels and filters funnel_product (one full product slug, all, none, \"(none)\") / funnel_persona (product:persona, :persona, all, none, \"(none)\"). One count per product / persona: shares can pass 100%. funnel_product is not product (catalog product the form resolved)."
+      - "Leads store product_persona full-id pairs since pipeline migration 42. Older leads with a persona id several products share get no product (:persona, \"product unknown\"; warning persona_product_unknown). New warnings funnel_counts_overlap, funnel_tracking_partial."
+    tools_changed: false
+    paths:
+      - shared/tracking-context.ts
+      - server/ads/leads-funnel.ts
+      - mcp-server/tools/leads-breakdown.ts
+      - mcp-server/explain/ads.md
+      - mcp-server/explain/lead-forms.md
+  - date: "2026-10-23"
+    summary: "Custom redirect targets can read {{ entry.field }} from the visited entry"
+    agent_impact:
+      - "A custom-redirects.yml to of {{ entry.field }} (or legacy {{ single.field }}) is filled on the visit from the entry that URL belongs to, any content type. Empty, missing, or a value that is not a site path or http(s) URL does not redirect. test_redirect resolves the same way."
+      - "Workshop redirectTo is a content-type function. It is the representative session URL, or empty on that session and when there is no series. The /en|es/workshop/:slug rule is status 302."
+    tools_changed: false
+    paths:
+      - server/redirects.ts
+      - mcp-server/explain/redirects.md
+  - date: "2026-10-23"
+    summary: "Database content types can gate pages with entry_filters and fill a field from other rows with rows_filters"
+    agent_impact:
+      - "entry_filters on a content type (item_property_slug + value, all must match) decides which cached rows are pages. Fixed text only. The database screen still lists every cached row. A row that fails has no URL."
+      - "field_mapping { rows_filters: [{ rows_property_slug, value_from_current_row }] } fills a field with other rows of the same cache before functions run. The YAML stores column names. Empty current-row column or more than 50 matches stores []. Functions then read item.<field> (workshop group_sessions → series_index, series_total, is_representative)."
+      - "Workshop pages are status ACTIVE. Finished sessions stay in the cache for the day number and are not pages. The events API has no featured field."
+    tools_changed: false
+    paths:
+      - server/database-single-loader.ts
+      - server/entry-layer.ts
+      - shared/validateEditorFieldTypes.ts
+      - server/content-types.ts
+      - mcp-server/explain/content_system.md
+  - date: "2026-10-23"
+    summary: "Semantic search indexes heal themselves: incremental Sidequest sync into site-scoped Qdrant collections"
+    agent_impact:
+      - "reindex_database now only queues an incremental sync on the Sidequest vector_index queue: rows whose text_hash changed are re-embedded, removed rows deleted. The current index keeps serving until it finishes (keyword matching if none exists yet); Qdrant failures retry 5 times with backoff; jobs wait if the worker is down. No MCP rebuild-from-scratch (admin UI only)."
+      - "create_or_update_database patches that enable vector_search or change its fields auto-queue the sync (warning vector_index_auto_queued, next_actions []). Do not follow up with reindex_database. Item CRUD still needs reindex: true or reindex_database."
+      - "Collections are named <contentFolder>__<dbName> (e.g. site_4geeks-com__testimonials); legacy bare-name collections serve until the first sync finishes, then are deleted. Rows without slug/id are keyed by locale + hash of the embedded text."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/databases.ts
+      - mcp-server/explain/semantic_search.md
+      - mcp-server/explain/local_databases.md
+      - server/vector-search.ts
+      - server/jobs/definitions/vector-index-sync.ts
+  - date: "2026-10-23"
+    summary: "Products and personas get tracking short keys; every event and lead carries the page's product / persona"
+    agent_impact:
+      - "create_or_update_product accepts short_key, personas[].short_key and rename_short_key. Every write fills that product's missing keys (warning short_keys_assigned). Saved keys are locked: action_required confirm_short_key_rename / pick_another_short_key on short_key_locked / short_key_conflict / invalid_short_key. get_product returns tracking_keys.taken_product / taken_persona. Keys: 2-6 [a-z0-9], unique per site (persona keys across all products), retired keys never reused."
+      - "Events (GA4) carry product / persona / product_persona codes + funnel_stage + content_key once a site's tracking switch is on (every product and persona has a key — staff run migration 009 or the Diagnostics fixer). Lead CRM payload and ledger get full ids in product / persona. Lead forms override with hidden fields.product / fields.persona (full id preferred)."
+      - "New Diagnostics codes: MISSING_TRACKING_SHORT_KEY, TRACKING_NOT_READY, DUPLICATE_TRACKING_SHORT_KEY, TRACKING_VALUES_TOO_LONG (funnel-completeness) and FORM_UNKNOWN_TRACKING_PRODUCT / _PERSONA, FORM_TRACKING_PERSONA_PRODUCT_MISMATCH, FORM_TRACKING_OVERRIDE_USES_CODE (forms). Funnel writes (update_fields, update_entry_attributes) may warn tracking_values_too_long (non-blocking)."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/product.ts
+      - mcp-server/explain/product.md
+      - mcp-server/explain/lead-forms.md
+      - mcp-server/explain/ads.md
+  - date: "2026-10-23"
+    summary: "Writes can answer site_updating for a few seconds during a deploy; retry after retry_after_seconds"
+    agent_impact:
+      - "During the last step of a deploy, content writes (any mutating tool, including create_entry and translate_entry) fail with code site_updating, retry_after_seconds and HTTP 503 for up to ~3 minutes. Nothing was written. Wait retry_after_seconds and retry the same call; do not report it as a content or permission error."
+      - "Before switching releases the server pushes every unpushed content change to GitHub (with the service account when the author has no GitHub connection; the commit keeps the real author). A deploy now stops instead of dropping unpushed changes, so edits saved right before a deploy are no longer lost."
+    tools_changed: false
+    paths:
+      - server/content-write-pause.ts
+      - server/content-flush.ts
+      - server/routes/internal-content.ts
+      - mcp-server/lib/write-pause.ts
+      - scripts/deploy.sh
+  - date: "2026-10-23"
+    summary: "A/B testing moved under Settings → Tracking (staff URL /private/tracking/ab-testing)"
+    agent_impact:
+      - "When pointing staff at A/B setup or health, say Settings → Tracking → A/B testing (Setup / Health / Google Analytics cards). list_variants warnings (ab_testing_not_setup, ab_check_failing) and the versioning API setup_url / health_url now use /private/tracking/ab-testing#ab-setup and #ab-health; old /private/settings/ab-testing/* links redirect."
+      - "No change to who can do what: setup and checks still need content_allocate_traffic, the GA4 dimensions card still needs metrics_view. Staff without metrics_view can open the A/B tab but not the other Tracking tabs."
+    tools_changed: false
+    paths:
+      - mcp-server/lib/ab-testing-warnings.ts
+      - server/routes/versioning.ts
+  - date: "2026-10-23"
+    summary: "Page tests: list_variants warns about A/B readiness, stickiness and split mismatch; the hidden A/B check page is locked; lead page_variant can be default"
+    agent_impact:
+      - "list_variants adds started_at (per-locale run date) and warnings: ab_testing_not_setup (visitors only see Default until staff finish Settings → A/B testing → Setup), ab_check_failing (running tests continue; starting/raising traffic blocked), variant_assignment_sticky (visitors keep their first version; a new split only affects new visitors; allocation is staff-only), split_mismatch (locale, source, expected vs observed shares, p, through_date: results unreliable)."
+      - "The landing/page ab-check entry (system: ab_check) is a locked system page: edits, deletes, renames, variants and traffic return system_page_locked; it is omitted from list_entries and listings. Do not try to edit or recreate it; only staff Setup does."
+      - "Lead page_experiment_id is the visit's first test (contentType:slug:locale@YYYY-MM-DD) and page_variant can be default. get_leads_breakdown gains default rows; leads before the fix used a buggy split."
+      - "New capability ab_testing_settings (Platform Steward only): one-time A/B setup, checks, and GA4 dimensions in the staff UI. Not an MCP tool; content_allocate_traffic alone cannot set up A/B testing. When list_variants returns ab_testing_not_setup, tell staff a Platform Steward must do the setup."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/pages.ts
+      - mcp-server/lib/ab-testing-warnings.ts
+      - mcp-server/explain/lead-forms.md
+      - server/ab-testing/state.ts
+      - server/versioning/split-health.ts
+  - date: "2026-10-23"
+    summary: "Apply dry_run previews while blockers are open; get_entry_fields names the file each YAML value comes from"
+    agent_impact:
+      - "update_proposal apply dry_run (1.0) no longer fails proposal_blocked: it returns merge_preview + warning preview_while_blocked (details.open_blocker_ids) and a resolve_blocker next_action. Real apply is still proposal_blocked; legacy proposals stay legacy_version; four-eyes still applies. A clean preview is not approval and does not reset the 10/30-day blocked clock."
+      - "get_entry_fields YAML-backed rows add stored_in (locale_file | draft_file | page_common | type_template | not_set) + stored_in_path, also_in[] for shadowed copies (locale_file + page_common on a page-level field = legacy copy publish drops), and publishes_to: page_common for page-level fields staged in a draft. entry_default means the page's own YAML value, not a type fallback."
+      - "Blocker fix conditions should be checkable from the page files (stored_in / also_in) or the apply dry_run — order: fix → preview → resolve_blocker → four-eyes apply."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - server/field-overrides.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/reading-proposals.md
+  - date: "2026-10-23"
+    summary: "add_blocker requires a plain-English staff_summary next to the technical body"
+    agent_impact:
+      - "update_proposal add_blocker: pass staff_summary (1-4 plain sentences, 40-700 chars: what visitors/Google would see change, what must happen before approving, who does it). Missing → blocker_staff_summary_required; field/file names, snake_case/camelCase/dotted names, backticks, or words like op/schema/slug/locale/YAML → blocker_staff_summary_not_plain with details.problems. Nothing is saved on either; retry with the same body."
+      - "body stays the technical version for the author (field paths, codes, files). Staff read staff_summary first; body sits behind a technical-details toggle."
+      - "Blockers read via list_proposals carry staff_summary (null on old blockers until staff run migration 007_blocker_staff_summaries). System predecessor_closed blockers include one."
+    tools_changed: false
+    paths:
+      - server/content-proposals/blocker-staff-summary.ts
+      - server/content-proposals/service.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/reading-proposals.md
+  - date: "2026-10-23"
+    summary: "Saves that would write a destroyed {{ }} placeholder ({\"[object Object]\": null}) are blocked; nothing is written"
+    agent_impact:
+      - "Any content write (update_fields, section edits, detach, publish stamps, MCP file writes) fails with errorCode corrupted_template_value when the data carries a \"[object Object]\" key. The message names the file and key paths (e.g. sections.1.updated_at); the file on disk and GitHub is unchanged. Do not retry or work around it: report the file and paths to staff, the dev team must restore the placeholder from git history."
+      - "New validator corrupted-template-values (issue code CORRUPTED_TEMPLATE_VALUE, coding_agent_only) lists files that still carry the broken value; MCP agents must not claim it."
+    tools_changed: false
+    paths:
+      - server/content-yaml.ts
+      - shared/templateVars.ts
+      - scripts/validation/validators/corrupted-template-values.ts
+  - date: "2026-10-23"
+    summary: "Proposals flag draft fields the author did not send; required-field gate no longer calls text with site tokens empty"
+    agent_impact:
+      - "list_proposals(proposal_id): entries carry unrequested_fields (draft fields that would publish with no requested op covering them; updated_at excluded) and ops_match_request is false when any exist. Warning draft_has_unrequested_fields + update_proposal revise_entries next_action. Author: revise with only the intended ops (restarts a draft this proposal created from today's live). Reviewer: judge them as ops; unintended → blocker asking the author to revise."
+      - "Apply / promote no longer fail seo_gate 'Field content is required ... cannot be empty' when the text uses site tokens such as {{ global.price_ai_engineering | $399 }}. Only a value that is nothing but placeholders (e.g. {{ entry.content }}) counts as empty."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+      - shared/validateRequiredFields.ts
+  - date: "2026-10-23"
+    summary: "Ideas built around an existing file name its media_id + src; proposal summary and rationale render as Markdown"
+    agent_impact:
+      - "propose_change kind idea: when the page hands out or is built on an existing file (PDF lead magnet, video, image), put its gallery media_id and public src URL in summary or rationale. Reviewers add_blocker when it is missing (idea-opportunity-harm disposition + author checklist)."
+      - "Staff see proposal summary and rationale rendered as Markdown on the proposal page: bare URLs become links, lists and `code` render, single line breaks are kept."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/idea-opportunity-harm-proposals.md
+      - mcp-server/explain/proposals.md
+      - client/src/components/agents/ProposalMarkdown.tsx
+  - date: "2026-10-23"
+    summary: "add_blocker body is Markdown: one-line verdict, blank line, numbered list with one item per problem"
+    agent_impact:
+      - "update_proposal add_blocker body: write a one-sentence verdict, a blank line, then a Markdown numbered list (1. 2. …) with one item per problem, each saying what's wrong, what fixed looks like and why it matters. Wrap field paths, slugs and URLs in backticks; no headings or tables. Min 80 chars is unchanged."
+      - "Staff see blocker bodies and resolve notes rendered as Markdown on the proposal page; older bodies written as inline (1) (2) (3) are shown as a list automatically, so do not rewrite existing blockers."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/internal-links-proposals.md
+      - client/src/components/agents/ProposalMarkdown.tsx
+  - date: "2026-10-22"
+    summary: "agent_session ids are server-issued: start ignores a passed id; invented ids (new, pending, placeholder…) are refused"
+    agent_impact:
+      - "agent_session start: omit agent_session_id. The server always returns a new UUID; an id you pass is ignored with warning start_ignores_agent_session_id. Name a batch of work with label on start, not with a custom id."
+      - "Every mutate, note and summarize refuses an agent_session_id that start did not issue (session_unknown, next_action agent_session start). Ids like new / pending / start / placeholder were shared by several agents, mixing their staff trails; resume and session_conflict never return them."
+      - "attach_variant on an old proposal filed under an invented id works from any session of the same proposer (username + role); proposals filed under a real session id still need that same session."
+    tools_changed: false
+    paths:
+      - shared/agent-identity.ts
+      - server/routes/admin.ts
+      - server/events/event-store.ts
+      - server/content-proposals/service.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/lib/loopback.ts
+      - mcp-server/agent-conventions.md
+  - date: "2026-10-22"
+    summary: "Proposal drafts: system writes no longer make a co-author; revise_entries restarts the draft again; no phantom remove op for nested nulls"
+    agent_impact:
+      - "Draft rewrites by migrations, sweeps, sync pulls or with no author (co_authors username unknown / migration:* / system:*) only record the new draft fingerprint: no co-author, no claim release, no back-to-review. revise_entries now restarts a draft the proposal created from today's live unless a person co-authored it, so stray page-level ops (funnel, published_at, authors) left in old drafts disappear on the next revise."
+      - "Proposals stuck on server-added funnel / published_at / meta.* ops or on context_stale reason draft_changed after the 2026-10-22 field-scope migration: the author runs revise_entries with only the ops they intend, then re-checks list_proposals(proposal_id) ops before asking for re-review."
+      - "Proposal ops no longer list a remove for a nested null that live also has (e.g. seo.pillar_path: null, the cluster opt-out). Publish keeps that null, so blockers filed only about that op can be resolved."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - server/versioning/draft-base.ts
+      - server/routes/components.ts
+  - date: "2026-10-22"
+    summary: "list_variants reports variant files versioning.yml is missing; versioning.yml now commits with the variant file"
+    agent_impact:
+      - "list_variants adds unregistered_variants [{ locale, slug, fileName }] (live-only and versioned payloads) plus warning unregistered_variant_files with the relative paths. Those files get no traffic and cannot be promoted or allocated until listed; staff register them at 0% (Versions panel → Add to versions, or validation fixer register-unlisted-variants). Live content does not change. create_variant with the same slug still 409s."
+      - "Since 2026-08-25 most versioning.yml changes (create_variant, traffic, delete, promote) stayed unpushed in production: they were queued under an author with no GitHub connection. They are now queued under the person who made the change, in the same commit as the variant file; already-stuck changes push on the next sync."
+      - "Validator draft-integrity adds warning UNREGISTERED_VARIANT_FILE (fix register-unlisted-variants)."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/pages.ts
+      - server/routes/versioning.ts
+      - server/draft-entry.ts
+      - server/versioning/VersioningManager.ts
+      - server/auto-commit.ts
+      - scripts/validation/validators/draft-integrity.ts
+      - scripts/validation/fixers/draft-integrity.ts
+  - date: "2026-10-22"
+    summary: "Every lead form needs one mandatory consent checkbox; publish refuses consent_no_mandatory_checkbox"
+    agent_impact:
+      - "Rule: General and Marketing are mandatory whenever shown (both → both, validator warning FORM_TWO_REQUIRED_CONSENTS); a custom consent only when neither is shown; otherwise the site Default (consent.fallback) appears as the mandatory one. SMS, Email and WhatsApp never count. explain_site topic lead-forms → Consent checkboxes."
+      - "publish_draft / promote_variant / staff publish / live replace_all_sections refuse consent_no_mandatory_checkbox (action_required add_mandatory_consent) when a form or a conversion_name-switching form_override has no mandatory checkbox; next_action update_fields sets <form>.consent.general true on the draft. A site without a Default adds warning site_no_default_consent; validator codes FORM_NO_REQUIRED_CONSENT and SITE_NO_DEFAULT_CONSENT are errors."
+      - "sms_usa_only now decides US visitors by country_code (picked location, else detected location, else visitor geo for XX/remote). CRM consent values unchanged."
+    tools_changed: false
+    paths:
+      - shared/consent-settings.ts
+      - shared/formConsentCheck.ts
+      - shared/usVisitor.ts
+      - server/consent-gate.ts
+      - server/versioning/promote-with-teardown.ts
+      - server/content-editor.ts
+      - scripts/validation/validators/forms.ts
+      - mcp-server/lib/consent-gate-mcp.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/explain/lead-forms.md
+  - date: "2026-10-22"
+    summary: "Each new language picks its own URL slug: locked at idea accept, enforced at filing, checked at go-live"
+    agent_impact:
+      - "update_proposal accept: accepted_entry.slug is the folder name (page ID in every language). For a new language of a page already live in another language, pass accepted_entry.url_slug (this language's address word, e.g. es que-es-manus-ia) or accept refuses url_slug_required. The address (url_slug, else slug for a brand-new page) must be free in that language (slug_already_owned_by_other_entry) and not look like another language (slug_locale_mismatch; slug_language_ack: true for a name)."
+      - "propose_change / revise_entries: the implemented idea's url_slug is seeded into the new draft as slug: (warning idea_url_slug_locked). A different { field_path: \"slug\" } update needs url_slug_override { reason } (min 40; idea_url_slug_conflict). With no locked address, a new language without a slug update (or slug on the kept draft) refuses locale_url_slug_required. update_fields slug on a variant now stages the address on the draft (live renames still go through slug rename)."
+      - "Go-live: proposal apply, promote_variant, publish_draft, and staff publish refuse locale_url_slug_required when a new language's draft has no own slug (next_action update_fields slug on the variant). Same word as the folder is allowed (deliberate keep). Publishing a slug that looks like another language warns slug_locale_mismatch."
+    tools_changed: false
+    paths:
+      - server/locale-url-slug.ts
+      - server/content-proposals/service.ts
+      - server/content-proposals/review-context.ts
+      - server/field-write-router.ts
+      - server/content-editor.ts
+      - server/versioning/promote-with-teardown.ts
+      - server/routes/versioning.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/lib/respond.ts
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/proposals-translations.md
+  - date: "2026-10-22"
+    summary: "Hub links at go-live, chained proposals (applies_after_proposal_id), hub split diagnostics + hub_split situation"
+    agent_impact:
+      - "Ideas: the 'default zero new hub links' rule is gone. Accepted pages get a hub → page link at go-live via a second edits proposal on the hub (internal_links, applies_after_proposal_id = the page's proposal). The page's create (and finished apply, when still missing) returns hub_link_follow_up with a propose_change next_action, or hub_has_open_edits when the hub already has open edits (file after it closes; the page may go live first). Kill criterion must say the hub link is removed if the page is retired."
+      - "New edits field applies_after_proposal_id (propose_change arg; update_proposal action set_applies_after, proposer/staff, empty unlinks). Order only: apply refuses predecessor_not_applied until the predecessor is finished (partial does not count); applying the predecessor returns dependents_ready + update_proposal apply next_actions (nothing auto-applied). Refusals: applies_after_cycle | applies_after_closed | applies_after_not_found | applies_after_edits_only. Rejecting/withdrawing/auto-closing a predecessor adds a predecessor_closed blocker to each open dependent. Rows carry applied_before_proposal_ids and dependent_overdue_flagged_at (daily sweep, 48h after the predecessor finished; event proposal_dependent_overdue; never escalates or closes). Attention predecessor_applied sorts first for reviewers and counts in needs_review. Not supersedes_proposal_id."
+      - "Hub split: seo-cluster-links adds HUB_THIN_LINK_DENSE (expand, do not split) and HUB_OVERLOADED (lists split ideas in flight); thresholds in seo-config.yml hub_load. Accept refuses idea_seo_target_members_claimed when another accepted, not-yet-live hub idea claims a member. New declared-only review situation hub_split (checklist hub_split) for the original hub rewrite; idea_seo_hub_members_follow_up next_actions now carry applies_after_proposal_id and ask moved members to update their in-body hub link. Playbook: explain_site topic proposals subtopic hub-split."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - server/content-proposals/attention.ts
+      - server/content-proposals/proposal-review-rules.ts
+      - server/content-proposals/review-situations.ts
+      - server/content-proposals/hub-split-ideas.ts
+      - server/seo-cluster-link-check.ts
+      - server/seo-config.ts
+      - scripts/validation/validators/seo-cluster-links.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/hub-split-proposals.md
+      - mcp-server/explain/internal-links-proposals.md
+      - mcp-server/explain/idea-opportunity-harm-proposals.md
+      - mcp-server/explain/proposals.md
+  - date: "2026-10-22"
+    summary: "Field scope: no phantom page-level ops on proposals; meta.robots/priority/change_frequency are per locale; display_values_change on publish"
+    agent_impact:
+      - "Proposal drafts (create / revise_entries reset / rebuild) and create_variant from live start from the locale part only: funnel, authors, published_at, detached appear as page-level ops only when you send them. common_fields_all_languages now means a real page-level edit."
+      - "meta.robots, meta.priority, meta.change_frequency are per locale ({slug}/{locale}.yml): noindex hides one language; set each locale to hide all. Type defaults stay in {type}/_common.template.yml. Page-level: funnel.*, published_at, detached, authors."
+      - "promote_variant / publish_draft may fail display_values_change (details.fields[] field_path/before/after + paths) when the live locale file still holds a legacy page-level copy that publish drops; retry with confirm_display_change: true after the user agrees. Proposal preview/apply return it as a warning (not gated). Migration 006 (staff run) cleans legacy copies."
+    paths:
+      - shared/field-scope.ts
+      - server/versioning/draft-base.ts
+      - server/content-proposals/draft-store.ts
+      - server/versioning/promote-with-teardown.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/lib/respond.ts
+      - mcp-server/explain/content_system.md
+      - mcp-server/explain/seo.md
+      - mcp-server/explain/proposals.md
+    tools_changed: false
+  - date: "2026-10-15"
+    summary: "idea_seo_target carries keyword volume + difficulty (kw_monthly_volume, kw_difficulty)"
+    agent_impact:
+      - "Ideas: set idea_seo_target.kw_monthly_volume (int >= 0) and kw_difficulty (int 0–100) from your keyword research on create / set_idea_seo_target. Optional in the schema; out-of-range → idea_seo_target_incomplete. set_idea_seo_target replaces the whole target, so resend main_keyword + cluster with them."
+      - "Reviewers: new review warning idea_seo_target_metrics_missing when either number is absent → add_blocker (volume only in the brief text does not count). Accept is not refused for missing metrics."
+      - "Non-effects: metrics stay on the idea and are frozen at accept; the implementing draft's seo block still gets only main_keyword + hub (seo.kw_* on pages still come from get_or_refresh_seo_research or a sourced write)."
+    tools_changed: false
+    paths:
+      - server/content-proposals/idea-seo-target.ts
+      - server/content-proposals/review-context.ts
+      - mcp-server/tools/proposals.ts
   - date: "2026-10-08"
     summary: "New get_leads_breakdown: staff Leads page numbers (channel vs UTM source / medium) for agents"
     agent_impact:

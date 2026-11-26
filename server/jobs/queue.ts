@@ -14,9 +14,10 @@ import os from "os";
 import crypto from "crypto";
 import { execFileSync } from "child_process";
 import { DuplicatedJobError } from "@sidequest/core";
-import { Sidequest, Job } from "sidequest";
+import { Sidequest, Job, Dispatcher } from "sidequest";
 import { child } from "../logger";
 import { getPackageRoot } from "@shared/paths";
+import { installDispatcherLoopRetry, type DispatcherLoopHost } from "./dispatcher-loop-retry";
 
 const log = child({ module: "job-queue" });
 
@@ -333,6 +334,9 @@ export type JobEnqueueOpts = {
   uniqueWhileAlive?: boolean;
   delayMs?: number;
   queue?: string;
+  /** Total attempts including the first run; retries use exponential backoff from retryDelayMs. */
+  maxAttempts?: number;
+  retryDelayMs?: number;
 };
 
 export type ConfigureJobQueueOpts = {
@@ -398,6 +402,10 @@ export async function configureJobQueue(opts?: ConfigureJobQueueOpts): Promise<v
     queues: [
       { name: "default", concurrency: 1, priority: 50, state: "active" },
       { name: "html_rebuild", concurrency: 2, priority: 40, state: "active" },
+      // Large sweeps (theme, Tag Manager container id). A page save on html_rebuild is claimed first.
+      { name: "html_rebuild_bulk", concurrency: 1, priority: 10, state: "active" },
+      // Qdrant embedding syncs can run for minutes on large databases; never ahead of HTML work.
+      { name: "vector_index", concurrency: 1, priority: 5, state: "active" },
     ],
   });
   configured = true;
@@ -416,6 +424,10 @@ export async function startJobQueue(): Promise<void> {
   starting = (async () => {
     try {
       await configureJobQueue();
+      // Sidequest logs the crash and leaves the poll loop dead. Re-arm it before start.
+      installDispatcherLoopRetry(Dispatcher.prototype as unknown as DispatcherLoopHost, (meta, message) =>
+        log.warn(meta, message),
+      );
       // Must pass dashboard here — Sidequest.start spreads config?.dashboard into Dashboard.start.
       // A bare Sidequest.start() after configure() boots the UI at "/" with no auth/basePath.
       const dashboard = buildSidequestDashboardConfig();
@@ -501,6 +513,12 @@ export async function enqueueJob(
   if (opts?.delayMs && opts.delayMs > 0) {
     builder = builder.availableAt(new Date(Date.now() + opts.delayMs));
   }
+  if (opts?.maxAttempts && opts.maxAttempts > 0) {
+    builder = builder.maxAttempts(opts.maxAttempts);
+    if (opts.retryDelayMs && opts.retryDelayMs > 0) {
+      builder = builder.retryDelay(opts.retryDelayMs).backoffStrategy("exponential");
+    }
+  }
   try {
     await (builder.enqueue as (payload: Record<string, unknown>) => Promise<unknown>)(payload);
     return { queued: true };
@@ -511,4 +529,36 @@ export async function enqueueJob(
     }
     throw err;
   }
+}
+
+export type ScheduleJobOpts = {
+  /** IANA zone for the cron expression (e.g. "America/New_York"); omitted = server clock. */
+  timezone?: string;
+  queue?: string;
+  payload?: Record<string, unknown>;
+};
+
+const scheduledJobTypes = new Set<string>();
+
+/**
+ * Worker-only: enqueue `jobType` on a cron schedule. In memory, so call it on every worker start.
+ * No uniqueness: Sidequest freezes the job data at schedule time, and a duplicate insert would
+ * throw inside the cron callback. Jobs scheduled this way must tolerate an occasional double run.
+ */
+export async function scheduleJob(jobType: string, cronExpression: string, opts?: ScheduleJobOpts): Promise<boolean> {
+  if (scheduledJobTypes.has(jobType)) return false;
+  await configureJobQueue();
+  const JobClass = jobClassRegistry.get(jobType);
+  if (!JobClass) {
+    log.error({ jobType }, "[JobQueue] Unknown job type (schedule)");
+    return false;
+  }
+  type PayloadJobClass = new () => Job & { run(payload: Record<string, unknown>): Promise<unknown> };
+  await Sidequest.build(JobClass as PayloadJobClass)
+    .queue(opts?.queue ?? "default")
+    .scheduleOptions({ timezone: opts?.timezone, noOverlap: true })
+    .schedule(cronExpression, opts?.payload ?? {});
+  scheduledJobTypes.add(jobType);
+  log.info({ jobType, cron: cronExpression, timezone: opts?.timezone ?? null }, "[JobQueue] Job scheduled");
+  return true;
 }

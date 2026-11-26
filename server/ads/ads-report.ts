@@ -71,6 +71,8 @@ import { campaignIdsByName, loadAdsSetup, matchCampaignByName, type AdsSetupCata
 import { adPageForDay, buildAdLandingByDay, targetUrl, type AdDayChange, type AdLandingByDay, type HostPath } from "./ad-url-history";
 import { ledgerCollectingSince, listLedgerRows, type LedgerRow } from "./lead-ledger";
 import { listConsentDaily, summarizeConsentRates } from "./consent-store";
+import type { EntryActiveTest } from "../ab-testing/active-tests";
+import type { OwnPaidVisits } from "./own-paid-visits";
 import {
   getAdsRefreshStatus,
   hasGa4Data,
@@ -148,7 +150,23 @@ export type AdsVersionRow = {
   submissions: number;
   conversion_rate: number | null;
   low_sample: boolean;
+  /** GA4 non-paid sessions whose first page test was this version (days synced after per-version organic). */
+  organic_visits: number;
+  /** Of those, sessions with a lead event. */
+  organic_leads: number;
 };
+
+type VersionAgg = {
+  paid_visits: number;
+  unique_leads: number;
+  submissions: number;
+  organic_visits: number;
+  organic_leads: number;
+};
+
+function emptyVersionAgg(): VersionAgg {
+  return { paid_visits: 0, unique_leads: 0, submissions: 0, organic_visits: 0, organic_leads: 0 };
+}
 
 export type AdsCampaignRef = {
   platform: AdPlatform | null;
@@ -257,6 +275,10 @@ export type AdsPageRow = {
   /** Campaigns (untagged row excluded) with enough paid visits for rates. */
   comparable_campaigns: number;
   versions?: AdsVersionRow[];
+  /** Set by the report routes (not cached rollups) when the entry's language has a running A/B test. */
+  ab_test?: EntryActiveTest;
+  /** Set by the report routes when "Optimize for ads" covered part of the range: paid visits from the site's own counts. */
+  own_counts?: OwnPaidVisits;
   /** Only with `includeGa4Ads`: top GA4 paid-visit tags on this row, by visits. */
   ga4_ads?: AdsGa4AdRef[];
   /** Only with `includeGa4Ads`: paid visits with no ad id (utm_content) tag. */
@@ -521,7 +543,7 @@ type Agg = {
   /** utm_campaign text → visits for the untagged campaign row. */
   untaggedTags?: Map<string, number>;
   platforms: Set<AdPlatform>;
-  versions: Map<string, { paid_visits: number; unique_leads: number; submissions: number }>;
+  versions: Map<string, VersionAgg>;
   ga4Ads?: Map<string, AdsGa4AdRef>;
   ga4Untagged?: number;
   ratioClicks: number;
@@ -1439,7 +1461,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
         if (!c.utm_content) a.ga4Untagged = (a.ga4Untagged ?? 0) + c.sessions;
       }
       if (opts.split_by_version && c.variant) {
-        const v = a.versions.get(c.variant) ?? { paid_visits: 0, unique_leads: 0, submissions: 0 };
+        const v = a.versions.get(c.variant) ?? emptyVersionAgg();
         v.paid_visits += c.sessions;
         a.versions.set(c.variant, v);
       }
@@ -1456,6 +1478,12 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       a.organicSessions += o.sessions;
       a.organicEngaged += o.engaged_sessions;
       a.organicWithLead += o.sessions_with_lead;
+      if (opts.split_by_version && o.variant) {
+        const v = a.versions.get(o.variant) ?? emptyVersionAgg();
+        v.organic_visits += o.sessions;
+        v.organic_leads += o.sessions_with_lead;
+        a.versions.set(o.variant, v);
+      }
     }
   }
 
@@ -1808,7 +1836,7 @@ export function buildAdsReport(opts: AdsReportOpts): AdsReport {
       const a = aggs.get(resolve(credit.host, credit.path).key);
       if (!a) continue;
       const variant = lead.variant ?? "version unknown";
-      const v = a.versions.get(variant) ?? { paid_visits: 0, unique_leads: 0, submissions: 0 };
+      const v = a.versions.get(variant) ?? emptyVersionAgg();
       v.submissions += 1;
       if (!credit.is_repeat) v.unique_leads += 1;
       a.versions.set(variant, v);

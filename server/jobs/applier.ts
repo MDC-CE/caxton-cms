@@ -17,7 +17,9 @@ import {
 import { markFileAsModified } from "../sync-state";
 import { runInSaveBatch } from "../events/save-batch-context";
 import { invalidateSeoIndexCache } from "../seo-index";
+import { applyEvidenceArchiveDone } from "../evidence-archive/apply";
 import { enqueueJob } from "./queue";
+import { wakeEventDispatcher } from "../events/dispatcher";
 import { child } from "../logger";
 import {
   queueLinkIndexSet,
@@ -43,6 +45,8 @@ const refreshEnqueuePending = new Set<string>();
 const lastAppliedBindingDoneId = new Map<string, number>();
 /** Max cluster_hub_path_rewrite_done id already applied for markFileAsModified. */
 const lastAppliedClusterHubRewriteDoneId = new Map<string, number>();
+/** Max evidence_archive_done id already written to evidence rows (re-applying after a restart is a no-op). */
+const lastAppliedEvidenceArchiveId = new Map<string, number>();
 
 function recordLastApplied(site: string, generation: number): void {
   const prev = lastAppliedSnapshot.get(site);
@@ -86,6 +90,35 @@ export function getLastAppliedSnapshot(site: string): { generation: number; appl
   return lastAppliedSnapshot.get(site) ?? null;
 }
 
+/** Generation 0 is a real snapshot (boot, before any write event). Missing or NaN is not. */
+export function snapshotGeneration(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/** A snapshot applies when none has been applied yet, or this generation is newer. */
+export function isNewerSnapshot(generation: number, lastApplied: number | null): boolean {
+  return lastApplied == null || generation > lastApplied;
+}
+
+export type SnapshotDecision = "apply" | "already-applied" | "stale";
+
+/**
+ * A restart drops the in-memory index. The persisted generation can be ahead of a
+ * new snapshot (dev wipes the event log back to 0). That snapshot still has to load
+ * while the slow phase is empty. Once the slow phase is in memory, an older
+ * generation is discarded. A snapshot behind the latest write is always stale.
+ */
+export function decideSnapshot(opts: {
+  generation: number;
+  lastApplied: number | null;
+  slowPhaseReady: boolean;
+  latestWriteGen: number;
+}): SnapshotDecision {
+  if (opts.latestWriteGen > opts.generation) return "stale";
+  if (!opts.slowPhaseReady || isNewerSnapshot(opts.generation, opts.lastApplied)) return "apply";
+  return "already-applied";
+}
+
 function deleteSnapshotFile(snapshotPath: string): void {
   try {
     fs.unlinkSync(snapshotPath);
@@ -117,6 +150,7 @@ export function startJobApplier(): void {
     }
   }
   const tick = () => {
+    wakeEventDispatcher();
     for (const ctx of Array.from(getSiteContextMap().values())) {
       void processPendingAdsResults(ctx.contentRootName).catch((err) =>
         log.warn({ err, site: ctx.contentRootName }, "[Applier] Ads results save failed"),
@@ -129,6 +163,7 @@ export function startJobApplier(): void {
           ctx.contentIndex,
           ctx.validationCache,
           ctx.contentRoot,
+          ctx.database,
         );
       } catch (err) {
         log.error({ err, site: ctx.contentRootName }, "[Applier] tick failed");
@@ -145,16 +180,17 @@ async function applyPendingSnapshots(
   ci: import("../content-index").ContentIndex,
   cache: import("../services/validationCacheService").ValidationCacheService,
   contentRoot: string,
+  dbm?: { clearCache(name: string): void },
 ): Promise<void> {
   const latestWriteGen = getLatestWriteGeneration(site);
-  const lastApplied = getLastAppliedSnapshot(site)?.generation ?? 0;
+  const lastApplied = getLastAppliedSnapshot(site)?.generation ?? null;
 
   const events = listEvents({ site, type: "index_snapshot_ready", limit: 30 });
   const candidates: Array<{ generation: number; snapshotPath: string }> = [];
   for (const event of events) {
     const snapshotPath = event.payload.snapshotPath as string | undefined;
-    const generation = event.payload.generation as number | undefined;
-    if (!snapshotPath || !generation || !fs.existsSync(snapshotPath)) continue;
+    const generation = snapshotGeneration(event.payload.generation);
+    if (!snapshotPath || generation == null || !fs.existsSync(snapshotPath)) continue;
     candidates.push({ generation, snapshotPath });
   }
 
@@ -162,11 +198,17 @@ async function applyPendingSnapshots(
 
   let appliedGeneration = lastApplied;
   for (const { generation, snapshotPath } of candidates) {
-    if (generation <= appliedGeneration) {
+    const decision = decideSnapshot({
+      generation,
+      lastApplied: appliedGeneration,
+      slowPhaseReady: ci.isSlowPhaseReady(),
+      latestWriteGen,
+    });
+    if (decision === "already-applied") {
       deleteSnapshotFile(snapshotPath);
       continue;
     }
-    if (latestWriteGen > generation) {
+    if (decision === "stale") {
       log.debug({ site, generation, latestWriteGen }, "[Applier] dropping stale snapshot");
       deleteSnapshotFile(snapshotPath);
       continue;
@@ -218,10 +260,10 @@ async function applyPendingSnapshots(
 
   const seoEvents = listEvents({ site, type: "seo_index_ready", limit: 10 });
   for (const event of seoEvents) {
-    const generation = event.payload.generation as number | undefined;
-    if (!generation) continue;
-    const lastSeo = getLastAppliedSeoSnapshot(site)?.generation ?? 0;
-    if (generation <= lastSeo) continue;
+    const generation = snapshotGeneration(event.payload.generation);
+    if (generation == null) continue;
+    const lastSeo = getLastAppliedSeoSnapshot(site)?.generation ?? null;
+    if (!isNewerSnapshot(generation, lastSeo)) continue;
     invalidateSeoIndexCache();
     recordLastAppliedSeo(site, generation);
     log.info({ site, generation }, "[Applier] seo index cache invalidated");
@@ -281,6 +323,16 @@ async function applyPendingSnapshots(
           htmlPaths.push(...collectEntryHtmlPaths(ci, boundType, boundSlug, locale));
         }
       }
+      if (htmlPaths.length > 0) {
+        void import("../html-rebuild")
+          .then(({ scheduleSavedHtmlPaths, scheduleContentTypeListingRebuild }) => {
+            scheduleSavedHtmlPaths(site, htmlPaths, contentRoot);
+            for (const contentType of new Set(updatedFiles.map((f) => f.split("/")[0]!).filter(Boolean))) {
+              scheduleContentTypeListingRebuild({ siteId: site, contentRoot, contentType });
+            }
+          })
+          .catch(() => {});
+      }
       flushAfterContentWrites({
         ci,
         contentTypes: updatedFiles.map((f) => f.split("/")[0]!).filter(Boolean),
@@ -289,7 +341,6 @@ async function applyPendingSnapshots(
           return { contentType: t!, slug: s!, locale };
         }),
         siteId: site,
-        htmlPaths,
       });
     }
 
@@ -324,6 +375,22 @@ async function applyPendingSnapshots(
       { site, eventId: event.id, files: updatedPaths.length },
       "[Applier] cluster_hub_path_rewrite_done side-effects applied",
     );
+  }
+
+  const archiveEvents = listEvents({ site, type: "evidence_archive_done", limit: 50 });
+  const pendingArchive = archiveEvents
+    .filter((e) => e.id > (lastAppliedEvidenceArchiveId.get(site) ?? 0))
+    .sort((a, b) => a.id - b.id);
+  for (const event of pendingArchive) {
+    try {
+      const changed = applyEvidenceArchiveDone(contentRoot, event.payload, dbm);
+      if (changed > 0) {
+        log.info({ site, eventId: event.id, rows: changed }, "[Applier] evidence_archive_done written");
+      }
+    } catch (err) {
+      log.warn({ err, site, eventId: event.id }, "[Applier] evidence_archive_done apply failed");
+    }
+    lastAppliedEvidenceArchiveId.set(site, event.id);
   }
 
   void flushLinkIndexPending(contentRoot);

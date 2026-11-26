@@ -180,6 +180,64 @@ export function promoteWarnings(sharedLayout: boolean): McpWarning[] {
   return warnings;
 }
 
+export const ROBOTS_CHANGE_ON_PUBLISH_CODE = "robots_change_on_publish";
+
+/** Facts every robots_change_on_publish response carries (promote and proposal apply). */
+export const ROBOTS_ON_PUBLISH_WARNINGS: McpWarning[] = [
+  {
+    code: "robots_per_language",
+    message:
+      "meta.robots is per language (locale file over _common.yml). Only the listed language(s) are affected; other languages keep their own robots. noindex also removes the URL from the sitemap.",
+  },
+  {
+    code: "robots_only_gated",
+    message:
+      "Only robots is checked. meta.priority / meta.change_frequency publish from the draft without asking. Nothing was published.",
+  },
+];
+
+/** Publishing would change a language's effective robots: the user must choose keep_live or use_draft. */
+export function robotsChangeOnPublishResult(
+  errMsg: string,
+  data: Record<string, unknown>,
+  ctx: {
+    retryTool: "publish_draft" | "promote_variant";
+    contentType: string;
+    slug: string;
+    locale?: string;
+    variantSlug: string;
+    site?: string;
+  },
+): McpTextResult {
+  const details = (data.details as Record<string, unknown> | undefined) ?? {};
+  const base = {
+    contentType: ctx.contentType,
+    slug: ctx.slug,
+    ...(ctx.locale ? { locale: ctx.locale } : {}),
+    variantSlug: ctx.variantSlug,
+    ...(ctx.site ? { site: ctx.site } : {}),
+  };
+  return actionRequired(
+    {
+      success: false,
+      action_required: "confirm_robots_on_publish",
+      code: ROBOTS_CHANGE_ON_PUBLISH_CODE,
+      message: errMsg,
+      details,
+      warnings: ROBOTS_ON_PUBLISH_WARNINGS,
+    },
+    [
+      {
+        tool: ctx.retryTool,
+        priority: "required",
+        reason:
+          "Show the user details.live_robots vs details.draft_robots (or details.locales[]) and ask: keep the live value (keep_live) or publish the draft's (use_draft). Retry with their answer; never pick for them.",
+        args_hint: { ...base, robots_on_publish: "keep_live | use_draft" },
+      },
+    ],
+  );
+}
+
 /**
  * next_actions for draft-first promote rejections (publish_draft / promote_variant).
  * `retryTool` is the tool that failed; confirm flags are only suggested after asking the user.
@@ -231,6 +289,23 @@ export function promoteFailureNextActions(opts: {
         },
       ];
     }
+    case "locale_url_slug_required":
+      return [
+        {
+          tool: "update_fields",
+          priority: "required",
+          reason:
+            "New language of a live page: set its own address on the draft (field_path slug, a word in that language; the folder name stays the page ID), then retry.",
+          args_hint: {
+            contentType: opts.contentType,
+            slug: opts.slug,
+            ...(opts.locale ? { locale: opts.locale } : {}),
+            variant: opts.variantSlug,
+            updates: [{ field_path: "slug", value: "<address-in-this-language>" }],
+            ...(opts.site ? { site: opts.site } : {}),
+          },
+        },
+      ];
     case "proposal_required":
       return [
         {
@@ -259,6 +334,16 @@ export function promoteFailureNextActions(opts: {
           reason:
             "The source locale changed after this translation was made. Update the translation, or retry with confirm_source_changed: true after the user agrees.",
           args_hint: { ...base, confirm_source_changed: true },
+        },
+      ];
+    case "display_values_change":
+      return [
+        {
+          tool: opts.retryTool,
+          priority: "recommended",
+          reason:
+            "The live locale file still holds a legacy copy of a page-level field (details.fields: before → after). Publishing drops it, so this language starts showing the _common.yml value. Tell the user; retry with confirm_display_change: true after they agree, or set the field on the draft first.",
+          args_hint: { ...base, confirm_display_change: true },
         },
       ];
     case "attached_draft_structure":

@@ -9,6 +9,8 @@ export type IndexSnapshot = {
   bySlug: Record<string, ReturnType<ContentIndex["exportSnapshotEntries"]>>;
   byPath: Record<string, SnapshotEntry>;
   byUrl: Record<string, unknown>;
+  /** Page key (`contentType:slug`) → locale → public path. Copied as-is on apply. */
+  alternateByKey?: Record<string, Record<string, string>>;
   localeSlugMap: Record<string, string>;
   imageUsage: Record<string, string[]>;
   variableUsage: Record<string, string[]>;

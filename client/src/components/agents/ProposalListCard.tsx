@@ -16,7 +16,6 @@ import { proposalStatusUi } from "@/lib/proposalStatusUi";
 import {
   formatProposalRelativeUpdatedAt,
   proposalAttributionLines,
-  proposalCategoryLabel,
   proposalEntryProgress,
   shortProposalId,
 } from "@/lib/proposalCardMeta";
@@ -25,6 +24,7 @@ import { BlockersBadge } from "@/components/agents/BlockersBadge";
 import { EscalatedBadge } from "@/components/agents/EscalatedBadge";
 import { ProposalV1Badges } from "@/components/agents/ProposalDraftBadges";
 import {
+  ProposalCategoryBadge,
   ProposalKindBadge,
   ProposalProgressLabel,
   ProposalStatusLabel,
@@ -68,28 +68,35 @@ export type ProposalCardData = {
   stale_flagged_at?: string | null;
   blocked_flagged_at?: string | null;
   reverts_proposal_id?: string | null;
+  applies_after_proposal_id?: string | null;
+  dependent_overdue_flagged_at?: string | null;
   created_at: number;
   updated_at?: number;
   review_context_snapshot?: Record<string, unknown> | null;
 };
 
-/** Category badge + optional tag chips (hide entirely when no tags if only tags requested). */
+/** Category badge (Edits only) + optional tag chips. */
 export function ProposalCategoryTags({
   category,
+  kind,
   tags,
   maxTags,
   testIdPrefix,
+  stopLinkNavigation = false,
 }: {
   category?: string;
+  /** Ideas and Handoffs default to a category they never use, so only Edits show it. */
+  kind?: string;
   tags?: string[];
   /** Cap visible tags; remaining shown as +N. Omit to show all. */
   maxTags?: number;
   testIdPrefix?: string;
+  stopLinkNavigation?: boolean;
 }) {
   const tagList = Array.isArray(tags) ? tags.filter((t) => typeof t === "string" && t.trim()) : [];
   const visible = maxTags != null ? tagList.slice(0, maxTags) : tagList;
   const overflow = maxTags != null ? Math.max(0, tagList.length - maxTags) : 0;
-  const showCategory = Boolean(category);
+  const showCategory = Boolean(category) && kind === "edits";
   if (!showCategory && visible.length === 0) return null;
 
   return (
@@ -98,13 +105,12 @@ export function ProposalCategoryTags({
       data-testid={testIdPrefix ? `${testIdPrefix}-category-tags` : undefined}
     >
       {showCategory ? (
-        <Badge
-          variant="outline"
-          className="font-normal"
-          data-testid={testIdPrefix ? `${testIdPrefix}-category` : undefined}
-        >
-          {proposalCategoryLabel(category!)}
-        </Badge>
+        <ProposalCategoryBadge
+          category={category!}
+          stopLinkNavigation={stopLinkNavigation}
+          testIdSuffix={testIdPrefix ? `-${testIdPrefix}` : ""}
+          badgeTestId={testIdPrefix ? `${testIdPrefix}-category` : undefined}
+        />
       ) : null}
       {visible.map((tag) => (
         <Badge key={tag} variant="outline" className="font-normal font-mono text-[11px]">
@@ -364,7 +370,9 @@ export function ProposalListCard({
                     flaggedAt={p.escalated ? null : p.blocked_flagged_at}
                   />
                 ) : null}
-                {p.attention === "awaiting_rereview" || p.attention === "no_feedback" ? (
+                {p.attention === "awaiting_rereview" ||
+                p.attention === "no_feedback" ||
+                p.attention === "predecessor_applied" ? (
                   <AttentionBadge
                     attention={p.attention}
                     resolvedBlockerCount={p.resolved_blocker_count ?? 0}
@@ -397,9 +405,11 @@ export function ProposalListCard({
           ) : null}
           <ProposalCategoryTags
             category={p.category}
+            kind={p.kind}
             tags={p.tags}
             maxTags={2}
             testIdPrefix={`proposal-${p.id}`}
+            stopLinkNavigation
           />
           <ProposalMetaRow items={meta} />
         </div>

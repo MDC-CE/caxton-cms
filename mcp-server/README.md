@@ -4,7 +4,7 @@ An MCP (Model Context Protocol) server that gives Claude read and write access t
 
 **Vocabulary:** an *entry* is one slug under a content type (`blog`, `program`, `page`, …). The content type key `page` is unrelated to tool names.
 
-**Multi-site:** call `list_sites` first when more than one domain exists, then pass `site` (the user-named domain from `sites.yml`) on every tool. Never assume the first `sites.yml` entry; matching is case-insensitive.
+**Multi-site:** call `list_sites` first when more than one domain exists, then pass `site` (the user-named domain from `sites.yml`) on every tool. Never assume the first `sites.yml` entry; matching is case-insensitive. Loopback writes to the main app send that domain as the `x-mcp-site` header (not `?__site=`, which is a local staff/browser override only).
 
 **Catalog by capability:** in production, `tools/list` on `/mcp` only includes tools the caller’s grants allow (`content_view` for YAML/component/explain reads). `GET /tools` is the full unauthenticated map. After a role change, refresh the MCP server in Cursor — the palette does not update mid-session. `get_current_user` returns `allowed_tools`. Handlers still `checkCap`. Dev does not filter the catalog on plain `/mcp`. **Production plain `/mcp`:** mutating tools may appear but every mutate returns `role_connector_required` with `connector_guide` / swarm setup; OAuth consent warns that `/mcp` is read-only and recommends one role connector per agent. **Non-production:** plain `/mcp` freestyle mutates when MCP write is on. **MCP write off:** `mcp_write_disabled` + `mcp_write_guide` on bootstrap/`get_current_user` (propose-only).
 
@@ -57,10 +57,10 @@ Helpers live in `mcp-server/lib/respond.ts` (`ok` / `fail` / `actionRequired`). 
 | `get_diagnostics_job` | Poll async diagnostics jobs (any slug count); `open_issues_offset` / `open_issues_limit` page the open work queue; `issue_status` filters open/claimed/completed/all |
 | `get_section_bindings` | Binding-group membership |
 | `list_components` / `get_component_schema` / `get_component_variant` / `create_component_section_demo` | Component registry + disposable section demos |
-| `list_databases` / `list_database_items` / `get_database_item` | Private DB discovery + read (all sources; list=summary, get=full; optional `refresh`). Caps: `databases_edit_data` or `databases_manage` |
+| `list_databases` / `list_database_items` / `get_database_item` | Private DB discovery + read (all sources; list=summary, get=full; optional `refresh`, ignored without edit/manage). Caps: `databases_view`, `databases_edit_data`, or `databases_manage` |
 | `add_database_item` / `add_database_items` / `update_database_item` / `update_database_items` / `delete_database_item` | Local YAML item CRUD (FAQ etc.; bulk max 40). Cap: `databases_edit_data` for that slug |
 | `create_or_update_database` | Create bank (empty local items) or deep-patch config (`confirm:true`). Cap: `databases_manage` |
-| `reindex_database` | Vector reindex after item writes or vector_search definition patches (`databases_manage`) |
+| `reindex_database` | Queue an incremental vector sync (Sidequest) after item writes (`databases_manage`); vector_search definition patches auto-queue it |
 | `list_products` / `get_product` / `create_or_update_product` | Product inventory, sidecar read/create/patch (confirm). Audience: `content_edit_structure`. Sellable flags: `product_manage`. Removed hidden unless `include_removed`. |
 | `list_variables` | Site facts catalog (`variables.yml`): catalog by default; `names` → conditions, token, usage, `context` / `context.entry` (page audience, `literal_ok`). Read-only; `content_view`. |
 | `get_product_funnel` / `get_product_funnel_analytics` | Product conversion journey (read-only; `update_product_funnel` retired) |
@@ -68,8 +68,8 @@ Helpers live in `mcp-server/lib/respond.ts` (`ok` / `fail` / `actionRequired`). 
 | `get_paid_traffic` | Paid traffic (`metrics_view`, read-only): summary / campaigns / entries / destinations / diagnostics — Meta spend + GA4 paid visits + site lead ledger |
 | `update_ads_issue` | Ads issues (`metrics_view`, mutating): run checks / re-check / mark fixed (report required, pending until confirmed) / undo — never changes Meta or Google Ads |
 | `get_organic_traffic` | GSC organic clicks/impressions (`metrics_view` or `seo_edit`) |
-| `test_redirect` | Inspect one URL: first-match winner + conflicts (`read_redirects`) |
-| `update_redirect` | Add / delete / move one CMS redirect (`edit_redirects`; call `test_redirect` first) |
+| `test_redirect` | Inspect one URL: first-match winner + conflicts (`read_redirects` or `edit_page_redirects`) |
+| `update_redirect` | Add / delete / move one live CMS redirect (`edit_redirects`; call `test_redirect` first), add / delete one exact old address on a live page of a granted type (`edit_page_redirects`; no takeover, no custom file), or add / delete one of a page's own old addresses on its 0%-traffic draft with `variant` (`seo_edit`; takes effect on publish) |
 
 See `explain_site` topic `local_databases` before FAQ database mutations.
 
@@ -188,7 +188,7 @@ Single-entry field writes. `updates` length 1 = one field; longer arrays patch m
 May mix `meta.*`, safe top-level body fields (`description`, `title`, …), and fields under **one** `sections.N.*` index.
 Rejects two or more distinct section indexes (`action_required: split_section_updates`).
 
-**Routing:** fixed system rule (`shared/field-scope.ts`). Page-level fields (`funnel.*`, `meta.robots|priority|change_frequency`, `published_at`, `detached`, `authors`) → `_common.yml` (every language, warning); everything else, including unknown `meta.*`, → locale. `meta_target` is ignored with a warning.
+**Routing:** fixed system rule (`shared/field-scope.ts`). Page-level fields (`funnel.*`, `published_at`, `detached`, `authors`) → `_common.yml` (every language, warning); everything else, including all `meta.*` (`meta.robots|priority|change_frequency` are per language), → locale. `meta_target` is ignored with a warning.
 
 **Circular trap:** set `meta.description` and body `description` together in one `updates[]` when both are empty on live.
 
@@ -344,11 +344,11 @@ The MCP server starts automatically alongside the main app via the **MCP Server*
 | `MCP_SERVER_SECRET` | _(none)_ | **Required.** Internal loopback credential used by the MCP server to authenticate its own requests to the main app. Server exits with a FATAL error if neither this nor the legacy `MCP_API_KEY` is set. |
 | `MCP_API_KEY` | _(none)_ | **Legacy alias for `MCP_SERVER_SECRET`.** Supported for backward compatibility — a deprecation warning is emitted at startup. Rename to `MCP_SERVER_SECRET` for new deployments. |
 | `MCP_PORT` | `3001` | Port the MCP server listens on. |
-| `SITE_URL` | auto (`REPLIT_DEV_DOMAIN`) | Public base URL used in OAuth metadata. Automatically resolved from `REPLIT_DEV_DOMAIN` in Replit — only set this manually if deploying outside Replit. |
+| `SITE_URL` | `http://localhost:<MCP_PORT>` | Public base URL used in OAuth metadata. Set it in every deployed environment. |
 | `OAUTH_CLIENT_ID` | _(none)_ | Optional static Client ID for the legacy pre-configured OAuth flow. Not needed when using dynamic registration (Claude.ai default). |
 | `OAUTH_CLIENT_SECRET` | _(none)_ | Optional static Client Secret for the legacy pre-configured OAuth flow. |
 
-Set all secrets in the Replit **Secrets** tab (or `.env` locally). See `.env.example` in the repo root for a complete template.
+Set secrets in `.env` locally; production gets them from the GitHub deploy secrets (see [`docs/vps.md`](../docs/vps.md)). See `.env.example` in the repo root for a complete template.
 
 ## Connect via Claude Desktop
 
@@ -376,22 +376,18 @@ Claude.ai uses **dynamic client registration** (RFC 7591) — it registers itsel
 
 ### 1. Set the public URL secret
 
-In the Replit **Secrets** tab, add:
-
-| Secret | Value |
-|---|---|
-| `PUBLIC_URL` | Your deployed URL, e.g. `https://your-project.replit.app` |
+Set `SITE_URL` in the deployed environment to your public origin, e.g. `https://www.example.com`.
 
 This tells the OAuth metadata endpoint what base URL to advertise to Claude.ai.
 
 ### 2. Deploy the project
 
-Anthropic's cloud must be able to reach your server from the internet. Deploy the Replit project so it gets a public URL (e.g. `https://your-project.replit.app`).
+Anthropic's cloud must be able to reach your server from the internet, so it has to be the deployed site (not localhost).
 
 ### 3. Add the connector in Claude.ai
 
-1. Go to **Claude.ai → Settings → Connectors** and click **+**.
-2. Enter the **Connector URL**: `https://your-project.replit.app/mcp`
+1. Go to **Claude.ai → Customize → Connectors** and choose **Add custom connector**.
+2. Enter the **Connector URL**: `https://www.example.com/mcp`
 3. Claude.ai will automatically register itself with the server (no credentials to enter).
 4. Your browser is redirected to the MCP server's consent page.
 5. Click **Allow**.
@@ -403,15 +399,15 @@ The connector is now available in conversations via the **+** button.
 
 ## Connect via claude.com (Breathecode token header — legacy)
 
-1. Deploy the Replit project so it gets a public URL (e.g. `https://your-project.replit.app`).
-2. In Claude → **Settings → Connectors**, click **+** and enter:
+1. Use the deployed site's public URL (e.g. `https://www.example.com`).
+2. In Claude → **Customize → Connectors**, choose **Add custom connector** and enter:
    - **Name**: Content Pages
-   - **URL**: `https://your-project.replit.app/mcp`
+   - **URL**: `https://www.example.com/mcp`
 3. Click **Advanced settings** and add a custom header:
    - `X-Api-Key: YOUR_BREATHECODE_TOKEN`
 4. Click **Add**. The connector is now available in conversations via the **+** button.
 
-> **Note**: Anthropic's cloud connects to your server from the internet, so the Replit project must be deployed (not just running in dev mode).
+> **Note**: Anthropic's cloud connects to your server from the internet, so the site must be deployed (not just running in dev mode).
 
 ## Example workflow for Claude
 

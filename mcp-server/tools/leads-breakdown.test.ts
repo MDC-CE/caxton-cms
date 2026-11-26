@@ -7,8 +7,15 @@ vi.mock("../lib/content.js", () => ({
   resolveSiteContext: () => ({ ok: true, domain: "4geeks.com" }),
   getMcpSiteConfigs: () => sites,
 }));
-vi.mock("../lib/oauth.js", () => ({ getTokenUsername: () => "staff@4geeks.com" }));
-vi.mock("../lib/auth.js", () => ({ denyUnlessMetricsView: async () => null }));
+vi.mock("../lib/oauth.js", () => ({
+  getTokenUsername: () => "staff@4geeks.com",
+  getTokenClientName: () => "Cursor",
+}));
+vi.mock("../lib/auth.js", () => ({
+  denyUnlessMetricsView: async () => null,
+  getActiveRoleId: () => undefined,
+  getActiveMcpToken: () => undefined,
+}));
 
 const {
   registerLeadsBreakdownTools,
@@ -44,10 +51,14 @@ function stats(over: Partial<LeadsStatsResponse> = {}, kpis: Partial<LeadsStatsR
       organic_share: 25,
       no_consent: 0,
       meta_unclear: 2,
+      test_staff: 0,
+      test_email: 0,
       ...kpis,
     },
     tracking_since: START - 10 * DAY,
     product_since: null,
+    funnel_since: START - 10 * DAY,
+    funnel_persona_product_unknown: 0,
     timeline: { bucket: "day", points: [] },
     breakdowns: {
       source_medium: [{ key: "google|cpc", label: "google / cpc", count: 10, pct: 25, filter: { source: "google", medium: "cpc" } }],
@@ -55,6 +66,8 @@ function stats(over: Partial<LeadsStatsResponse> = {}, kpis: Partial<LeadsStatsR
       conversion_paths: [],
       landing_paths: [],
       experiments: [],
+      funnel_products: [],
+      funnel_personas: [],
       time_to_lead: { paid_with_click: 0, median_days: null, buckets: [] },
     },
     ...over,
@@ -80,12 +93,15 @@ describe("leadsQueryParams", () => {
       "4geeks.com",
     );
     expect(p.get("range")).toBe("90d");
-    expect(p.get("include_test")).toBe("1");
+    expect(p.get("show")).toBe("all");
     expect(p.get("source")).toBe("google");
     expect(p.get("medium")).toBe("(none)");
     expect(p.get("channel")).toBe("organic_search");
     expect(p.get("product")).toBe("full-stack");
-    expect(p.get("__site")).toBe("4geeks.com");
+    expect(p.has("__site")).toBe(false);
+    const funnel = leadsQueryParams({ funnel_product: "ai-flex", funnel_persona: "ai-flex:the-developer" });
+    expect(funnel.get("funnel_product")).toBe("ai-flex");
+    expect(funnel.get("funnel_persona")).toBe("ai-flex:the-developer");
     expect(p.has("page")).toBe(false);
   });
 
@@ -115,6 +131,16 @@ describe("dropMostSpecificFilter", () => {
       f = next.filters as Record<string, string>;
     }
     expect(order).toEqual(["variant", "experiment", "conversion_path", "landing_path", "ttl", "source", "medium", "channel"]);
+  });
+
+  it("drops funnel persona, then funnel product, before the catalog product", () => {
+    let f: Record<string, string> = { product: "full-stack", funnel_product: "ai-flex", funnel_persona: "ai-flex:the-developer" };
+    const order: string[] = [];
+    for (let next = dropMostSpecificFilter(f); next; next = dropMostSpecificFilter(f)) {
+      order.push(next.dropped);
+      f = next.filters as Record<string, string>;
+    }
+    expect(order).toEqual(["funnel_persona", "funnel_product", "product"]);
   });
 
   it("returns null with no filters", () => {
@@ -172,6 +198,24 @@ describe("leadsBreakdownWarnings", () => {
     const ws = leadsBreakdownWarnings({ ...base, stats: stats({}, { no_consent: 3 }) });
     expect(ws.find((w) => w.code === "no_consent_leads")!.message).toContain("3 lead");
   });
+
+  it("funnel notes: overlap when products are recorded, partial tracking, unknown persona products", () => {
+    const withProducts = stats({
+      breakdowns: {
+        ...stats().breakdowns,
+        funnel_products: [{ key: "ai-flex", label: "AI Flex", count: 3, pct: 7.5, filter: { funnel_product: "ai-flex" } }],
+      },
+    });
+    expect(codes(leadsBreakdownWarnings({ ...base, stats: withProducts }))).toContain("funnel_counts_overlap");
+    expect(codes(leadsBreakdownWarnings({ ...base, filters: { funnel_persona: ":dev" }, stats: stats() }))).toContain(
+      "funnel_counts_overlap",
+    );
+    expect(codes(leadsBreakdownWarnings({ ...base, stats: stats({ funnel_since: null }) }))).toContain("funnel_tracking_partial");
+    const inside = leadsBreakdownWarnings({ ...base, stats: stats({ funnel_since: START + 2 * DAY }) });
+    expect(inside.find((w) => w.code === "funnel_tracking_partial")!.message).toContain("2026-09-10");
+    const unknown = leadsBreakdownWarnings({ ...base, stats: stats({ funnel_persona_product_unknown: 4 }) });
+    expect(unknown.find((w) => w.code === "persona_product_unknown")!.message).toContain("4 lead");
+  });
 });
 
 describe("shapeLeadsBreakdown", () => {
@@ -220,18 +264,21 @@ function register(): Handler {
 }
 
 const calls: string[] = [];
+const headerSites: Array<string | undefined> = [];
 let statsBody: LeadsStatsResponse = stats();
 let statsStatus = 200;
 
 beforeEach(() => {
   calls.length = 0;
+  headerSites.length = 0;
   statsBody = stats();
   statsStatus = 200;
   sites = [{ domain: "4geeks.com" }, { domain: "florida.4geeks.com" }];
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string) => {
+    vi.fn(async (url: string, init?: { headers?: Record<string, string> }) => {
       calls.push(url);
+      headerSites.push(init?.headers?.["x-mcp-site"]);
       if (url.includes("/api/ads/leads/stats")) {
         return new Response(JSON.stringify(statsStatus === 200 ? statsBody : { error: "Invalid range" }), { status: statsStatus });
       }
@@ -250,7 +297,8 @@ describe("get_leads_breakdown handler", () => {
     const body = JSON.parse(res.content[0]!.text);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toContain("/api/ads/leads/stats?");
-    expect(calls[0]).toContain("__site=4geeks.com");
+    expect(calls[0]).not.toContain("__site=");
+    expect(headerSites[0]).toBe("4geeks.com");
     expect(body.success).toBe(true);
     expect(body.leads).toBeUndefined();
     expect(codes(body.warnings)).toEqual(

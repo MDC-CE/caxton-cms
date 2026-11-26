@@ -4,7 +4,7 @@
  * 
  * IMPORTANT: This module does NOT use git CLI commands.
  * All operations use GitHub's REST API to work in production environments
- * where git CLI may not be available (e.g., Replit deployments).
+ * where git CLI may not be available.
  */
 
 import * as fs from 'fs';
@@ -417,46 +417,68 @@ async function getTreeSha(config: GitHubConfig, commitSha: string): Promise<stri
 /**
  * Create a new tree with updated files
  */
+/** GitHub answers 502 (server-side timeout) for one tree request with ~1000 changed paths. */
+const TREE_BATCH_SIZE = 200;
+
+/**
+ * Create a tree on top of `baseTreeSha`. Large change sets are built in batches,
+ * each batch based on the previous batch's tree, so the result is one tree (one commit).
+ */
 async function createTree(
   config: GitHubConfig,
   baseTreeSha: string,
   files: Array<{ path: string; blobSha: string | null; mode?: string }>
-): Promise<string | null> {
+): Promise<{ sha: string | null; error?: string }> {
   const url = `https://api.github.com/repos/${config.owner}/${config.repo}/git/trees`;
-  
+
   const tree = files.map(file => ({
     path: file.path,
     mode: file.mode || '100644',
     type: 'blob' as const,
     sha: file.blobSha,
   }));
-  
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${config.token}`,
-        'Accept': 'application/vnd.github.v3+json',
-        'Content-Type': 'application/json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-      body: JSON.stringify({
-        base_tree: baseTreeSha,
-        tree,
-      }),
-    });
-    
-    if (!response.ok) {
-      log.error({ status: response.status, body: await response.text() }, 'GitHub API error creating tree');
-      return null;
+
+  let base = baseTreeSha;
+  for (let i = 0; i < tree.length; i += TREE_BATCH_SIZE) {
+    const batch = tree.slice(i, i + TREE_BATCH_SIZE);
+    const where = tree.length > TREE_BATCH_SIZE ? ` (files ${i + 1}-${i + batch.length} of ${tree.length})` : '';
+    let lastError = '';
+    let sha: string | null = null;
+    for (let attempt = 1; attempt <= 2 && !sha; attempt++) {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${config.token}`,
+            'Accept': 'application/vnd.github.v3+json',
+            'Content-Type': 'application/json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+          body: JSON.stringify({ base_tree: base, tree: batch }),
+        });
+
+        if (response.ok) {
+          sha = ((await response.json()) as { sha?: string }).sha ?? null;
+          if (!sha) lastError = 'GitHub tree response did not include a SHA';
+          break;
+        }
+        const body = await response.text().catch(() => '');
+        let detail = body.trim().slice(0, 200);
+        try {
+          detail = JSON.parse(body).message || detail;
+        } catch {}
+        lastError = `GitHub API ${response.status}${detail ? `: ${detail}` : ''}`;
+        log.error({ status: response.status, detail, batchStart: i, batchSize: batch.length }, 'GitHub API error creating tree');
+        if (response.status < 500) break;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+        log.error({ err: error, batchStart: i }, 'Error creating tree');
+      }
     }
-    
-    const data = await response.json();
-    return data.sha;
-  } catch (error) {
-    log.error({ err: error }, 'Error creating tree:');
-    return null;
+    if (!sha) return { sha: null, error: `${lastError}${where}` };
+    base = sha;
   }
+  return { sha: base };
 }
 
 /**
@@ -732,6 +754,60 @@ async function getBranchHeadSha(config: GitHubConfig): Promise<string | null> {
   return (await fetchBranchHead(config)).sha;
 }
 
+const COMPARE_FILES_CAP = 300;
+
+async function githubJson(config: GitHubConfig, url: string): Promise<{ ok: boolean; status: number; data: any }> {
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${config.token}`,
+      Accept: "application/vnd.github.v3+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  return { ok: res.ok, status: res.status, data: res.ok ? await res.json() : null };
+}
+
+/**
+ * Which of `files` the remote changed between `base` and `head`. The compare API lists at most
+ * 300 files, so a capped list falls back to checking each file's latest commit.
+ */
+export async function remoteOverlapSince(
+  config: GitHubConfig,
+  base: string,
+  head: string,
+  files: string[],
+): Promise<{ overlap: string[]; error?: string }> {
+  const api = `https://api.github.com/repos/${config.owner}/${config.repo}`;
+  const compare = await githubJson(config, `${api}/compare/${base}...${head}`);
+  if (!compare.ok) {
+    return { overlap: [], error: `Could not compare ${base.slice(0, 7)}...${head.slice(0, 7)} (GitHub ${compare.status}); not pushing.` };
+  }
+  const listed: string[] = (compare.data?.files || []).map((f: any) => f.filename);
+  if (listed.length < COMPARE_FILES_CAP) {
+    const changed = new Set(listed);
+    return { overlap: files.filter((f) => changed.has(f)) };
+  }
+
+  const overlap: string[] = [];
+  for (const file of files) {
+    const latest = await githubJson(
+      config,
+      `${api}/commits?sha=${encodeURIComponent(head)}&path=${encodeURIComponent(file)}&per_page=1`,
+    );
+    if (!latest.ok) {
+      return { overlap: [], error: `Could not read history for ${file} (GitHub ${latest.status}); not pushing.` };
+    }
+    const lastSha: string | undefined = latest.data?.[0]?.sha;
+    if (!lastSha) continue;
+    const rel = await githubJson(config, `${api}/compare/${base}...${lastSha}`);
+    if (!rel.ok) {
+      return { overlap: [], error: `Could not compare history for ${file} (GitHub ${rel.status}); not pushing.` };
+    }
+    if (rel.data?.status !== "identical" && rel.data?.status !== "behind") overlap.push(file);
+  }
+  return { overlap };
+}
+
 /**
  * Commit all pending changes with a custom message using GitHub API
  * This method uses the Git Data API: create blobs → create tree → create commit → update ref
@@ -745,8 +821,13 @@ export async function commitAndPush(
     contentRoot?: string;
     token?: string;
     commitAuthor?: { name: string; email: string };
+    /**
+     * When the remote is ahead, refuse only if it changed one of the files being pushed.
+     * The commit is built on the current head, so unrelated remote changes are kept.
+     */
+    onlyBlockOnOverlap?: boolean;
   },
-): Promise<{ success: boolean; error?: string; commitHash?: string; errorCode?: string }> {
+): Promise<{ success: boolean; error?: string; commitHash?: string; errorCode?: string; overlap?: string[] }> {
   const syncEnabled = process.env.GITHUB_SYNC_ENABLED === "true";
   
   if (!syncEnabled) {
@@ -774,7 +855,27 @@ export async function commitAndPush(
     }
     
     const lastSyncedCommit = getLastSyncedCommit(options?.contentRoot);
-    if (lastSyncedCommit && lastSyncedCommit !== currentHeadSha && !options?.force) {
+    let behindOnUnrelated = false;
+    if (lastSyncedCommit && lastSyncedCommit !== currentHeadSha && !options?.force && options?.onlyBlockOnOverlap) {
+      const check = await remoteOverlapSince(
+        config,
+        lastSyncedCommit,
+        currentHeadSha,
+        pendingChanges.map((c) => c.file),
+      );
+      if (check.error) {
+        return { success: false, errorCode: "remote_overlap_unknown", error: check.error };
+      }
+      if (check.overlap.length > 0) {
+        return {
+          success: false,
+          errorCode: "remote_overlap",
+          overlap: check.overlap,
+          error: `The remote changed ${check.overlap.length} of the files being pushed since the last sync: ${check.overlap.join(", ")}. Pull those files, re-apply the change, then push again.`,
+        };
+      }
+      behindOnUnrelated = true;
+    } else if (lastSyncedCommit && lastSyncedCommit !== currentHeadSha && !options?.force) {
       // Shared monorepo: HEAD may have moved due to another site's push.
       // Only block if this site's content folder has remote changes in that range.
       const conflictInfo = await getConflictInfo({
@@ -832,9 +933,9 @@ export async function commitAndPush(
       }
     }
     
-    const newTreeSha = await createTree(config, baseTreeSha, treeEntries);
+    const { sha: newTreeSha, error: treeError } = await createTree(config, baseTreeSha, treeEntries);
     if (!newTreeSha) {
-      return { success: false, error: "Failed to create tree" };
+      return { success: false, error: `Failed to create tree: ${treeError ?? "unknown error"}` };
     }
     
     const newCommitSha = await createCommitObject(
@@ -853,7 +954,10 @@ export async function commitAndPush(
       return { success: false, error: "Failed to update branch ref" };
     }
     
-    updateSyncStateAfterCommit(newCommitSha, committedFiles, options?.contentRoot);
+    // Behind on unrelated files: keep the old sync point so those remote changes still get pulled.
+    updateSyncStateAfterCommit(newCommitSha, committedFiles, options?.contentRoot, {
+      keepLastSyncedCommit: behindOnUnrelated,
+    });
 
     // So the GitHub webhook skips auto-pull for this self-push (same as auto-commit).
     const { recordLastCommitSha } = await import("./auto-commit");
@@ -1354,6 +1458,53 @@ export async function syncWithRemote(opts?: {
  * disk snapshot is stale, pull those files. Never advance lastSyncedCommit via
  * rebuildSyncStateFromLocal unless local content actually matches remote.
  */
+/**
+ * Requeue versioning.yml edits that never reached GitHub, under the service account. Files GitHub
+ * changed since the last sync are left alone and listed in the sync log for a person to resolve.
+ */
+export async function requeueStuckVersioningFiles(
+  config: GitHubConfig,
+  opts: { contentRoot?: string; lastSyncedCommit: string; remoteCommit: string },
+): Promise<{ requeued: string[]; skipped: string[] }> {
+  const { loadSyncState, shouldTrackFile, computeFileSha, stuckVersioningFiles } = await import("./sync-state");
+  const { logSync } = await import("./sync-log");
+  const { isAutoCommitEnabled, requeueTrackedLocalDirties } = await import("./auto-commit");
+  const none = { requeued: [] as string[], skipped: [] as string[] };
+  if (!isAutoCommitEnabled()) return none;
+
+  const candidates = stuckVersioningFiles(loadSyncState(opts.contentRoot).files, {
+    shouldTrack: (f) => shouldTrackFile(f, undefined, opts.contentRoot),
+    diskSha: (f) => {
+      const full = path.join(process.cwd(), f);
+      return fs.existsSync(full) ? computeFileSha(fs.readFileSync(full, "utf-8")) : null;
+    },
+  });
+  if (candidates.length === 0) return none;
+
+  let skipped: string[] = [];
+  if (opts.lastSyncedCommit !== opts.remoteCommit) {
+    const check = await remoteOverlapSince(config, opts.lastSyncedCommit, opts.remoteCommit, candidates);
+    if (check.error) {
+      logSync("ERROR", `Not requeueing ${candidates.length} unpushed versioning.yml file(s): ${check.error}`);
+      return { requeued: [], skipped: candidates };
+    }
+    skipped = check.overlap;
+  }
+  const skip = new Set(skipped);
+  const requeued = candidates.filter((f) => !skip.has(f));
+  requeueTrackedLocalDirties(requeued.map((filePath) => ({ filePath, author: "System" })));
+  if (requeued.length) {
+    logSync("RECONCILE", `Requeued ${requeued.length} unpushed versioning.yml file(s) for auto-commit`);
+  }
+  if (skipped.length) {
+    logSync(
+      "RECONCILE",
+      `Left ${skipped.length} unpushed versioning.yml file(s) that GitHub also changed (resolve in Sync): ${skipped.join(", ")}`,
+    );
+  }
+  return { requeued, skipped };
+}
+
 export async function reconcileSyncStateOnStartup(opts?: { repoUrl?: string; contentRoot?: string }): Promise<void> {
   const { withSyncLogContextAsync } = await import("./sync-log");
   return withSyncLogContextAsync(opts?.contentRoot, async () => {
@@ -1381,6 +1532,13 @@ export async function reconcileSyncStateOnStartup(opts?: { repoUrl?: string; con
       return;
     }
 
+    // Before the rebuild below can mark them synced.
+    await requeueStuckVersioningFiles(config, {
+      contentRoot: opts?.contentRoot,
+      lastSyncedCommit,
+      remoteCommit,
+    });
+
     const contentFolder = opts?.contentRoot
       ? (path.isAbsolute(opts.contentRoot) ? path.relative(process.cwd(), opts.contentRoot) : opts.contentRoot)
       : getDefaultContentFolder();
@@ -1403,8 +1561,9 @@ export async function reconcileSyncStateOnStartup(opts?: { repoUrl?: string; con
             siteId: siteCtx.contentRootName,
             syncSlow: true,
             touchedFiles: files,
-            htmlPaths: spread.htmlPaths,
           });
+          const { emitSiteBulkSynced } = await import("./content-events");
+          emitSiteBulkSynced(siteCtx.contentRootName, files);
         } else {
           clearRedirectCache();
         }
@@ -1709,9 +1868,6 @@ function getWebhookBaseUrl(): string | null {
   if (process.env.SITE_URL) {
     return process.env.SITE_URL.replace(/\/$/, '');
   }
-  if (process.env.REPLIT_DEV_DOMAIN) {
-    return `https://${process.env.REPLIT_DEV_DOMAIN}`;
-  }
   return null;
 }
 
@@ -1726,7 +1882,7 @@ export function getWebhookSetupSkipReason(baseUrl?: string | null): string | nul
 
   const resolvedBase = baseUrl ?? getWebhookBaseUrl();
   if (!resolvedBase) {
-    return 'No SITE_URL or REPLIT_DEV_DOMAIN set';
+    return 'No SITE_URL set';
   }
 
   const webhookUrl = `${resolvedBase}/api/github/webhook`;
@@ -3168,7 +3324,6 @@ async function refreshContentAfterBootstrapPull(
         siteId: siteCtx.contentRootName,
         syncSlow: true,
         touchedFiles: files,
-        htmlPaths: spread.htmlPaths,
       });
       log.info(
         `[GitHub] Refreshed ContentIndex + redirect cache for ${siteCtx.contentRootName} after bootstrap pull of ${pulledCount} file(s)`,

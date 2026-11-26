@@ -20,8 +20,16 @@ export { DraftLinkCheckJob, ProposalStaleSweepJob } from "./server/jobs/definiti
 export { MetaAdsSyncJob } from "./server/jobs/definitions/meta-ads-sync";
 export { AdsSyncJob } from "./server/jobs/definitions/ads-sync";
 export { AdsRecheckJob } from "./server/jobs/definitions/ads-recheck";
+export { AdsDailySyncJob } from "./server/jobs/definitions/ads-daily-sync";
 export { HtmlPageRebuildJob } from "./server/jobs/definitions/html-page-rebuild";
 export { HtmlDbReaderRebuildJob } from "./server/jobs/definitions/html-db-reader-rebuild";
 export { HtmlContentTypeListingRebuildJob } from "./server/jobs/definitions/html-content-type-listing-rebuild";
 export { PlaygroundCatalogPollJob } from "./server/jobs/definitions/playground-catalog-poll";
 export { PlaygroundFaqSyncJob } from "./server/jobs/definitions/playground-faq-sync";
+export { HtmlContentTypeRebuildJob } from "./server/jobs/definitions/html-content-type-rebuild";
+export { LocalDatabaseRefreshJob } from "./server/jobs/definitions/local-database-refresh";
+export { VectorIndexSyncJob } from "./server/jobs/definitions/vector-index-sync";
+export { EvidenceArchiveJob } from "./server/jobs/definitions/evidence-archive";
+export { EvidenceArchiveSweepJob } from "./server/jobs/definitions/evidence-archive-sweep";
+export { PublicUrlChangesScanJob } from "./server/jobs/definitions/public-url-changes-scan";
+export { IndexNowSubmitJob } from "./server/jobs/definitions/indexnow-submit";

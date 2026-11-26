@@ -154,6 +154,14 @@ const REGISTRY = [
     description: "Add, change, or remove URL redirects for pages and the site.",
   },
   {
+    name: "edit_page_redirects",
+    label: "Edit page redirects",
+    scoped: true,
+    scopeKind: "content_types" as const,
+    description:
+      "Add or remove old addresses that send visitors to pages of these content types. Cannot touch site-wide redirect rules or take over an address another page uses (that needs Edit redirects).",
+  },
+  {
     name: "overlays_edit_content",
     label: "Edit overlay copy",
     scoped: false,
@@ -193,6 +201,14 @@ const REGISTRY = [
       "Change live ads in connected ad accounts from the staff UI, e.g. add missing tracking parameters. Changed ads go back to Meta review. Does not change budgets, audiences, or account connections.",
   },
   {
+    name: "ab_testing_settings",
+    label: "Manage A/B testing setup",
+    scoped: false,
+    scopeKind: "none" as const,
+    description:
+      "One-time A/B testing setup per site (hidden check page), run A/B checks, and create the Google Analytics variant dimensions. Does not allocate traffic on pages — that needs Allocate traffic to variants for the page's content type.",
+  },
+  {
     name: "consent_settings",
     label: "Manage cookie consent",
     scoped: false,
@@ -213,6 +229,13 @@ const REGISTRY = [
     scoped: false,
     scopeKind: "none" as const,
     description: "Create or patch private database definitions (config) and run vector reindex. Does not authorize editing rows — use Edit database data for that.",
+  },
+  {
+    name: "databases_view",
+    label: "View databases",
+    scoped: false,
+    scopeKind: "none" as const,
+    description: "Browse private databases and their rows. Cannot edit rows or change settings.",
   },
   {
     name: "databases_edit_data",
@@ -338,6 +361,7 @@ export const VIEW_ONLY_CAPABILITIES: ReadonlySet<CapabilityName> = new Set([
   "metrics_view",
   "content_view",
   "read_redirects",
+  "databases_view",
 ]);
 
 /**

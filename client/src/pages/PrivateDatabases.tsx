@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from "react";
-import {AlertTriangle, ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpDown, Check, ChevronDown, ChevronUp, CircleCheck, CircleX, Clock, CloudUpload, Code, Copy, Database, Download, ExternalLink, Eye, File, HeartPulse, HelpCircle, Image, Info, Link as LinkIcon, Loader2, Network, Pencil, Play, Plus, RefreshCw, Save, Search, Server, Settings, SlidersHorizontal, Sparkles, Table, Tags, TestTube, Trash2, Upload, Wand2, Webhook, X} from "lucide-react";
+import { useState, useEffect, useMemo, useRef } from "react";
+import {AlertTriangle, ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpDown, Check, ChevronDown, ChevronUp, CircleCheck, CircleX, Clock, CloudUpload, Code, Copy, Database, Download, ExternalLink, Eye, File, HeartPulse, HelpCircle, Image, Info, Link as LinkIcon, Loader2, Network, Pencil, Play, Plus, RefreshCw, Save, Search, Server, Settings, ShieldCheck, SlidersHorizontal, Sparkles, Table, Tags, TestTube, Trash2, Upload, Wand2, Webhook, X} from "lucide-react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { useRoute, Link, useLocation } from "wouter";
+import { useRoute, Link, useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -46,13 +46,119 @@ import {
   decodeFunctionMapping,
   encodeFunctionMapping,
 } from "@shared/functionEncoding";
+import {
+  DATABASE_ITEMS_SORT_DEFAULT,
+  DATABASE_ITEMS_SORT_PARAMS,
+  nextDatabaseItemsSort,
+  parseDatabaseItemsSortSearch,
+  serializeDatabaseItemsSort,
+  sortDatabaseItemEntries,
+  type DatabaseItemsSort,
+} from "@shared/database-items-sort";
+import type { DatabaseEvidenceConfig, EvidenceRowTrust } from "@shared/evidence-kinds";
+import { EvidenceSourceKpiCard } from "@/components/databases/EvidenceSourceKpiCard";
+import { ArchiveColumnHeader, EvidenceArchiveCell } from "@/components/databases/EvidenceArchiveCell";
+import { EvidenceTrustLabel } from "@/components/databases/EvidenceTrustLabel";
+import { KpiLabelHelp } from "@/components/databases/KpiLabelHelp";
+import type { RowArchiveView } from "@shared/evidence-archive";
 
-/** True when the role may browse banks (manage OR edit-data with * / non-empty list). */
+const RELATIVE_FETCHED_AT_MAX_MS = 2 * 24 * 60 * 60 * 1000;
+
+function shortTimeAgo(ageMs: number): string {
+  const minutes = Math.floor(ageMs / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function FetchedAtLabel({ fetchedAt }: { fetchedAt?: string | number | null }) {
+  if (!fetchedAt) return <span data-testid="text-fetched-at">Never fetched</span>;
+  const date = new Date(fetchedAt);
+  const absolute = date.toLocaleString();
+  const ageMs = Date.now() - date.getTime();
+  const label = ageMs >= 0 && ageMs < RELATIVE_FETCHED_AT_MAX_MS ? shortTimeAgo(ageMs) : absolute;
+  return (
+    <span data-testid="text-fetched-at" title={absolute}>
+      {label}
+    </span>
+  );
+}
+
+function humanMinutes(m: number): string {
+  if (m > 0 && m % 1440 === 0) return `${m / 1440} day${m === 1440 ? "" : "s"}`;
+  if (m > 0 && m % 60 === 0) return `${m / 60} hour${m === 60 ? "" : "s"}`;
+  return `${m} minute${m === 1 ? "" : "s"}`;
+}
+
+/** "1h ago · TTL 1440m" line; click opens what last-fetched time and TTL mean. */
+function CacheFreshnessLine({
+  fetchedAt,
+  ttlMinutes,
+  sourceType,
+}: {
+  fetchedAt?: string | number | null;
+  ttlMinutes: number;
+  sourceType?: string;
+}) {
+  const fetched = fetchedAt ? new Date(fetchedAt) : null;
+  const expiresAt = fetched && ttlMinutes > 0 ? new Date(fetched.getTime() + ttlMinutes * 60_000) : null;
+  const expired = expiresAt ? expiresAt.getTime() <= Date.now() : ttlMinutes === 0;
+  const isLocal = sourceType === "local";
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors text-left"
+          data-testid="button-cache-freshness"
+        >
+          <Clock className="h-3 w-3 shrink-0" />
+          <FetchedAtLabel fetchedAt={fetchedAt} />
+          <span>· TTL {ttlMinutes}m</span>
+          <Info className="h-3 w-3 shrink-0" aria-hidden />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-80 space-y-2 text-xs leading-relaxed text-muted-foreground" data-testid="popover-cache-freshness">
+        <p className="font-medium text-sm text-foreground">How fresh is this data?</p>
+        {fetched ? (
+          <p>
+            The time (<span className="text-foreground">{fetched.toLocaleString()}</span>) is when the app last read this
+            database {isLocal ? "from its file" : "from its source"} and saved a copy to serve pages quickly.
+          </p>
+        ) : (
+          <p>The app has not read this database yet. It will the first time a page or this screen needs it.</p>
+        )}
+        <p>
+          <span className="text-foreground">TTL {ttlMinutes}m</span> ({humanMinutes(ttlMinutes)}) is how long that copy is
+          reused. After it expires, the next page or screen that needs this data reads the source again.
+          {ttlMinutes === 0 ? " With 0, it reads the source every time." : ""}
+        </p>
+        {expiresAt ? (
+          <p>
+            {expired
+              ? "This copy has expired, so it refreshes the next time it is used."
+              : `This copy expires ${expiresAt.toLocaleString()}.`}
+          </p>
+        ) : null}
+        <p>
+          {isLocal
+            ? "Edits saved here or by agents refresh the copy right away; the TTL never delays them."
+            : "Changes made at the source show up after the TTL expires, or right away when someone refreshes this database."}{" "}
+          You can change the TTL in this database&apos;s settings (Cache TTL).
+        </p>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** True when the role may browse banks (manage, view, OR edit-data with * / non-empty list). */
 function hasDatabasesBrowseAccess(
   hasCapability: (cap: string, scope?: string) => boolean,
   capabilities: CapabilityGrant[],
 ): boolean {
-  if (hasCapability("databases_manage")) return true;
+  if (hasCapability("databases_manage") || hasCapability("databases_view")) return true;
   const grant = capabilities.find((g) => g.name === "databases_edit_data");
   if (!grant) return false;
   if (grant.databases === "*") return true;
@@ -115,7 +221,12 @@ interface DatabaseDetail {
     filter_by_locale?: boolean;
     editor?: Record<string, { type?: string; options?: (string | { value: string; label: string })[]; populate_options?: boolean; allow_custom_values?: boolean; split_comma_values?: boolean; cache_images?: boolean; description?: string }>;
     vector_search?: { enabled: boolean; fields: string[] };
+    evidence?: DatabaseEvidenceConfig;
   };
+  /** True when the server stripped source connection settings (no Manage databases). */
+  connection_hidden?: boolean;
+  /** Sites whose fallback_content_folder is this site (they also use its evidence rows). */
+  evidence_fallback_sites?: string[];
   cache_status?: {
     fetched_at: string;
     item_count: number;
@@ -230,6 +341,8 @@ interface DatasetFile {
 
 interface DatabaseItems {
   items: Record<string, unknown>[];
+  /** Stored position of each row in `items` (what PATCH/DELETE `/items/:index` expect). */
+  indices?: number[];
   total_count: number;
   page: number;
   limit: number;
@@ -237,6 +350,10 @@ interface DatabaseItems {
   fetched_at?: string;
   from_cache?: boolean;
   facets?: Record<string, string[]>;
+  /** Evidence databases only: who last changed each returned row's link or claim. */
+  evidence_trust?: EvidenceRowTrust[];
+  /** Evidence databases only: Internet Archive copy of each returned row's link. */
+  evidence_archive?: RowArchiveView[];
 }
 
 interface KeyValuePair {
@@ -1346,12 +1463,12 @@ function DatabaseList() {
           data-testid="banner-databases-access"
         >
           You can browse private databases here.
-          {!canManageDatabases && " Creating or changing settings needs Manage databases."}
           {editScopeLabel
             ? ` You can edit rows in: ${editScopeLabel}.`
             : !hasCapability("databases_edit_data")
-              ? " Row edits need Edit database data for the bank you want to change."
+              ? " Row edits need Edit database data."
               : null}
+          {!canManageDatabases && " Creating or changing settings needs Manage databases."}
         </div>
       )}
 
@@ -3357,7 +3474,17 @@ function CachedImagesKpiCard({ dbName }: { dbName: string }) {
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <Image className="h-3.5 w-3.5" />
-              <span>Cached Images</span>
+              <KpiLabelHelp label="Cached Images" testId="cached-images">
+                <p>
+                  Images in this database&apos;s image fields are downloaded into the media gallery, so pages load them
+                  from us instead of the original site. The number is how many are saved.
+                </p>
+                <p>
+                  &quot;Failed&quot; images could not be downloaded (for example the link is broken); pages keep using
+                  the original link. Click it to see them and retry. The refresh button only recounts; it does not
+                  download anything.
+                </p>
+              </KpiLabelHelp>
             </div>
             <Button
               size="icon"
@@ -3517,7 +3644,16 @@ function ErrorsKpiCard({
         <CardContent className="pt-4 pb-3 space-y-1">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <AlertTriangle className="h-3.5 w-3.5" />
-            <span>Errors</span>
+            <KpiLabelHelp label="Errors" testId="errors">
+              <p>
+                Problems found in this database&apos;s rows by the last diagnostics run, such as a missing required
+                field or a value in the wrong format.
+              </p>
+              <p>
+                The count is from that saved run, so it can be out of date after edits. Click the card to see the list
+                and run Check Health for a fresh check.
+              </p>
+            </KpiLabelHelp>
           </div>
           <p
             className={`text-sm font-medium ${errorCount > 0 ? "text-destructive" : ""}`}
@@ -3851,7 +3987,7 @@ function SemanticIndexKpiCard({ dbName, jobStatus, onForceRefresh, onReindex }: 
   dbName: string;
   jobStatus?: {
     fetch: { status: string };
-    index: { status: string; fetched?: number; total?: number | null; finishedAt?: string; error?: string };
+    index: { status: string; fetched?: number; total?: number | null; finishedAt?: string; error?: string; embedded?: number; unchanged?: number };
     search_cache?: { memoryEntries?: number; lastWrittenAt?: string | null };
   } | null;
   onForceRefresh?: () => void;
@@ -3861,7 +3997,8 @@ function SemanticIndexKpiCard({ dbName, jobStatus, onForceRefresh, onReindex }: 
   const isRunning = index?.status === "running";
   const isError = index?.status === "error";
   const isDone = index?.status === "done";
-  const neverRun = !isRunning && !isError && !isDone;
+  const isWaiting = index?.status === "queued" || index?.status === "waiting_worker";
+  const neverRun = !isRunning && !isError && !isDone && !isWaiting;
   const memoryEntries = jobStatus?.search_cache?.memoryEntries ?? 0;
   const [gcsEntries, setGcsEntries] = useState<number | null>(null);
   const [gcsLoading, setGcsLoading] = useState(false);
@@ -3938,9 +4075,16 @@ function SemanticIndexKpiCard({ dbName, jobStatus, onForceRefresh, onReindex }: 
               </Button>
             )}
           </div>
+        ) : isWaiting ? (
+          <p className="text-xs text-muted-foreground" data-testid="text-semantic-index-waiting">
+            {index?.status === "waiting_worker"
+              ? "Waiting for the background worker. Search keeps using the current index (or keyword matching if there is none yet)."
+              : "Update queued."}
+          </p>
         ) : isDone ? (
-          <p className="text-xs text-muted-foreground">
-            {index?.finishedAt ? new Date(index.finishedAt).toLocaleString() : "Done"}
+          <p className="text-xs text-muted-foreground" data-testid="text-semantic-index-done">
+            Up to date. {(index?.embedded ?? 0).toLocaleString()} updated, {(index?.unchanged ?? 0).toLocaleString()} unchanged
+            {index?.finishedAt ? ` · ${new Date(index.finishedAt).toLocaleString()}` : ""}
           </p>
         ) : neverRun ? (
           onForceRefresh ? (
@@ -3968,8 +4112,25 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
   const editScopeLabel = databasesEditDataScopeLabel(capabilities);
   const PAGE_SIZE = 100;
   const [search, setSearch] = useState("");
-  const [sortKey, setSortKey] = useState<string | null>(null);
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [pathname, setLocation] = useLocation();
+  const searchString = useSearch();
+  const { key: sortKey, dir: sortDir } = useMemo(
+    () => parseDatabaseItemsSortSearch(searchString),
+    [searchString],
+  );
+  const setSort = (next: DatabaseItemsSort) => {
+    const qs = serializeDatabaseItemsSort(next, searchString);
+    const pathOnly = pathname.split("?")[0];
+    setLocation(qs ? `${pathOnly}?${qs}` : pathOnly, { replace: true });
+  };
+  // `score` only exists on semantic search results, which are sorted in the browser.
+  const serverSortKey = sortKey && sortKey !== "score" ? sortKey : null;
+  const serverSortParams = serverSortKey
+    ? [
+        `${DATABASE_ITEMS_SORT_PARAMS.sort}=${encodeURIComponent(serverSortKey)}`,
+        `${DATABASE_ITEMS_SORT_PARAMS.dir}=${sortDir}`,
+      ]
+    : [];
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isReindexing, setIsReindexing] = useState(false);
   const [activePanel, setActivePanel] = useState<"settings" | "mappings" | "usage" | null>(null);
@@ -4068,9 +4229,9 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
     isFetching: itemsFetching,
     refetch: refetchItems,
   } = useQuery<DatabaseItems>({
-    queryKey: [`/api/databases/${dbName}/items`, page, PAGE_SIZE, tagFilters],
+    queryKey: [`/api/databases/${dbName}/items`, page, PAGE_SIZE, tagFilters, serverSortKey, sortDir],
     queryFn: () => {
-      const parts: string[] = [`page=${page}`, `limit=${PAGE_SIZE}`];
+      const parts: string[] = [`page=${page}`, `limit=${PAGE_SIZE}`, ...serverSortParams];
       for (const [field, values] of Object.entries(tagFilters)) {
         for (const v of values) parts.push(`filter[${field}]=${encodeURIComponent(v)}`);
       }
@@ -4087,9 +4248,11 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
     isLoading: rawItemsLoading,
     refetch: refetchRawItems,
   } = useQuery<DatabaseItems>({
-    queryKey: [`/api/databases/${dbName}/raw-items`, page, PAGE_SIZE],
+    queryKey: [`/api/databases/${dbName}/raw-items`, page, PAGE_SIZE, serverSortKey, sortDir],
     queryFn: () =>
-      apiFetch(`/api/databases/${dbName}/raw-items?page=${page}&limit=${PAGE_SIZE}`).then(async (r) => {
+      apiFetch(
+        `/api/databases/${dbName}/raw-items?${[`page=${page}`, `limit=${PAGE_SIZE}`, ...serverSortParams].join("&")}`,
+      ).then(async (r) => {
         if (!r.ok) throw new Error(`raw-items ${r.status}`);
         return r.json();
       }),
@@ -4110,7 +4273,7 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
 
   const { data: jobStatus } = useQuery<{
     fetch: { status: string; fetched?: number; total?: number | null; page?: number; startedAt?: string; finishedAt?: string; error?: string };
-    index: { status: string; fetched?: number; total?: number | null; startedAt?: string; finishedAt?: string; error?: string };
+    index: { status: string; fetched?: number; total?: number | null; startedAt?: string; finishedAt?: string; error?: string; embedded?: number; unchanged?: number; deleted?: number };
   }>({
     queryKey: [`/api/databases/${dbName}/job-status`],
     queryFn: () => apiFetch(`/api/databases/${dbName}/job-status`).then(async (r) => {
@@ -4124,7 +4287,10 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
     refetchInterval: (query) => {
       const data = query.state.data;
       if (!data) return 2000;
-      const eitherRunning = data.fetch?.status === "running" || data.index?.status === "running";
+      // Index waits on the Sidequest worker: poll slowly until it starts.
+      if (data.index?.status === "waiting_worker") return 10000;
+      const eitherRunning =
+        data.fetch?.status === "running" || data.index?.status === "running" || data.index?.status === "queued";
       if (eitherRunning) {
         lastActivityAtRef.current = Date.now();
       }
@@ -4158,8 +4324,10 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
 
   const fetchRunning = jobStatus?.fetch?.status === "running";
   const indexRunning = jobStatus?.index?.status === "running";
+  const indexWaiting =
+    hasSemanticSearch && (jobStatus?.index?.status === "queued" || jobStatus?.index?.status === "waiting_worker");
   const showJobBanner = !jobStatusDismissed && jobStatus && (
-    fetchRunning || indexRunning ||
+    fetchRunning || indexRunning || indexWaiting ||
     jobStatus.fetch?.status === "error" || jobStatus.index?.status === "error" ||
     (bothTerminalAt !== null)
   );
@@ -4236,6 +4404,17 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
           })
         );
       }
+      if (sortKey === "score") {
+        const sign = sortDir === "asc" ? 1 : -1;
+        const scoreOf = (item: Record<string, unknown>) =>
+          typeof item.score === "number" ? item.score : Number.NEGATIVE_INFINITY;
+        items = [...items].sort((a, b) => sign * (scoreOf(a) - scoreOf(b)));
+      } else if (sortKey) {
+        items = sortDatabaseItemEntries(
+          items.map((item, index) => ({ item, index })),
+          { key: sortKey, dir: sortDir },
+        ).map((e) => e.item);
+      }
     } else if (!activeItems?.items) {
       return [];
     } else {
@@ -4250,35 +4429,59 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
       }
     }
 
-    if (sortKey) {
-      items = [...items].sort((a, b) => {
-        if (sortKey === "score") {
-          const av = typeof a.score === "number" ? a.score : Number.NEGATIVE_INFINITY;
-          const bv = typeof b.score === "number" ? b.score : Number.NEGATIVE_INFINITY;
-          return sortDir === "asc" ? av - bv : bv - av;
-        }
-        const av = a[sortKey] ?? "";
-        const bv = b[sortKey] ?? "";
-        const cmp = String(av).localeCompare(String(bv), undefined, { numeric: true });
-        return sortDir === "asc" ? cmp : -cmp;
-      });
-    }
-
     return items;
   })();
 
   const handleSort = (key: string) => {
-    if (sortKey === key) {
-      setSortDir(sortDir === "asc" ? "desc" : "asc");
-    } else {
-      setSortKey(key);
-      setSortDir("asc");
-    }
+    setSort(nextDatabaseItemsSort({ key: sortKey, dir: sortDir }, key));
+    setPage(1);
+  };
+
+  /** Stored position of a rendered row, for PATCH/DELETE `/items/:index`. */
+  const storedIndexOf = (item: Record<string, unknown>, rowIdx: number): number => {
+    const source = !editMode && dataView === "raw" ? rawItemsData : itemsData;
+    const pageItems = source?.items ?? [];
+    const pageIdx = pageItems.indexOf(item);
+    const localIdx = pageIdx >= 0 ? pageIdx : rowIdx;
+    return source?.indices?.[localIdx] ?? (page - 1) * PAGE_SIZE + localIdx;
   };
 
   useEffect(() => {
     setPage(1);
   }, [dataView, search]);
+
+  const showEvidenceTrust = Boolean(config?.evidence?.enabled && itemsData?.evidence_trust && (editMode || dataView !== "raw"));
+  const trustOf = (item: Record<string, unknown>): EvidenceRowTrust | null => {
+    if (!showEvidenceTrust) return null;
+    const idx = (itemsData?.items ?? []).indexOf(item);
+    return idx >= 0 ? itemsData?.evidence_trust?.[idx] ?? null : null;
+  };
+  const archiveOf = (item: Record<string, unknown>): RowArchiveView | null => {
+    if (!showEvidenceTrust) return null;
+    const idx = (itemsData?.items ?? []).indexOf(item);
+    return idx >= 0 ? itemsData?.evidence_archive?.[idx] ?? null : null;
+  };
+  const [verifyingIndex, setVerifyingIndex] = useState<number | null>(null);
+  const verifyEvidenceRow = async (storedIndex: number) => {
+    setVerifyingIndex(storedIndex);
+    try {
+      const res = await apiFetch(`/api/databases/${dbName}/items/${storedIndex}/verify`, { method: "POST" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error((err as { error?: string }).error || "Failed to verify");
+      }
+      await refetchItems();
+      toast({ title: "Row verified", description: "Proposals can now use this row as proof." });
+    } catch (err) {
+      toast({
+        title: "Error verifying",
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
+    } finally {
+      setVerifyingIndex(null);
+    }
+  };
 
   const runForceRefresh = async () => {
     if (!canManageDatabases) {
@@ -4685,7 +4888,7 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
               : false;
             const optionalCount = (hasCachedFields ? 1 : 0) + (hasSemanticSearch ? 1 : 0);
             const lgCols =
-              optionalCount === 2 ? "lg:grid-cols-6" : optionalCount === 1 ? "lg:grid-cols-5" : "lg:grid-cols-4";
+              optionalCount === 2 ? "lg:grid-cols-5" : optionalCount === 1 ? "lg:grid-cols-4" : "lg:grid-cols-3";
             return (
           <div className={`grid gap-4 sm:grid-cols-2 ${lgCols}`}>
             <Card>
@@ -4695,27 +4898,32 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                     <Webhook className="h-3.5 w-3.5" />
                     <span>Source</span>
                   </div>
-                  {config?.source.api?.params && Object.keys(config.source.api.params).length > 0 && (
-                    <Popover>
-                      <PopoverTrigger asChild>
-                        <Button size="icon" variant="ghost" className="h-6 w-6" title="View query params" data-testid="button-view-source-params">
-                          <SlidersHorizontal className="h-3.5 w-3.5" />
-                        </Button>
-                      </PopoverTrigger>
-                      <PopoverContent side="bottom" align="end" className="w-72 p-3 space-y-2">
-                        <p className="text-xs font-medium">Query Parameters</p>
-                        <div className="space-y-1">
-                          {Object.entries(config.source.api.params).map(([k, v]) => (
-                            <div key={k} className="flex items-start gap-2 text-xs">
-                              <code className="bg-muted px-1.5 py-0.5 rounded font-mono text-foreground shrink-0">{k}</code>
-                              <span className="text-muted-foreground mt-0.5">=</span>
-                              <code className="text-muted-foreground font-mono break-all">{String(v)}</code>
-                            </div>
-                          ))}
-                        </div>
-                      </PopoverContent>
-                    </Popover>
-                  )}
+                  <div className="flex items-center gap-0.5">
+                    {config?.source.type === "api" && (
+                      <WebhookUrlPopover type={dbName} variant="icon" />
+                    )}
+                    {config?.source.api?.params && Object.keys(config.source.api.params).length > 0 && (
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <Button size="icon" variant="ghost" className="h-6 w-6" title="View query params" data-testid="button-view-source-params">
+                            <SlidersHorizontal className="h-3.5 w-3.5" />
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent side="bottom" align="end" className="w-72 p-3 space-y-2">
+                          <p className="text-xs font-medium">Query Parameters</p>
+                          <div className="space-y-1">
+                            {Object.entries(config.source.api.params).map(([k, v]) => (
+                              <div key={k} className="flex items-start gap-2 text-xs">
+                                <code className="bg-muted px-1.5 py-0.5 rounded font-mono text-foreground shrink-0">{k}</code>
+                                <span className="text-muted-foreground mt-0.5">=</span>
+                                <code className="text-muted-foreground font-mono break-all">{String(v)}</code>
+                              </div>
+                            ))}
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                    )}
+                  </div>
                 </div>
                 <p className="text-sm font-medium">{config?.source.type || "\u2014"}</p>
                 {config?.source.api?.endpoint && (
@@ -4745,50 +4953,66 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                     </Button>
                   </div>
                 )}
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="pt-4 pb-3 space-y-1">
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Table className="h-3.5 w-3.5" />
-                  <span>Items</span>
-                </div>
-                <p className="text-sm font-medium" data-testid="text-item-count">
-                  {itemsData ? itemsData.raw_count ?? itemsData.total_count : detail?.cache_status ? detail.cache_status.item_count : itemsLoading || itemsFetching ? "..." : "\u2014"}
-                </p>
-                {(itemsData?.from_cache || (!itemsData && detail?.cache_status)) && (
-                  <p className="text-xs text-muted-foreground">from cache</p>
-                )}
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="pt-4 pb-3 space-y-1">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Clock className="h-3.5 w-3.5" />
-                    <span>Last Fetched</span>
-                  </div>
-                  {config?.source.type === "api" && (
-                    <WebhookUrlPopover type={dbName} variant="icon" />
+                {detail?.connection_hidden &&
+                  (config?.source.type === "api" || config?.source.type === "remote") && (
+                    <p className="text-xs text-muted-foreground" data-testid="text-source-connection-hidden">
+                      Connection details are visible to people who can manage databases.
+                    </p>
+                  )}
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Table className="h-3 w-3" />
+                  <span data-testid="text-item-count">
+                    {itemsData ? itemsData.raw_count ?? itemsData.total_count : detail?.cache_status ? detail.cache_status.item_count : itemsLoading || itemsFetching ? "..." : "\u2014"}
+                  </span>
+                  <span>items</span>
+                  {(itemsData?.from_cache || (!itemsData && detail?.cache_status)) && (
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-1 hover:text-foreground transition-colors"
+                          data-testid="button-from-cache"
+                        >
+                          · from cache
+                          <Info className="h-3 w-3 shrink-0" aria-hidden />
+                        </button>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        align="start"
+                        className="w-72 space-y-2 text-xs leading-relaxed text-muted-foreground"
+                        data-testid="popover-from-cache"
+                      >
+                        <p className="font-medium text-sm text-foreground">From cache</p>
+                        <p>
+                          These rows come from the app&apos;s saved copy of this database, not from reading
+                          {config?.source?.type === "local" ? " its file" : " its source"} just now. That is normal and
+                          keeps pages fast.
+                        </p>
+                        <p>
+                          The copy is replaced when its TTL expires (see the line below), when a row is edited here or
+                          by an agent, or when someone refreshes this database.
+                        </p>
+                      </PopoverContent>
+                    </Popover>
                   )}
                 </div>
                 {fetchRunning ? (
-                  <div className="flex items-center gap-1.5" data-testid="text-fetched-at">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground shrink-0" />
-                    <span className="text-sm font-medium">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="text-fetched-at">
+                    <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                    <span>
                       Fetching{jobStatus?.fetch?.fetched !== undefined ? `\u2026 ${jobStatus.fetch.fetched} items` : "\u2026"}
                       {jobStatus?.fetch?.page ? ` (page ${jobStatus.fetch.page})` : ""}
                     </span>
                   </div>
                 ) : jobStatus?.fetch?.status === "error" ? (
-                  <div className="space-y-1">
-                    <p className="text-xs text-destructive truncate" title={jobStatus.fetch?.error} data-testid="text-fetched-at">
-                      Error: {jobStatus.fetch?.error ?? "unknown"}
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <p className="text-xs text-destructive truncate min-w-0 flex-1" title={jobStatus.fetch?.error} data-testid="text-fetched-at">
+                      Fetch error: {jobStatus.fetch?.error ?? "unknown"}
                     </p>
                     <Button
                       size="sm"
                       variant="outline"
-                      className="h-6 text-xs px-2"
+                      className="h-6 text-xs px-2 shrink-0"
                       onClick={handleRetryFetch}
                       disabled={isRefreshing}
                       data-testid="button-retry-fetch"
@@ -4798,19 +5022,27 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                     </Button>
                   </div>
                 ) : (
-                  <p className="text-sm font-medium" data-testid="text-fetched-at">
-                    {itemsData?.fetched_at
-                      ? new Date(itemsData.fetched_at).toLocaleString()
-                      : detail?.cache_status?.fetched_at
-                        ? new Date(detail.cache_status.fetched_at).toLocaleString()
-                        : "\u2014"}
-                  </p>
+                  <CacheFreshnessLine
+                    fetchedAt={itemsData?.fetched_at ?? detail?.cache_status?.fetched_at}
+                    ttlMinutes={resolveCacheTtlMinutes(config?.cache)}
+                    sourceType={config?.source?.type}
+                  />
                 )}
-                <p className="text-xs text-muted-foreground">
-                  TTL: {resolveCacheTtlMinutes(config?.cache)}m
-                </p>
               </CardContent>
             </Card>
+            {config ? (
+              <EvidenceSourceKpiCard
+                dbName={dbName}
+                config={config as unknown as Record<string, unknown> & { evidence?: DatabaseEvidenceConfig }}
+                fields={
+                  config.field_mapping && Object.keys(config.field_mapping).length
+                    ? Object.keys(config.field_mapping)
+                    : Object.keys((itemsData?.items?.[0] as Record<string, unknown> | undefined) ?? {})
+                }
+                fallbackSites={detail?.evidence_fallback_sites ?? []}
+                canManage={canManageDatabases}
+              />
+            ) : null}
             <ErrorsKpiCard
               errorCount={detail?.error_count ?? 0}
               errorSummary={detail?.error_summary}
@@ -4955,6 +5187,34 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                           </PopoverContent>
                         </Popover>
                       )}
+                      {config?.evidence?.enabled &&
+                        (config.evidence.proof_field === key || config.evidence.match_fields?.includes(key)) && (
+                        <Popover>
+                          <PopoverTrigger asChild>
+                            <span className="inline-flex items-center text-orange-500 shrink-0 cursor-pointer hover:opacity-80 transition-opacity" data-testid={`badge-evidence-${key}`}>
+                              <ShieldCheck className="h-3 w-3" />
+                            </span>
+                          </PopoverTrigger>
+                          <PopoverContent side="top" className="w-72 text-xs p-3 space-y-2">
+                            {config.evidence.proof_field === key && (
+                              <>
+                                <p className="font-medium text-sm">Evidence proof</p>
+                                <p className="text-muted-foreground">
+                                  The <code className="bg-muted px-1 rounded font-mono">{key}</code> field holds the link or text that proves a claim. A row counts as evidence only if this is filled in.
+                                </p>
+                              </>
+                            )}
+                            {config.evidence.match_fields?.includes(key) && (
+                              <>
+                                <p className="font-medium text-sm">Evidence statement</p>
+                                <p className="text-muted-foreground">
+                                  Names in the <code className="bg-muted px-1 rounded font-mono">{key}</code> field are compared with the partners, press outlets or awards a proposal names.
+                                </p>
+                              </>
+                            )}
+                          </PopoverContent>
+                        </Popover>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -5000,7 +5260,7 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                         variant="ghost"
                         size="sm"
                         className={`rounded-r-none border-r toggle-elevate ${dataView === "mapped" ? "toggle-elevated bg-muted" : ""}`}
-                        onClick={() => { setDataView("mapped"); setSortKey(null); setSearch(""); setTagFilters({}); setPage(1); }}
+                        onClick={() => { setDataView("mapped"); setSort(DATABASE_ITEMS_SORT_DEFAULT); setSearch(""); setTagFilters({}); setPage(1); }}
                         data-testid="button-view-mapped"
                       >
                         Mapped
@@ -5009,7 +5269,7 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                         variant="ghost"
                         size="sm"
                         className={`rounded-l-none toggle-elevate ${dataView === "raw" ? "toggle-elevated bg-muted" : ""}`}
-                        onClick={() => { setDataView("raw"); setSortKey(null); setSearch(""); setTagFilters({}); setPage(1); }}
+                        onClick={() => { setDataView("raw"); setSort(DATABASE_ITEMS_SORT_DEFAULT); setSearch(""); setTagFilters({}); setPage(1); }}
                         data-testid="button-view-raw"
                       >
                         Raw
@@ -5287,6 +5547,12 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                                 Indexing{jobStatus?.index?.fetched !== undefined && jobStatus?.index?.total ? ` ${jobStatus.index.fetched} / ${jobStatus.index.total}` : "\u2026"}
                               </span>
                             </>
+                          ) : indexWaiting ? (
+                            <span>
+                              {jobStatus?.index?.status === "waiting_worker"
+                                ? "Index update waiting for the background worker. Search keeps using the current index (or keyword matching if there is none yet)."
+                                : "Index update queued."}
+                            </span>
                           ) : jobStatus?.fetch?.status === "error" ? (
                             <>
                               <span className="text-destructive shrink-0">Fetch error: {jobStatus.fetch?.error ?? "unknown"}</span>
@@ -5396,6 +5662,19 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                     <thead>
                       <tr className="border-b bg-muted/50">
                         {editMode && <th className="px-2 py-2 w-20" />}
+                        {showEvidenceTrust && (
+                          <th className="px-3 py-2 text-left font-medium text-muted-foreground whitespace-nowrap">
+                            Proof
+                          </th>
+                        )}
+                        {showEvidenceTrust && (
+                          <th
+                            className="px-3 py-2 text-left font-medium text-muted-foreground whitespace-nowrap"
+                            data-testid="th-evidence-archive"
+                          >
+                            <ArchiveColumnHeader />
+                          </th>
+                        )}
                         {columns.map((col) => (
                           <th
                             key={col}
@@ -5434,11 +5713,8 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                     <tbody>
                       {(editMode ? (itemsData?.items || []) : filteredItems).map((item, i) => {
                         const openItemEdit = () => {
-                          const pageItems = itemsData?.items || [];
-                          const pageIdx = pageItems.indexOf(item);
-                          const localIdx = pageIdx >= 0 ? pageIdx : i;
                           setEditingItem(item);
-                          setEditingItemIndex((page - 1) * PAGE_SIZE + localIdx);
+                          setEditingItemIndex(storedIndexOf(item, i));
                           setIsAddingItem(false);
                         };
                         return (
@@ -5468,7 +5744,7 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                                   variant="ghost"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    setDeleteConfirmIndex(i);
+                                    setDeleteConfirmIndex(storedIndexOf(item, i));
                                   }}
                                   disabled={savingItems}
                                   data-testid={`button-delete-row-${i}`}
@@ -5476,6 +5752,51 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                                   <Trash2 className="h-3.5 w-3.5 text-destructive" />
                                 </Button>
                               </div>
+                            </td>
+                          )}
+                          {showEvidenceTrust && (
+                            <td className="px-3 py-1.5 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                              {trustOf(item) === "unverified" ? (
+                                <div className="flex items-center gap-1.5">
+                                  <Badge
+                                    variant="outline"
+                                    className="font-normal text-[10px]"
+                                    title="An agent changed this row's link or claim. Proposals will not treat it as proof until you verify it."
+                                    data-testid={`badge-evidence-unverified-${i}`}
+                                  >
+                                    Added by agent, not verified
+                                  </Badge>
+                                  {canEditRows && (
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-6 px-2 text-[10px]"
+                                      disabled={verifyingIndex !== null}
+                                      onClick={() => void verifyEvidenceRow(storedIndexOf(item, i))}
+                                      data-testid={`button-verify-evidence-${i}`}
+                                    >
+                                      {verifyingIndex === storedIndexOf(item, i) ? "Verifying…" : "Mark verified"}
+                                    </Button>
+                                  )}
+                                </div>
+                              ) : trustOf(item) === "verified" || trustOf(item) === "trusted" ? (
+                                <EvidenceTrustLabel trust={trustOf(item) as "verified" | "trusted"} testId={String(i)} />
+                              ) : (
+                                <span className="text-[10px] text-muted-foreground">—</span>
+                              )}
+                            </td>
+                          )}
+                          {showEvidenceTrust && (
+                            <td className="px-3 py-1.5 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                              <EvidenceArchiveCell
+                                view={archiveOf(item)}
+                                dbName={dbName}
+                                proofField={config?.evidence?.proof_field}
+                                storedIndex={storedIndexOf(item, i)}
+                                canEdit={canEditRows}
+                                onChanged={refetchItems}
+                                testId={String(i)}
+                              />
                             </td>
                           )}
                           {columns.map((col) => {

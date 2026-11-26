@@ -4,10 +4,9 @@
  */
 
 import yaml from "js-yaml";
+import { LEGACY_MAIN_SEO_KEYWORD_KEY, LEGACY_SEO_PILLAR_KEY } from "./content-types";
 import {
   KNOWN_SEO_FIELDS,
-  LEGACY_MAIN_SEO_KEYWORD_KEY,
-  LEGACY_SEO_PILLAR_KEY,
   SEO_RESEARCH_METRIC_FIELDS,
   SEO_RESEARCH_WRITE_FIELDS,
   SEO_YAML_KEY,
@@ -17,7 +16,7 @@ import {
   type KnownSeoField,
   type SeoRefreshTier,
   type SeoResearchMetricField,
-} from "./content-types";
+} from "./seo-field-defs";
 import type { ContentIndex } from "./content-index";
 import { contentIndex } from "./content-index";
 import { createPublicUrlResolver, toPublicUrlPath } from "./redirects";
@@ -30,7 +29,7 @@ export {
   isSeoRefreshTier,
   seoFieldFromPath,
   getSeoFieldDef,
-} from "./content-types";
+} from "./seo-field-defs";
 export type { KnownSeoField, SeoRefreshTier };
 
 const MAX_REDIRECT_HOPS = 12;
@@ -506,11 +505,7 @@ export function mergeSeoUpdates(current: SeoBlock, updates: Record<string, unkno
       }
       const parsed = parseSeoResearchMetric(value);
       // Keep raw on parse failure so validateSeoSave can reject with a clear code.
-      next[field] = parsed.ok
-        ? parsed.value
-        : typeof value === "number"
-          ? value
-          : null;
+      (next as Record<string, unknown>)[field] = parsed.ok ? parsed.value : value;
       continue;
     }
     if (value === null) {

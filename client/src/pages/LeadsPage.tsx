@@ -1,11 +1,9 @@
 import { useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
-import { Clock, Compass, FileText, FlaskConical, Info, LogIn, Route, Users, X } from "lucide-react";
+import { Clock, Compass, FileText, FlaskConical, Info, LogIn, Package, Route, UserRound, Users, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import { PrivateHistoryBackButton } from "@/components/private/PrivateHistoryBackButton";
@@ -16,26 +14,41 @@ import { LeadsTimelineChart } from "@/components/leads/LeadsTimelineChart";
 import { LeadsBreakdownCard } from "@/components/leads/LeadsBreakdownCard";
 import { LeadsTable } from "@/components/leads/LeadsTable";
 import { LeadsLocalCopyBanner } from "@/components/leads/LeadsLocalCopyBanner";
+import { LeadsDeliveryBanners } from "@/components/leads/LeadsDeliveryBanners";
+import { LeadDetailsDialog } from "@/components/leads/LeadDetailsDialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { apiFetch } from "@/lib/queryClient";
 import { PAID_LOOKBACK_DAYS } from "@shared/paid-traffic";
 import {
+  LEAD_ID_PATTERN,
+  LEADS_DELIVERY_FILTER_LABELS,
+  LEADS_DELIVERY_FILTERS,
   LEADS_NONE,
   LEADS_RANGES,
   LEADS_RANGE_LABELS,
+  LEADS_SHOW,
+  LEADS_SHOW_LABELS,
   LEADS_TTL_LABELS,
   hasLeadsFilters,
   leadsQueryToSearchParams,
   parseLeadsQuery,
+  type LeadsDeliveryFilter,
   type LeadsFilters,
   type LeadsListResponse,
   type LeadsQuery,
   type LeadsRange,
+  type LeadsShow,
   type LeadsStatsResponse,
 } from "@shared/leads-query";
 import { isTrafficChannel, TRAFFIC_CHANNEL_LABELS } from "@shared/traffic-channel";
 
 const PAGE_PATH = "/private/store/leads";
-const DEFAULT_QUERY: LeadsQuery = { range: "30d", include_test: false, page: 1, filters: {} };
+const DEFAULT_QUERY: LeadsQuery = { range: "30d", show: "real", page: 1, filters: {} };
+const SHOW_TITLES: Record<LeadsShow, string> = {
+  real: "Hide test and repeat leads",
+  all: "Real, test and repeat leads together",
+  test: "Only leads flagged as tests (staff sessions or test emails)",
+};
 
 async function fetchJson<T>(url: string): Promise<T> {
   const res = await apiFetch(url);
@@ -52,11 +65,23 @@ function none(v: string | undefined): string {
 
 type Chip = { id: string; label: string; remove: (keyof LeadsFilters)[] };
 
-function filterChips(f: LeadsFilters, productName?: string): Chip[] {
+function filterChips(
+  f: LeadsFilters,
+  productName?: string,
+  funnelLabels?: LeadsStatsResponse["funnel_filter_labels"],
+): Chip[] {
   const chips: Chip[] = [];
   if (f.product) {
     const label = f.product === LEADS_NONE ? "(none)" : productName ?? f.product;
     chips.push({ id: "product", label: `Product: ${label}`, remove: ["product"] });
+  }
+  if (f.funnel_product) {
+    const label = funnelLabels?.funnel_product ?? none(f.funnel_product);
+    chips.push({ id: "funnel_product", label: `Product on page: ${label}`, remove: ["funnel_product"] });
+  }
+  if (f.funnel_persona) {
+    const label = funnelLabels?.funnel_persona ?? none(f.funnel_persona);
+    chips.push({ id: "funnel_persona", label: `Persona: ${label}`, remove: ["funnel_persona"] });
   }
   if (f.source || f.medium) {
     const untagged = f.source === LEADS_NONE && f.medium === LEADS_NONE;
@@ -95,12 +120,19 @@ function LeadsPageInner() {
     return parsed.ok ? parsed.query : DEFAULT_QUERY;
   }, [search]);
 
+  /** `?lead=<id>` (from a lead_delivery_failed alert) opens that lead's details. */
+  const linkedLeadId = useMemo(() => {
+    const id = new URLSearchParams(search).get("lead");
+    return id && LEAD_ID_PATTERN.test(id) ? id : null;
+  }, [search]);
+
   const navigate = (next: LeadsQuery) => {
     const qs = leadsQueryToSearchParams(next).toString();
     setLocation(qs ? `${PAGE_PATH}?${qs}` : PAGE_PATH, { replace: true });
   };
+  const setDelivery = (delivery: LeadsDeliveryFilter | undefined) => navigate({ ...query, page: 1, delivery });
   const setRange = (range: LeadsRange) => navigate({ ...query, range, page: 1 });
-  const setIncludeTest = (include_test: boolean) => navigate({ ...query, include_test, page: 1 });
+  const setShow = (show: LeadsShow) => navigate({ ...query, show, page: 1 });
   const setPage = (page: number) => navigate({ ...query, page });
   const addFilter = (filter: LeadsFilters) => navigate({ ...query, page: 1, filters: { ...query.filters, ...filter } });
   const removeFilters = (keys: (keyof LeadsFilters)[]) => {
@@ -108,7 +140,7 @@ function LeadsPageInner() {
     for (const k of keys) delete filters[k];
     navigate({ ...query, page: 1, filters });
   };
-  const clearFilters = () => navigate({ ...query, page: 1, filters: {} });
+  const clearFilters = () => navigate({ ...query, page: 1, filters: {}, delivery: undefined });
 
   const statsQs = leadsQueryToSearchParams({ ...query, page: 1 }).toString();
   const listQs = leadsQueryToSearchParams(query).toString();
@@ -129,9 +161,17 @@ function LeadsPageInner() {
     });
   };
 
-  const chips = filterChips(query.filters, stats.data?.product_name);
+  const chips = filterChips(query.filters, stats.data?.product_name, stats.data?.funnel_filter_labels);
+  if (query.delivery) {
+    chips.push({ id: "delivery", label: `Delivery: ${LEADS_DELIVERY_FILTER_LABELS[query.delivery]}`, remove: [] });
+  }
   const productSince = stats.data?.product_since ?? null;
-  const filtersActive = hasLeadsFilters(query.filters);
+  const funnelSince = stats.data?.funnel_since ?? null;
+  const funnelSinceText =
+    funnelSince != null
+      ? new Date(funnelSince).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
+      : null;
+  const filtersActive = hasLeadsFilters(query.filters) || !!query.delivery;
   const b = stats.data?.breakdowns;
   const ttl = b?.time_to_lead;
   const statsLoading = stats.isLoading;
@@ -164,9 +204,11 @@ function LeadsPageInner() {
                   <PopoverContent align="start" className="w-96 space-y-2 text-xs text-muted-foreground leading-relaxed">
                     <p className="font-medium text-foreground text-sm">Read more (advanced)</p>
                     <p>
-                      <span className="text-foreground">Test and repeat leads</span> are hidden unless you turn on Show test/repeat. A lead is a
-                      test when it was sent from a staff session or matches a test email pattern (Settings → Ads). A repeat is the same
-                      browser sending the same form again within 24 hours.
+                      <span className="text-foreground">Real leads</span> leaves out test and repeat leads; <span className="text-foreground">All</span>{" "}
+                      adds them back; <span className="text-foreground">Test only</span> shows just the tests. A lead is a test when it was
+                      sent from a staff session or matches a test email pattern (Settings → Ads), decided when it is submitted (
+                      <code>is_test</code>, <code>test_reason</code>). A repeat is the same browser sending the same form again within 24
+                      hours.
                     </p>
                     <p>
                       <span className="text-foreground">Paid</span> means the visit came from an ad platform (click ID or paid UTMs). A
@@ -203,6 +245,14 @@ function LeadsPageInner() {
                       included, last 28 days), so it will not match this page exactly.
                     </p>
                     <p>
+                      <span className="text-foreground">Delivery</span> says whether the lead reached the CRM webhook. Each lead is saved
+                      encrypted (<code>LEAD_OUTBOX_ENCRYPTION_KEY</code>) before the CRM is called. Outages (timeouts, 5xx, 429) retry
+                      automatically on the live server after 1 min, 5 min, 30 min, 2 h and 12 h; CRM rejections and missing webhooks go
+                      straight to Needs attention. Retry all failed sends at most 5 leads per site every 30 seconds. Test leads never raise
+                      the <code>lead_delivery_failed</code> alert. The saved copy is erased after delivery or 30 days. Tables:{" "}
+                      <code>lead_outbox</code>, <code>lead_delivery_attempts</code>.
+                    </p>
+                    <p>
                       Data lives in the pipeline SQLite table <code>lead_submissions</code> (<code>server/ads/lead-ledger.ts</code>). Cost per
                       lead lives in the Ads overview.
                     </p>
@@ -214,17 +264,13 @@ function LeadsPageInner() {
           </div>
 
           <div className="flex flex-wrap items-center gap-3 shrink-0">
-            <div className="flex items-center gap-2">
-              <Switch
-                id="leads-include-test"
-                checked={query.include_test}
-                onCheckedChange={(v) => setIncludeTest(v === true)}
-                data-testid="switch-leads-include-test"
-              />
-              <Label htmlFor="leads-include-test" className="text-xs font-normal text-muted-foreground">
-                Show test/repeat
-              </Label>
-            </div>
+            <ToggleButtonBar value={query.show} onValueChange={(v) => setShow(v as LeadsShow)} listTestId="toggle-leads-show">
+              {LEADS_SHOW.map((s) => (
+                <ToggleButtonBarTrigger key={s} value={s} title={SHOW_TITLES[s]} data-testid={`toggle-leads-show-${s}`}>
+                  {LEADS_SHOW_LABELS[s]}
+                </ToggleButtonBarTrigger>
+              ))}
+            </ToggleButtonBar>
             <ToggleButtonBar value={query.range} onValueChange={(v) => setRange(v as LeadsRange)} listTestId="toggle-leads-range">
               {LEADS_RANGES.map((r) => (
                 <ToggleButtonBarTrigger key={r} value={r} data-testid={`toggle-leads-range-${r}`}>
@@ -232,15 +278,50 @@ function LeadsPageInner() {
                 </ToggleButtonBarTrigger>
               ))}
             </ToggleButtonBar>
+            <Select
+              value={query.delivery ?? "any"}
+              onValueChange={(v) => setDelivery(v === "any" ? undefined : (v as LeadsDeliveryFilter))}
+            >
+              <SelectTrigger className="h-8 w-[170px] text-xs" aria-label="Delivery" data-testid="select-leads-delivery">
+                <SelectValue placeholder="Delivery" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="any" className="text-xs">
+                  Any delivery status
+                </SelectItem>
+                {LEADS_DELIVERY_FILTERS.map((d) => (
+                  <SelectItem key={d} value={d} className="text-xs" data-testid={`select-leads-delivery-${d}`}>
+                    {LEADS_DELIVERY_FILTER_LABELS[d]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <AdsPullProductionButton variant="icon" testIdPrefix="leads-header" onDone={refreshAll} />
           </div>
         </div>
 
         <LeadsLocalCopyBanner localCopy={stats.data?.local_copy} />
 
+        <LeadsDeliveryBanners
+          delivery={stats.data?.delivery}
+          viewQs={statsQs}
+          onChanged={refreshAll}
+          onShowFailed={() => setDelivery("failed")}
+        />
+
+        <LeadDetailsDialog leadId={linkedLeadId} onClose={() => navigate(query)} />
+
         {error && (
           <p className="text-sm text-destructive" data-testid="text-leads-error">
             Could not load leads: {error.message}
+          </p>
+        )}
+
+        {query.show === "test" && stats.data && (
+          <p className="text-xs text-muted-foreground" data-testid="text-leads-test-reasons">
+            {stats.data.kpis.in_range > 0
+              ? `Test leads in this range: ${stats.data.kpis.test_staff.toLocaleString()} from staff sessions, ${stats.data.kpis.test_email.toLocaleString()} from test email patterns (Settings → Ads). Real leads are hidden.`
+              : "No test leads in this range. A lead counts as a test when it is sent while logged in as staff or from an email that matches a test pattern (Settings → Ads)."}
           </p>
         )}
 
@@ -255,7 +336,7 @@ function LeadsPageInner() {
                   type="button"
                   className="rounded-sm p-0.5 hover:bg-muted"
                   aria-label={`Remove filter ${c.label}`}
-                  onClick={() => removeFilters(c.remove)}
+                  onClick={() => (c.id === "delivery" ? setDelivery(undefined) : removeFilters(c.remove))}
                   data-testid={`button-leads-remove-filter-${c.id}`}
                 >
                   <X className="h-3 w-3" />
@@ -337,6 +418,32 @@ function LeadsPageInner() {
             testId="card-leads-landing-pages"
             onSelect={addFilter}
           />
+          <LeadsBreakdownCard
+            title="Product on page"
+            icon={Package}
+            description={`Products on the page where the form was sent. A lead from a page with two products counts for both, so shares can add up to more than 100%.${
+              funnelSinceText ? ` Recorded from ${funnelSinceText}.` : " Not recorded on any lead yet."
+            }`}
+            rows={b?.funnel_products}
+            loading={statsLoading}
+            emptyText="No leads in this view."
+            testId="card-leads-funnel-products"
+            onSelect={addFilter}
+          />
+          <LeadsBreakdownCard
+            title="Persona"
+            icon={UserRound}
+            description={`Personas on that page, with their product. A lead counts once per persona.${
+              stats.data && stats.data.funnel_persona_product_unknown > 0
+                ? " Some older leads show \"product unknown\": two products share that persona and those leads didn't record which one."
+                : ""
+            }`}
+            rows={b?.funnel_personas}
+            loading={statsLoading}
+            emptyText="No leads in this view."
+            testId="card-leads-funnel-personas"
+            onSelect={addFilter}
+          />
           {b && b.experiments.length > 0 && (
             <LeadsBreakdownCard
               title="Page experiments"
@@ -354,6 +461,7 @@ function LeadsPageInner() {
         <LeadsTable
           data={list.data}
           loading={list.isLoading}
+          show={query.show}
           hasFilters={filtersActive}
           onClearFilters={clearFilters}
           onPage={setPage}

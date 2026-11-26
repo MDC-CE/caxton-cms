@@ -25,8 +25,10 @@ import {
   checkDraftBase,
   checkTranslationSource,
   diffSnapshots,
+  flattenFields,
   forgetDraftBase,
   rebuildDraftFromBase,
+  sameValue,
   type BaseSnapshot,
   type DraftRef,
   type FieldChange,
@@ -41,7 +43,14 @@ import {
 import { attachedOverlayStructureError, isEntryDetached, isSharedLayoutType } from "../shared-layout-entry";
 import { hasAnyLiveLocale, liveLocaleFileName } from "../draft-entry";
 import { validateYamlIdentity } from "../validate-content-identity";
-import { assertLocaleUrlAvailable } from "../locale-url-slug";
+import {
+  assertLocaleUrlAvailable,
+  checkNewLocaleUrlSlug,
+  ownLocaleSlug,
+  validateLocaleUrlSlugFormat,
+} from "../locale-url-slug";
+import { getContentTypeConfig } from "../content-types";
+import { assessSlugLocaleMatch, SLUG_LOCALE_MISMATCH_CODE } from "@shared/slug-locale-heuristic";
 import { ensurePublishedAtOnce } from "../published-at";
 import { clearSsrSchemaCache } from "../ssr-schema";
 import { invalidateContentCaches } from "../routes/_helpers";
@@ -72,6 +81,13 @@ import {
   TEXT_LIMITS_EXCEEDED_CODE,
   summarizeTextLimitViolations,
 } from "@shared/component-text-limits";
+import {
+  normalizeRobotsValue,
+  parseRobotsOnPublish,
+  robotsLabel,
+  ROBOTS_CHANGE_ON_PUBLISH_CODE,
+  type RobotsOnPublish,
+} from "./robots-on-publish";
 
 export { hashVariantFileContents };
 
@@ -127,15 +143,42 @@ export type PromoteWithTeardownArgs = {
   callerIsMcp?: boolean;
   /** Staff confirmed publishing text over the component text_limits. */
   confirmTextLimits?: boolean;
+  /** Publish even though this language will show a different page-level value (legacy copy in its locale file). */
+  confirmDisplayChange?: boolean;
   /** Open proposal owning this draft (local DB); `_draft.proposal` is checked first. */
   findOpenProposalForDraft?: (ref: DraftRef) => OpenProposalLink | null;
   /** Run every check, write nothing. */
   dryRun?: boolean;
   /** New locale with `seo.pillar_path: null`: why it stays out of every cluster. */
   seoStandaloneReason?: string | null;
+  /** Staff publish: this language's own URL slug chosen at publish time (`{ [locale]: slug }`). */
+  localeUrlSlugs?: Record<string, string> | null;
+  /** Answer to `robots_change_on_publish`: keep this language's live robots, or publish the draft's. */
+  robotsOnPublish?: RobotsOnPublish | null;
 };
 
-export type PromoteWarning = { code: string; message: string; fields?: string[] };
+export { ROBOTS_CHANGE_ON_PUBLISH_CODE, parseRobotsOnPublish, type RobotsOnPublish };
+
+/** Effective `meta.robots` of a locale file layered on `_common.yml`. */
+export function effectiveRobots(commonRaw: string | null, localeRaw: string | null): string {
+  const merged = deepMerge(parseOrNull(commonRaw) ?? {}, parseOrNull(localeRaw) ?? {}) as Record<string, unknown>;
+  return normalizeRobotsValue(valueAt(merged, "meta.robots"));
+}
+
+/** Put the live locale file's own `meta.robots` (or its absence) into the promoted YAML. */
+export function keepLiveRobots(promotedRaw: string, liveRaw: string | null): string {
+  const promoted = parseOrNull(promotedRaw) ?? {};
+  const liveOwn = valueAt(parseOrNull(liveRaw) ?? {}, "meta.robots");
+  const meta = isPlainObject(promoted.meta) ? { ...(promoted.meta as Record<string, unknown>) } : {};
+  if (liveOwn == null) delete meta.robots;
+  else meta.robots = liveOwn;
+  if (Object.keys(meta).length === 0) {
+    return findTopLevelKeySpan(promotedRaw, "meta") ? surgicalRemoveTopLevelKey(promotedRaw, "meta") : promotedRaw;
+  }
+  return surgicalSetTopLevelKey(promotedRaw, "meta", meta);
+}
+
+export type PromoteWarning = { code: string; message: string; fields?: string[]; details?: Record<string, unknown> };
 
 export type PromoteSnapshot = { live: string | null; common: string | null };
 
@@ -193,6 +236,50 @@ function valueAt(obj: Record<string, unknown>, p: string): unknown {
   return p.split(".").reduce<unknown>((cur, k) => (isPlainObject(cur) ? cur[k] : undefined), obj);
 }
 
+/** Top-level keys + `meta.*` of the locale part whose value is `null` (removal markers). */
+function localeNullPaths(locale: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const [key, value] of Object.entries(locale)) {
+    if (key === "meta" && isPlainObject(value)) {
+      for (const [sub, v] of Object.entries(value)) if (v === null) out.push(`meta.${sub}`);
+    } else if (value === null) {
+      out.push(key);
+    }
+  }
+  return out;
+}
+
+export const DISPLAY_VALUES_CHANGE_CODE = "display_values_change";
+
+export type DisplayValueChange = { field_path: string; before: unknown; after: unknown };
+
+/**
+ * Page-level fields this language shows from a legacy copy in its own locale file.
+ * Publish never writes page-level keys to the locale file, so afterwards the language
+ * shows `_common.yml` (after this publish) instead — list the values that change.
+ */
+export function displayValueChanges(opts: {
+  liveRaw: string | null;
+  commonBeforeRaw: string | null;
+  commonAfterRaw: string | null;
+  urlParams?: string[];
+}): DisplayValueChange[] {
+  const live = parseOrNull(opts.liveRaw);
+  if (!live) return [];
+  const { common: legacy } = splitByFieldScope(live, { urlParams: opts.urlParams });
+  const commonBefore = parseOrNull(opts.commonBeforeRaw) ?? {};
+  const commonAfter = parseOrNull(opts.commonAfterRaw) ?? {};
+  const out: DisplayValueChange[] = [];
+  for (const [fieldPath, own] of flattenFields(legacy)) {
+    if (own === null) continue;
+    const shared = valueAt(commonBefore, fieldPath);
+    const before = isPlainObject(own) && isPlainObject(shared) ? deepMerge(shared, own) : own;
+    const after = valueAt(commonAfter, fieldPath);
+    if (!sameValue(before, after)) out.push({ field_path: fieldPath, before, after });
+  }
+  return out;
+}
+
 /**
  * Apply the draft's page-level fields to `_common.yml` text and drop them from the
  * locale text. `null` in the draft deletes the key from `_common.yml`; the locale
@@ -204,20 +291,25 @@ export function routeSharedFieldsOnPromote(opts: {
   urlParams?: string[];
 }): { localeRaw: string; commonRaw: string | null; commonChanged: boolean; paths: string[]; draftCommon: Record<string, unknown> } {
   const parsed = safeLoadYaml(opts.draftRaw) ?? {};
-  const { common: draftCommon } = splitByFieldScope(parsed, { urlParams: opts.urlParams });
+  const { common: draftCommon, locale: draftLocale } = splitByFieldScope(parsed, { urlParams: opts.urlParams });
   const paths = commonPathsOf(draftCommon);
-  if (paths.length === 0) {
+  const localeNulls = localeNullPaths(draftLocale);
+  if (paths.length === 0 && localeNulls.length === 0) {
     return { localeRaw: opts.draftRaw, commonRaw: opts.commonRaw, commonChanged: false, paths, draftCommon };
   }
 
-  const nested = paths.some((p) => p.includes("."));
+  const nested = paths.some((p) => p.includes(".")) || localeNulls.length > 0;
   let localeRaw: string;
   if (nested) {
     const localeObj = { ...parsed };
-    for (const p of paths) deleteAtPath(localeObj, p);
+    for (const p of [...paths, ...localeNulls]) deleteAtPath(localeObj, p);
+    if (isPlainObject(localeObj.meta) && Object.keys(localeObj.meta).length === 0) delete localeObj.meta;
     localeRaw = safeDumpYaml(localeObj);
   } else {
     localeRaw = paths.reduce((raw, key) => surgicalRemoveTopLevelKey(raw, key), opts.draftRaw);
+  }
+  if (paths.length === 0) {
+    return { localeRaw, commonRaw: opts.commonRaw, commonChanged: false, paths, draftCommon };
   }
 
   let commonRaw = opts.commonRaw ?? "";
@@ -407,9 +499,14 @@ export async function promoteVariantWithOptionalTeardown(
         author_fields: rebuild.author_changes.map((c) => c.field_path),
       };
       if (args.dryRun) rebuiltContent = safeDumpYaml(rebuild.result);
+      const keptRedirects = rebuild.redirects_kept_from_live.length;
       warnings.push({
         code: "draft_rebuilt",
-        message: "Live changed after this draft was created; the draft was rebuilt on top of today's live and keeps both sets of changes.",
+        message:
+          "Live changed after this draft was created; the draft was rebuilt on top of today's live and keeps both sets of changes." +
+          (keptRedirects > 0
+            ? ` Kept ${keptRedirects} old address${keptRedirects === 1 ? "" : "es"} added on live: ${rebuild.redirects_kept_from_live.join(", ")}.`
+            : ""),
         fields: rebuilt.kept_live_fields,
       });
     } else if (!args.confirmOverwriteNewerLive) {
@@ -480,8 +577,37 @@ export async function promoteVariantWithOptionalTeardown(
     if (!gate.ok) return { ok: false, code: gate.code, error: gate.error, details: gate.details };
   }
 
+  const rawSlugOverride = args.localeUrlSlugs?.[locale];
+  const slugOverride = typeof rawSlugOverride === "string" ? rawSlugOverride.trim() : "";
+  if (slugOverride) {
+    const formatErr = validateLocaleUrlSlugFormat(slugOverride);
+    if (formatErr) {
+      return {
+        ok: false,
+        code: "invalid_locale_slug",
+        error: `Cannot promote: ${formatErr}`,
+        details: { locale, property_path: "slug" },
+      };
+    }
+  }
+
+  // --- New language of a live page: it needs its own address word, not the folder name by default ---
+  const isNewLanguage = !templateMode && !wasUnpublished && !fs.existsSync(defaultFilePath);
+  if (isNewLanguage) {
+    const draftOwn = safeLoadYaml(rebuiltContent ?? fs.readFileSync(variantFilePath, "utf-8")) ?? {};
+    const gate = checkNewLocaleUrlSlug({
+      draftOwnData: slugOverride ? { ...draftOwn, slug: slugOverride } : draftOwn,
+      entryIdentity: slug,
+      contentType,
+      locale,
+      urlPattern: getContentTypeConfig(contentType, contentRoot)?.url_pattern ?? null,
+    });
+    if (!gate.ok) return { ok: false, code: gate.code, error: gate.error, status: 409, details: gate.details };
+  }
+
   try {
-    const variantContent = stripDraftMetaFromRaw(rebuiltContent ?? fs.readFileSync(variantFilePath, "utf-8"));
+    let variantContent = stripDraftMetaFromRaw(rebuiltContent ?? fs.readFileSync(variantFilePath, "utf-8"));
+    if (slugOverride) variantContent = surgicalSetTopLevelKey(variantContent, "slug", slugOverride);
     const identityErr = validateYamlIdentity(variantContent, {
       contentType,
       contentSlug: slug,
@@ -542,6 +668,19 @@ export async function promoteVariantWithOptionalTeardown(
         warnings.push({ code: w.code, message: w.message, fields: w.links.map((l) => l.field_path) });
       }
     }
+    {
+      const { runConsentGate } = await import("../consent-gate");
+      const consentGate = runConsentGate({ pageData: mergedForGate, contentRoot });
+      if (consentGate.failure) {
+        return {
+          ok: false,
+          code: consentGate.failure.code,
+          error: `Cannot promote: ${consentGate.failure.message}`,
+          details: { consent_forms: consentGate.failure.forms, warnings: consentGate.warnings },
+        };
+      }
+      for (const w of consentGate.warnings) warnings.push({ code: w.code, message: w.message, fields: [] });
+    }
     if (!templateMode) {
       const urlCheck = assertLocaleUrlAvailable({
         contentType,
@@ -561,6 +700,20 @@ export async function promoteVariantWithOptionalTeardown(
     }
 
     const liveContent = fs.existsSync(defaultFilePath) ? fs.readFileSync(defaultFilePath, "utf-8") : null;
+
+    const chosenSlug = templateMode ? null : ownLocaleSlug(parsedVariant);
+    const liveOwnSlug = liveContent ? ownLocaleSlug(safeLoadYaml(liveContent)) : null;
+    if (chosenSlug && (isNewLanguage || chosenSlug !== liveOwnSlug)) {
+      const match = assessSlugLocaleMatch(chosenSlug, locale);
+      if (!match.ok) {
+        const looksLike = match.inferredOpposite === "en" ? "English" : "Spanish";
+        warnings.push({
+          code: SLUG_LOCALE_MISMATCH_CODE,
+          message: `The ${locale} address "${chosenSlug}" looks ${looksLike} (${match.markers.join(", ")}). Published anyway; rename it with a redirect if that was not intended.`,
+          fields: ["slug"],
+        });
+      }
+    }
 
     // Component text limits (schema.yml text_limits). Only text that differs
     // from live counts; agents cannot override, staff can confirm.
@@ -666,8 +819,103 @@ export async function promoteVariantWithOptionalTeardown(
       }
     }
 
+    const displayChanges = templateMode
+      ? []
+      : displayValueChanges({
+          liveRaw: liveContent,
+          commonBeforeRaw: commonBefore,
+          commonAfterRaw: routed.commonChanged ? routed.commonRaw : commonBefore,
+          urlParams: urlParamsForContentType(contentType, contentRoot),
+        });
+    if (displayChanges.length > 0) {
+      const fields = displayChanges.map((c) => c.field_path);
+      const message = `Publishing changes what ${locale} visitors see for: ${fields.join(", ")}. These now come from the page-wide settings shared by every language.`;
+      if (!args.viaProposalApply && !args.confirmDisplayChange) {
+        return {
+          ok: false,
+          code: DISPLAY_VALUES_CHANGE_CODE,
+          error: `${message} Confirm to publish anyway.`,
+          status: 409,
+          details: {
+            locale,
+            fields: displayChanges,
+            paths: { common: `${folder}/${slug}/_common.yml`, locale: `${folder}/${slug}/${locale}.yml` },
+          },
+        };
+      }
+      warnings.push({ code: DISPLAY_VALUES_CHANGE_CODE, message, fields });
+    }
+
     const { yamlForPromotePreservingLiveSeo } = await import("../seo-write-layer");
     const promoted = yamlForPromotePreservingLiveSeo(routed.localeRaw, liveContent);
+    let liveRedirectsChanged = false;
+    if (!templateMode) {
+      const { screenPublishedRedirects } = await import("../redirect-draft");
+      const screened = screenPublishedRedirects({
+        ci,
+        contentType,
+        folderSlug: slug,
+        locale,
+        liveRaw: liveContent,
+        promotedRaw: promoted.content,
+      });
+      promoted.content = screened.content;
+      liveRedirectsChanged = screened.changed;
+      if (screened.skipped.length > 0) {
+        warnings.push({
+          code: "draft_redirects_skipped",
+          message:
+            `These old addresses were not added because they conflict: ${screened.skipped
+              .map((s) => `${s.from} (${s.message})`)
+              .join("; ")}. The page was published without them; live routing for those addresses is unchanged.`,
+          fields: screened.skipped.map((s) => `meta.redirects[${s.from}]`),
+          details: { skipped: screened.skipped },
+        });
+      }
+    }
+    // Robots decide whether search engines see this language: a publish that changes it is confirmed.
+    if (liveContent != null) {
+      const commonAfterRaw = routed.commonChanged ? routed.commonRaw : commonBefore;
+      const liveRobots = effectiveRobots(commonBefore, liveContent);
+      const draftRobots = effectiveRobots(commonAfterRaw, promoted.content);
+      if (liveRobots !== draftRobots) {
+        const localePath = templateMode
+          ? `${folder}/${liveTemplateBasename(locale)}`
+          : `${folder}/${slug}/${locale}.yml`;
+        if (!args.robotsOnPublish) {
+          return {
+            ok: false,
+            code: ROBOTS_CHANGE_ON_PUBLISH_CODE,
+            error: `Publishing changes whether search engines can see this page in ${locale}: live is "${robotsLabel(liveRobots)}", the draft says "${robotsLabel(draftRobots)}". Choose to keep the live value or use the draft's.`,
+            status: 409,
+            details: {
+              locale,
+              live_robots: robotsLabel(liveRobots),
+              draft_robots: robotsLabel(draftRobots),
+              paths: { locale: localePath },
+            },
+          };
+        }
+        if (args.robotsOnPublish === "keep_live") {
+          promoted.content = keepLiveRobots(promoted.content, liveContent);
+        }
+        const kept = args.robotsOnPublish === "keep_live";
+        warnings.push({
+          code: "robots_on_publish",
+          message: kept
+            ? `Kept the live robots value "${robotsLabel(liveRobots)}" for ${locale}; the draft's "${robotsLabel(draftRobots)}" was not published.`
+            : `Published the draft's robots value "${robotsLabel(draftRobots)}" for ${locale} (was "${robotsLabel(liveRobots)}").`,
+          fields: ["meta.robots"],
+          details: {
+            locale,
+            choice: args.robotsOnPublish,
+            live_robots: robotsLabel(liveRobots),
+            draft_robots: robotsLabel(draftRobots),
+          },
+        });
+      }
+    }
+
     const publishedDiff = diffSnapshots(
       { live: parseOrNull(liveContent), common: parseOrNull(commonBefore) } as BaseSnapshot,
       {
@@ -727,7 +975,7 @@ export async function promoteVariantWithOptionalTeardown(
         deletedSiblings.push(sib);
         cache.clearEntryKey(buildEntryKey(contentType, slug, sib.locale, sib.slug));
       }
-      versioningManager.updateVersioning(contentType, slug, versioningState);
+      versioningManager.updateVersioning(contentType, slug, versioningState, { author, contentRoot });
     }
 
     // Write `_common.yml` first, then the live locale; undo both if anything fails.
@@ -757,7 +1005,7 @@ export async function promoteVariantWithOptionalTeardown(
     if (pruned.isEmpty) {
       versioningDeleted = versioningManager.deleteVersioningConfig(contentType, slug, author, contentRoot);
     } else if (afterTeardown[locale]) {
-      versioningManager.updateVersioning(contentType, slug, pruned.data);
+      versioningManager.updateVersioning(contentType, slug, pruned.data, { author, contentRoot });
     }
 
     fs.unlinkSync(variantFilePath);
@@ -801,6 +1049,13 @@ export async function promoteVariantWithOptionalTeardown(
       }
       ci.refresh();
       refreshSitemapEntriesForContentKey(contentType, slug, [locale]);
+      if (liveRedirectsChanged) {
+        const { clearRedirectCache } = await import("../redirects");
+        const { scheduleRedirectsValidation } = await import("../services/onSaveValidation");
+        ci.refreshAfterRedirectWrite(defaultFilePath);
+        clearRedirectCache();
+        scheduleRedirectsValidation({ contentRoot, contentRootName, ci, cache, filePath: defaultFilePath, redirectsChanged: true });
+      }
     }
 
     await cache.flush();

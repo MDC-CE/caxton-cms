@@ -204,7 +204,13 @@ export function shouldTrackFile(filePath: string, allowedExceptions?: Set<string
     return false;
   }
 
-  if (basename === 'seo-index.json') {
+  // Derived indexes rebuilt on every content save; production persists them to GCS.
+  if (
+    basename === 'seo-index.json' ||
+    basename === 'link-index.json' ||
+    basename === 'relation-index.json' ||
+    basename === 'link-status.json'
+  ) {
     return false;
   }
 
@@ -250,6 +256,28 @@ export function isProtectedLocalEdit(fileInfo: FileSyncInfo, diskSha: string): b
  */
 export function isProtectedLocalDelete(fileInfo: FileSyncInfo): boolean {
   return Boolean(fileInfo.remoteSha && (!fileInfo.sha || fileInfo.sha !== fileInfo.remoteSha));
+}
+
+/**
+ * versioning.yml files with a recorded local edit GitHub never received (including files never
+ * pushed). Before the service-author fix these were queued under an author with no GitHub
+ * connection and dropped from the in-memory queue on restart.
+ */
+export function stuckVersioningFiles(
+  files: Record<string, FileSyncInfo>,
+  opts: {
+    shouldTrack: (filePath: string) => boolean;
+    diskSha: (filePath: string) => string | null;
+  },
+): string[] {
+  const out: string[] = [];
+  for (const [filePath, info] of Object.entries(files)) {
+    if (!filePath.endsWith("/versioning.yml") || !opts.shouldTrack(filePath)) continue;
+    const disk = opts.diskSha(filePath);
+    if (disk === null || !info.sha || disk !== info.sha || disk === info.remoteSha) continue;
+    out.push(filePath);
+  }
+  return out.sort();
 }
 
 /**
@@ -757,9 +785,20 @@ export function detectPendingChanges(contentRoot?: string): PendingChange[] {
     const fullPath = path.join(process.cwd(), filePath);
     
     try {
-      const content = fs.readFileSync(fullPath, 'utf-8');
-      const currentSha = computeFileSha(content);
       const storedInfo = state.files[filePath];
+      const stat = fs.statSync(fullPath);
+      // sync-state.json already stores the hash and the mtime from when it was recorded.
+      let currentSha: string;
+      if (
+        storedInfo?.sha &&
+        typeof storedInfo.lastModified === "number" &&
+        storedInfo.lastModified === stat.mtimeMs
+      ) {
+        currentSha = storedInfo.sha;
+      } else {
+        const content = fs.readFileSync(fullPath, "utf-8");
+        currentSha = computeFileSha(content);
+      }
       
       const { contentType, slug } = parseContentPath(filePath, contentRoot);
       
@@ -833,12 +872,15 @@ export function detectPendingChanges(contentRoot?: string): PendingChange[] {
 export function updateSyncStateAfterCommit(
   commitSha: string,
   committedFiles: string[],
-  contentRoot?: string
+  contentRoot?: string,
+  opts?: { keepLastSyncedCommit?: boolean },
 ): void {
   const state = loadSyncState(contentRoot);
-  
-  state.lastSyncedCommit = commitSha;
-  state.lastSyncedAt = new Date().toISOString();
+
+  if (!opts?.keepLastSyncedCommit) {
+    state.lastSyncedCommit = commitSha;
+    state.lastSyncedAt = new Date().toISOString();
+  }
 
   const committedAt = new Date().toISOString();
   

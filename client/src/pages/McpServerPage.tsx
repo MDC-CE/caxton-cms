@@ -33,6 +33,7 @@ import {
 } from "@/components/ui/select";
 import { ToggleButtonBar, ToggleButtonBarTrigger } from "@/components/ui/toggle-button-bar";
 import { McpAgentSetupTabs, MCP_AGENT_SETUP_LABELS } from "@/components/mcp/McpAgentSetupTabs";
+import { McpAgentConnectCards } from "@/components/mcp/McpAgentConnectCard";
 import { McpSetupAgentIcon } from "@/components/mcp/McpSetupAgentIcon";
 import { McpSetupRoleMultiSelect } from "@/components/mcp/McpSetupRoleTabs";
 import {
@@ -111,7 +112,6 @@ interface McpReadiness {
   siteUrlConfigured: boolean;
   mcpServerSecretConfigured: boolean;
   mcpReachable: boolean;
-  replitDevDomain?: string | null;
 }
 
 interface McpParam {
@@ -256,12 +256,10 @@ function ConnectionPanel({
   mySetupRoles,
   siteUrlMissing,
   mcpSecretMissing,
-  readiness,
 }: {
   mySetupRoles: McpRoleFilter[];
   siteUrlMissing: boolean;
   mcpSecretMissing: boolean;
-  readiness?: McpReadiness;
 }) {
   const [setupPhase, setSetupPhase] = useState<SetupPhase>("role");
   const [roleChosen, setRoleChosen] = useState(false);
@@ -378,9 +376,6 @@ function ConnectionPanel({
                     </code>
                     . <code className="font-mono text-[11px] bg-destructive/10 px-1 py-0.5 rounded">SITE_URL</code>{" "}
                     is only the public URL of this running app for MCP authentication.
-                    {readiness?.replitDevDomain
-                      ? ` Replit can fall back to https://${readiness.replitDevDomain} in the workspace, but production deploys should set SITE_URL explicitly.`
-                      : ""}
                   </p>
                 </AlertDescription>
               </Alert>
@@ -580,6 +575,11 @@ function ConnectionPanel({
                   onEdit={handleChangeAgent}
                   editTestId="button-change-setup-agent"
                   valueTestId="text-setup-agent-summary"
+                />
+                <McpAgentConnectCards
+                  agentId={setupAgentId}
+                  roleIds={setupRoleIds}
+                  roleLabels={roleLabels}
                 />
               </div>
               <McpAgentSetupTabs
@@ -890,7 +890,6 @@ export default function McpServerPage() {
               mySetupRoles={mySetupRoles}
               siteUrlMissing={siteUrlMissing}
               mcpSecretMissing={mcpSecretMissing}
-              readiness={readiness}
             />
           )}
           {activeTab === "tools" && (

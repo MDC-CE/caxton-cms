@@ -21,7 +21,10 @@ import {
   listMcpSites,
 } from "../lib/content.js";
 import { assertSafeSegment, assertSafeLocale, assertWithinBase } from "../lib/sanitize.js";
+import { abTestingWarnings } from "../lib/ab-testing-warnings.js";
 import { notifyMcpContentWrite } from "../lib/content-write-notify.js";
+import { missingLocaleFail } from "../lib/missing-locale.js";
+import { writePausedResult } from "../lib/write-pause.js";
 import { checkCap, denyResponse, denyWriteSuggestPropose, denyUnlessContentView, denyUnlessContentViewOrSeo } from "../lib/auth.js";
 import {
   assertAgenticContentWriteAllowed,
@@ -50,7 +53,11 @@ import {
   registerAgentSession,
 } from "../lib/agent-session-store.js";
 import { getActiveRoleId } from "../lib/auth.js";
-import { isExactAgentModel, normalizeMcpClientName } from "../../shared/agent-identity.js";
+import {
+  isExactAgentModel,
+  isServerAgentSessionId,
+  normalizeMcpClientName,
+} from "../../shared/agent-identity.js";
 import {
   AGENT_HIGHLIGHTS_DESC,
   AGENT_REPORT_ISSUE_COMPLETE_EXAMPLE,
@@ -72,6 +79,8 @@ import {
   isDeprecatedFieldInfo,
 } from "../lib/deprecated-field-mcp.js";
 import { textLimitWarnings, textLimitsExceededResult } from "../lib/text-limits-mcp.js";
+import { consentRequiredResult } from "../lib/consent-gate-mcp.js";
+import { CONSENT_REQUIRED_CODE } from "../../shared/formConsentCheck.js";
 import {
   brokenInternalLinksResult,
   internalLinkWarnings,
@@ -89,7 +98,8 @@ import {
   isNonEmptyFieldValue,
 } from "../../shared/deprecatedField.js";
 import type { ContentTypeEditorHint } from "../../server/content-types.js";
-import { promoteWarnings, promoteFailureNextActions, VARIANT_WARNINGS, actionRequired, diagnosticsAfterGoLiveNextAction, diagnosticsJobNextActions, overrideMasksSourceWarning, type McpTextResult, type McpWarning, type NextAction, type McpSideEffect } from "../lib/respond.js";
+import { promoteWarnings, promoteFailureNextActions, ROBOTS_CHANGE_ON_PUBLISH_CODE, robotsChangeOnPublishResult, VARIANT_WARNINGS, actionRequired, diagnosticsAfterGoLiveNextAction, diagnosticsJobNextActions, overrideMasksSourceWarning, type McpTextResult, type McpWarning, type NextAction, type McpSideEffect } from "../lib/respond.js";
+import { touchesMetaRedirects } from "../lib/redirect-update.js";
 import {
   isSignupFieldMapError,
   signupFieldMapActionRequired,
@@ -373,7 +383,7 @@ function schemaOrgOverrideWarningsFromFieldUpdates(
  */
 function internalHeaders(
   mcpToken?: string,
-  opts?: { agentSessionId?: string; omitJsonContentType?: boolean },
+  opts?: { agentSessionId?: string; omitJsonContentType?: boolean; site?: string; model?: string },
 ): Record<string, string> {
   return buildLoopbackHeaders(mcpToken, opts);
 }
@@ -445,10 +455,10 @@ async function callEditSectionsApi(
   domain?: string,
 ): Promise<{ error: McpTextResult } | { data: Record<string, unknown> }> {
   try {
-    const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content/edit-sections${domain ? `?__site=${encodeURIComponent(domain)}` : ""}`;
+    const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content/edit-sections`;
     const res = await fetch(url, {
       method: "POST",
-      headers: internalHeaders(mcpToken, { agentSessionId: params.agent_session_id }),
+      headers: internalHeaders(mcpToken, { agentSessionId: params.agent_session_id, site: domain }),
       body: JSON.stringify({
         contentType: params.contentType,
         slug: params.slug,
@@ -637,10 +647,10 @@ async function callEditCommonApi(
   domain?: string
 ): Promise<McpTextResult | null> {
   try {
-    const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content/edit-common${domain ? `?__site=${encodeURIComponent(domain)}` : ""}`;
+    const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content/edit-common`;
     const res = await fetch(url, {
       method: "POST",
-      headers: internalHeaders(mcpToken, { agentSessionId: params.agent_session_id }),
+      headers: internalHeaders(mcpToken, { agentSessionId: params.agent_session_id, site: domain }),
       body: JSON.stringify({
         contentType: params.contentType,
         slug: params.slug,
@@ -694,10 +704,10 @@ async function callRefreshCacheApi(
   domain?: string,
 ): Promise<{ ok: boolean; knownUrlCount?: number; error?: string }> {
   try {
-    const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content/refresh-cache${domain ? `?__site=${encodeURIComponent(domain)}` : ""}`;
+    const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content/refresh-cache`;
     const res = await fetch(url, {
       method: "POST",
-      headers: internalHeaders(),
+      headers: internalHeaders(undefined, { site: domain }),
       body: JSON.stringify(contentType ? { contentType } : {}),
     });
     const data = await res.json() as { knownUrlCount?: number; error?: string };
@@ -723,10 +733,10 @@ async function callRenameSlugApi(
   domain?: string,
 ): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; error: McpTextResult }> {
   try {
-    const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content/rename-slug${domain ? `?__site=${encodeURIComponent(domain)}` : ""}`;
+    const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content/rename-slug`;
     const res = await fetch(url, {
       method: "POST",
-      headers: internalHeaders(mcpToken),
+      headers: internalHeaders(mcpToken, { site: domain }),
       body: JSON.stringify(params),
     });
     const data = await res.json() as Record<string, unknown>;
@@ -763,11 +773,11 @@ async function callCommitFilesApi(
 ): Promise<{ commitSha?: string; queued?: boolean; warning?: string; connectRequired?: boolean }> {
   if (files.length === 0) return {};
   try {
-    const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/github/commit${domain ? `?__site=${encodeURIComponent(domain)}` : ""}`;
+    const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/github/commit`;
     const author = mcpToken ? getTokenUsername(mcpToken) : undefined;
     const res = await fetch(url, {
       method: "POST",
-      headers: internalHeaders(mcpToken),
+      headers: internalHeaders(mcpToken, { site: domain }),
       body: JSON.stringify({
         queue: true,
         files,
@@ -833,7 +843,7 @@ async function checkRemoteConflict(
   domain?: string
 ): Promise<{ conflict: true; remoteContent: string } | { conflict: false }> {
   try {
-    const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/github/file-status?file=${encodeURIComponent(filePath)}${domain ? `&__site=${encodeURIComponent(domain)}` : ""}`;
+    const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/github/file-status?file=${encodeURIComponent(filePath)}`;
     const res = await fetch(url);
     if (!res.ok) return { conflict: false };
     const data = await res.json() as {
@@ -1168,7 +1178,6 @@ async function fetchCacheIssueRowsForQueue(
   filters: { severity?: string; category?: string; code?: string; includeCompleted?: boolean },
 ): Promise<{ rows: ReturnType<typeof cacheIssueRowsToQueueInput>; ok: boolean }> {
   const params = new URLSearchParams();
-  if (domain) params.set("__site", domain);
   if (filters.severity) params.set("severity", filters.severity);
   if (filters.category) params.set("category", filters.category);
   if (filters.code) params.set("code", filters.code);
@@ -1177,7 +1186,7 @@ async function fetchCacheIssueRowsForQueue(
   try {
     const res = await fetch(
       `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/cache-issues${qs}`,
-      { headers: internalHeaders() },
+      { headers: internalHeaders(undefined, { site: domain }) },
     );
     if (!res.ok) return { rows: [], ok: false };
     const data = (await res.json()) as { issues?: unknown[] };
@@ -1317,7 +1326,7 @@ export function registerPageTools(
     "Prefer bootstrap_agent once per MCP run before start (Claude.ai / Grok / any connector). " +
     "Required on role connectors (/mcp/role/…); optional on non-production plain /mcp (helps staff event trails). " +
     "start requires exact model (provider/model, e.g. claude/sonnet-4.5); if an open session exists for this username+role+client+site, retry with resume:true or force_new:true + report. " +
-    "start returns agent_session_id — required on every mutating tool. " +
+    "start returns agent_session_id (server-issued; do not pass one on start — any id you pass is ignored with warning start_ignores_agent_session_id; name a batch with label) — required on every mutating tool. " +
     "note/summarize require agent_session_id + report (min 80 chars). " +
     "summarize closes the run for the staff banner (last summarize wins). " +
     "Reports are staff-readable: for copy you set, list plain values (Title: …); no JSON/YAML dumps. " +
@@ -1327,8 +1336,12 @@ export function registerPageTools(
       action: z.enum(["start", "note", "summarize"]).describe("start | note | summarize"),
       agent_session_id: z
         .string()
-        .describe("Required for note/summarize. From start."),
-      label: z.string().optional().describe("Optional short label on start (e.g. Fix blog SEO batch)"),
+        .optional()
+        .describe("Omit on start. Required for note/summarize: the agent_session_id returned by start."),
+      label: z
+        .string()
+        .optional()
+        .describe("Optional short label on start (e.g. Fix blog SEO batch). Use it to name a batch of work."),
       report: z
         .string()
         .optional()
@@ -1352,13 +1365,12 @@ export function registerPageTools(
       if (!siteResult.ok) return siteFailResult(siteResult.error);
       const { domain } = siteResult;
       try {
-        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/admin/agent-sessions/checkpoint${
-          domain ? `?__site=${encodeURIComponent(domain)}` : ""
-        }`;
+        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/admin/agent-sessions/checkpoint`;
         const res = await fetch(url, {
           method: "POST",
           headers: internalHeaders(mcpToken, {
-            agentSessionId: agent_session_id,
+            agentSessionId: action === "start" ? undefined : agent_session_id,
+            site: domain,
             ...(model && isExactAgentModel(model) ? { model } : {}),
           }),
           body: JSON.stringify({
@@ -1450,7 +1462,22 @@ export function registerPageTools(
           }
           return fail(String(data.error ?? `agent_session failed (${res.status})`), { code });
         }
-        const sid = String(data.agent_session_id ?? agent_session_id ?? "");
+        const sid =
+          action === "start"
+            ? typeof data.agent_session_id === "string"
+              ? data.agent_session_id.trim()
+              : ""
+            : String(data.agent_session_id ?? agent_session_id ?? "");
+        if (action === "start" && !isServerAgentSessionId(sid)) {
+          return fail("agent_session start did not return a server-issued agent_session_id — retry start", {
+            code: "agent_session_failed",
+          });
+        }
+        const serverWarnings = Array.isArray(data.warnings)
+          ? (data.warnings as Array<{ code?: unknown; message?: unknown }>)
+              .filter((w) => typeof w?.code === "string" && typeof w?.message === "string")
+              .map((w) => ({ code: String(w.code), message: String(w.message) }))
+          : [];
         const sessionModel =
           (typeof data.model === "string" && data.model.trim()) ||
           (model && isExactAgentModel(model) ? model.trim() : "");
@@ -1489,7 +1516,7 @@ export function registerPageTools(
                   : "Session note recorded.",
           },
           {
-            warnings: [],
+            warnings: serverWarnings,
             side_effects: [
               {
                 kind: "pipeline_event",
@@ -1524,7 +1551,8 @@ export function registerPageTools(
     "list_entries",
     "Unified entry inventory for every content type (static YAML and catalog/DB-sourced alike — cache + overrides resolve the same way site cards do). " +
     "Without contentType: returns per-type counts (type_stats) plus next_actions to narrow — does not dump a combined entry feed. " +
-    "With contentType: paginated one-row-per-slug entries (locales/urls merged). " +
+    "With contentType: paginated one row per page: entry_id (page ID = folder; stable), slug (default-language address), locale_slugs { locale: address }, locales, urls. " +
+    "Every entry tool accepts entry_id or any locale_slugs value (any spelling); a language's slug serves that language. " +
     "Optional detail:true adds safe non-body scalars (never full content/readme). " +
     "Optional filters (AND, entry mode): locale (strict — slug must have that locale), slugs, search, " +
     "funnel_stage / funnel_product / is_money_page (overlay _common.yml funnel; missing file = untagged). " +
@@ -1535,8 +1563,8 @@ export function registerPageTools(
     {
       contentType: z.string().optional().describe("Restrict to one content type for entry rows, e.g. 'program', 'blog', or 'interactive-exercise'. Omit for type_stats."),
       locale: z.string().optional().describe("Only return entries that have this locale available, e.g. 'en' or 'es'"),
-      slugs: z.array(z.string()).optional().describe("Restrict to a specific list of slugs"),
-      search: z.string().optional().describe("Case-insensitive substring match against slug and title"),
+      slugs: z.array(z.string()).optional().describe("Restrict to these pages: page IDs or any language's address, any spelling"),
+      search: z.string().optional().describe("Substring match against the page ID, every language's address (any spelling) and title"),
       page: z.number().int().positive().optional().describe("Entry-mode page (default 1)"),
       limit: z.number().int().positive().max(200).optional().describe("Entry-mode page size (default 50, max 200)"),
       detail: z
@@ -1612,7 +1640,7 @@ export function registerPageTools(
         ? allTypeNames.filter((t) => allowedTypes.has(t))
         : allTypeNames;
 
-      const fetchItems = createDefaultFetchItems(MAIN_SERVER_PORT, internalHeaders(mcpToken));
+      const fetchItems = createDefaultFetchItems(MAIN_SERVER_PORT, internalHeaders(mcpToken, { site: domain }));
 
       // Stats mode — no contentType
       if (!contentType) {
@@ -1840,7 +1868,7 @@ export function registerPageTools(
 
   type PagePayloadError = { content: [{ type: "text"; text: string }]; isError: true };
 
-  function resolvePagePayload(slug: string, locale: string, contentType: string | undefined, contentPath: string): PagePayload | PagePayloadError {
+  function resolvePagePayload(tool: string, slug: string, locale: string, contentType: string | undefined, contentPath: string): PagePayload | PagePayloadError {
     try {
       assertSafeSegment(slug, "slug");
       assertSafeLocale(locale);
@@ -1854,7 +1882,15 @@ export function registerPageTools(
     }
     const result = loadPage(resolved.contentType, slug, locale, contentPath);
     if (!result) {
-      return { content: [{ type: "text", text: `Locale '${locale}' not found for page '${slug}' (contentType: ${resolved.contentType}).${entryNotFoundNote(resolved.contentType, contentPath)}` }], isError: true };
+      return missingLocaleFail({
+        tool,
+        mode: "read",
+        contentType: resolved.contentType,
+        slug,
+        locale,
+        contentPath,
+        note: entryNotFoundNote(resolved.contentType, contentPath),
+      }) as PagePayloadError;
     }
 
     const pageDir = path.join(contentPath, getDirectory(resolved.contentType, resolved.config), slug);
@@ -1916,7 +1952,7 @@ export function registerPageTools(
     "Use get_entry_seo to fetch only the SEO/meta fields. Requires content_view. " +
     "Supply 'variant' to read a draft variant file ({variantSlug}.{locale}.yml) instead of the live locale file.",
     {
-      slug: z.string().describe("Page slug (folder name), e.g. 'home' or 'full-stack-developer'"),
+      slug: z.string().describe("Page ID (entry_id) or any of its slugs, e.g. 'home' or 'array-vacio-javascript'. A language's slug serves that language unless locale is passed."),
       locale: z.string().default("en").describe("Locale code, e.g. 'en' or 'es'"),
       contentType: z.string().optional().describe("Content type hint (e.g. 'page', 'program'). Omit to auto-detect from slug."),
       variant: z.string().optional().describe("Variant slug to read (e.g. 'draft-v2'). When provided, reads {variantSlug}.{locale}.yml instead of the live locale file."),
@@ -1955,7 +1991,7 @@ export function registerPageTools(
         return { content: [{ type: "text", text: JSON.stringify({ contentType: resolved.contentType, slug, locale, variant, ...layout, ...merged, deprecated_fields_present, validation_issues: [], claimed_issues: [], completed_issues: [], validation_pending: false }, null, 2) }] };
       }
 
-      const payload = resolvePagePayload(slug, locale, contentType, contentPath);
+      const payload = resolvePagePayload("get_entry_content", slug, locale, contentType, contentPath);
       if ("isError" in payload) return payload;
       const viewDeniedLive = await denyUnlessContentView(mcpToken, payload.contentType, grants);
       if (viewDeniedLive) return viewDeniedLive;
@@ -2008,7 +2044,7 @@ export function registerPageTools(
     "Cluster SEO writes are allowed only on live or draft when the entry has no live locales yet — A/B variants are read-only for seo:. " +
     "Variants skip search_engines (live URLs only); re-call without variant to read engine status.",
     {
-      slug: z.string().describe("Page slug (folder name), e.g. 'home' or 'full-stack-developer'"),
+      slug: z.string().describe("Page ID (entry_id) or any of its slugs, e.g. 'home' or 'array-vacio-javascript'. A language's slug serves that language unless locale is passed."),
       locale: z.string().default("en").describe("Locale code, e.g. 'en' or 'es'"),
       contentType: z.string().optional().describe("Content type hint (e.g. 'page', 'program'). Omit to auto-detect from slug."),
       variant: z.string().optional().describe("Variant slug to read (e.g. 'draft-v2'). When provided, reads {variantSlug}.{locale}.yml instead of the live locale file."),
@@ -2155,7 +2191,7 @@ export function registerPageTools(
         };
       }
 
-      const payload = resolvePagePayload(slug, locale, contentType, contentPath);
+      const payload = resolvePagePayload("get_entry_seo", slug, locale, contentType, contentPath);
       if ("isError" in payload) return payload;
       const seoDeniedLive = await denyUnlessContentViewOrSeo(mcpToken, payload.contentType, grants);
       if (seoDeniedLive) return seoDeniedLive;
@@ -2277,7 +2313,8 @@ export function registerPageTools(
     "release (drop your claim or staff release — requires report min 80 when an active claim exists; idempotent no-op if already unclaimed), " +
     "complete (re-validates the entry — or seo-duplicates for DUPLICATE_* — then soft-completes only if the issue_id is gone; " +
     "also lists auto_completed_ids for sibling issues on that entry cleared by the same revalidation; refuses with complete_rejected_still_open + prior_attempts if still failing), " +
-    "uncomplete (reopen). " +
+    "uncomplete (reopen), " +
+    "mark_link_ok (EXTERNAL_LINK_GONE / EXTERNAL_LINK_UNREACHABLE only: record that the URL works for visitors — applies to every page using that URL; requires report min 40 chars with your evidence; use only when you verified the link opens the cited content). " +
     "MCP-only: claim requires report (why you are taking this issue + what you plan to change; min 80 chars; optional when refreshing your own claim). " +
     "complete requires why + highlights (goal + biggest deltas; not JSON/YAML dumps). " +
     "release requires report when releasing an active claim (what you tried + why stopping; stored as prior_attempts for the next agent). " +
@@ -2293,8 +2330,8 @@ export function registerPageTools(
     {
       issue_id: z.string().describe("Stable issue id from validation_issues[].id"),
       action: z
-        .enum(["claim", "release", "complete", "uncomplete"])
-        .describe("claim | release | complete | uncomplete"),
+        .enum(["claim", "release", "complete", "uncomplete", "mark_link_ok"])
+        .describe("claim | release | complete | uncomplete | mark_link_ok (EXTERNAL_LINK_GONE / EXTERNAL_LINK_UNREACHABLE only)"),
       site: z.string().optional().describe(SITE_PARAM_DESC),
       model: z
         .string()
@@ -2328,6 +2365,71 @@ export function registerPageTools(
       const { domain } = siteResult;
 
       let trimmedReport = typeof report === "string" ? report.trim() : "";
+      if (action === "mark_link_ok") {
+        if (trimmedReport.length < 40) {
+          return actionRequired(
+            {
+              success: false,
+              action_required: "report_required",
+              code: trimmedReport ? "report_too_short" : "report_required",
+              message:
+                "mark_link_ok requires report (min 40 chars): the evidence that the link works for visitors (e.g. what you opened and what it showed).",
+            },
+            [],
+          );
+        }
+        const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
+        const res = await fetch(`http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/link-status/verify-ok${q}`, {
+          method: "POST",
+          headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id }),
+          body: JSON.stringify({ issueId: issue_id, reason: trimmedReport }),
+        }).catch((err: unknown) => err as Error);
+        if (res instanceof Error) return fail(`mark_link_ok failed: ${res.message}`, { code: "mark_link_ok_failed" });
+        const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        if (!res.ok) {
+          return fail(String(data.error ?? `mark_link_ok failed (${res.status})`), {
+            code: typeof data.code === "string" ? data.code : "mark_link_ok_failed",
+            status: res.status,
+          });
+        }
+        const entryKeys = Array.isArray(data.entry_keys) ? (data.entry_keys as string[]) : [];
+        return ok(
+          {
+            issue_id,
+            action,
+            url: data.url,
+            entry_keys: entryKeys,
+            cleared_issue_ids: data.cleared_issue_ids ?? [],
+            verified_ok: (data.record as { verified_ok?: unknown } | null)?.verified_ok ?? null,
+          },
+          {
+            side_effects: [
+              {
+                kind: "link_status_verified_ok",
+                summary: `Marked ${String(data.url)} as working for ${entryKeys.length} entr${entryKeys.length === 1 ? "y" : "ies"}; re-ran external-links for them`,
+                paths: [`${siteResult.contentFolder}/link-status.json`],
+              },
+            ],
+            warnings: [
+              {
+                code: "applies_to_all_pages_using_url",
+                message:
+                  "Applies site-wide to this URL: no page using it is flagged for EXTERNAL_LINK_GONE / EXTERNAL_LINK_UNREACHABLE until the mark is removed (staff: Diagnostics or DELETE /api/validation/link-status/verify-ok).",
+              },
+              {
+                code: "mark_dropped_when_unused",
+                message:
+                  "The mark is dropped when no live page uses the URL any more (site-wide diagnostics prune), so a link removed and added back later is checked again.",
+              },
+              {
+                code: "no_content_change",
+                message: "Does not edit YAML or push GitHub; only link-status.json and this environment's validation cache.",
+              },
+            ],
+            next_actions: [],
+          },
+        );
+      }
       if (action === "complete") {
         const whyS = sanitizeWhy(why);
         const hl = sanitizeHighlights(highlights);
@@ -2372,14 +2474,12 @@ export function registerPageTools(
           [],
         );
       }
-
-      const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
       try {
         const res = await fetch(
-          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/cache-issues/update${q}`,
+          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/cache-issues/update`,
           {
             method: "POST",
-            headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id }),
+            headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id, site: domain }),
             body: JSON.stringify({
               issueId: issue_id,
               action,
@@ -2569,15 +2669,13 @@ export function registerPageTools(
       } catch (e) {
         return fail((e as Error).message);
       }
-
-      const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
       const forceOverwrite = overwrite === true;
       try {
         const res = await fetch(
-          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(content_type)}/entry-previews/enqueue${q}`,
+          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(content_type)}/entry-previews/enqueue`,
           {
             method: "POST",
-            headers: { ...internalHeaders(mcpToken, { agentSessionId: agent_session_id }), "Content-Type": "application/json" },
+            headers: { ...internalHeaders(mcpToken, { agentSessionId: agent_session_id, site: domain }), "Content-Type": "application/json" },
             body: JSON.stringify({
               locales,
               mode: mode ?? "missing",
@@ -2707,7 +2805,9 @@ export function registerPageTools(
     "non_effects: entry/slug runs do not refresh redirects/slug-conflicts/sitemap/seo-duplicates; fixing meta does not clear REDIRECT_CONFLICT or DUPLICATE_TITLE; " +
     "does not change staff Diagnostics HTTP payloads. Empty issues without lastFullRunAt means cache_miss, not clean. After edits prefer freshness 'hard' + one slug then poll get_diagnostics_job. " +
     "In-app / MCP content writes debounce entry-local validation for 1 minute; redirect-config changes queue redirects separately. " +
-    "When get_entry_* returns validation_pending:true, cache may lag until that debounce settles.",
+    "When get_entry_* returns validation_pending:true, cache may lag until that debounce settles. " +
+    "External links: on the live server, recompute jobs first re-check due external URLs (site-wide: up to 300 new or >7-day-old; one slug + hard: that page's URLs now) into link-status.json; " +
+    "EXTERNAL_LINK_GONE / EXTERNAL_LINK_UNREACHABLE need two dead results ≥3 days apart (explain_site seo). Cached responses include external_link_coverage.",
     {
       slugs: z.array(z.string()).optional().describe("Optional page slugs to scope. Any slug count that needs a recompute starts an async job (poll get_diagnostics_job). Omit for site-wide (needs confirm:true)."),
       categories: z
@@ -2770,7 +2870,6 @@ export function registerPageTools(
       const siteResult = resolveSiteContext(site);
       if (!siteResult.ok) return siteFailResult(siteResult.error);
       const { domain } = siteResult;
-      const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
       const validators = mcpValidatorsFromCategories(categories);
       const requestBody = {
         slugs: slugs && slugs.length > 0 ? slugs : undefined,
@@ -2806,10 +2905,10 @@ export function registerPageTools(
       };
       try {
         const res = await fetch(
-          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/diagnostics-jobs${q}`,
+          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/diagnostics-jobs`,
           {
             method: "POST",
-            headers: internalHeaders(),
+            headers: internalHeaders(undefined, { site: domain }),
             body: JSON.stringify(requestBody),
           },
         );
@@ -2929,11 +3028,19 @@ export function registerPageTools(
                 "open_issues[] is a ranked page of the open work queue (default 50). Soft-completed and other-author claims are excluded unless issue_status is completed, claimed, or all. Use open_issues_offset/open_issues_next_offset to page; full set remains in validation-cache / staff Diagnostics.",
             });
           }
+          const coverageRes = await fetch(
+            `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/link-status/coverage${domain ? `?__site=${encodeURIComponent(domain)}` : ""}`,
+            { headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id }) },
+          ).catch(() => null);
+          const coverageBody = coverageRes?.ok
+            ? ((await coverageRes.json().catch(() => null)) as { external_links?: unknown } | null)
+            : null;
           return ok(
             {
               status: "cached",
               ...diagnosticsIssueQueueFields(queue),
               lastFullRunAtBySlug: data.lastFullRunAtBySlug ?? {},
+              ...(coverageBody?.external_links ? { external_link_coverage: coverageBody.external_links } : {}),
               cache_misses: cacheMisses,
               message: cacheMisses.length
                 ? "Returned cache work queue; some slugs have no lastFullRunAt (cache_miss — not necessarily clean)."
@@ -3022,7 +3129,6 @@ export function registerPageTools(
       const siteResult = resolveSiteContext(site);
       if (!siteResult.ok) return siteFailResult(siteResult.error);
       const { domain } = siteResult;
-      const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
       const issueArgsHint = {
         job_id,
         ...(site ? { site } : {}),
@@ -3033,8 +3139,8 @@ export function registerPageTools(
       };
       try {
         const res = await fetch(
-          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/diagnostics-jobs/${encodeURIComponent(job_id)}${q}`,
-          { headers: internalHeaders() },
+          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/diagnostics-jobs/${encodeURIComponent(job_id)}`,
+          { headers: internalHeaders(undefined, { site: domain }) },
         );
         const data = await res.json() as Record<string, unknown>;
 
@@ -3211,6 +3317,7 @@ export function registerPageTools(
   const META_LOCALE_FIELDS = new Set([
     "page_title", "description", "og_image", "og_type",
     "og_url", "og_locale", "canonical_url",
+    "robots", "priority", "change_frequency",
   ]);
   const ALL_KNOWN_META_FIELDS = new Set([...META_COMMON_FIELDS, ...META_LOCALE_FIELDS]);
 
@@ -3253,8 +3360,8 @@ export function registerPageTools(
     "on=true needs non-empty seo.pillar_path or seo.is_pillar:true after merge; on=false → pillar_path:null + is_pillar:false; " +
     "raw seo.pillar_path:null still opts out (warns). While ORPHAN_PAGE / PARTIALLY_SET_CLUSTER is open, " +
     "becoming a hub (is_pillar) or opting out requires confirm_cluster_resolution: true (joining a hub does not). " +
-    "Page-level fields (fixed system rule, fieldScope: funnel.*, meta.robots|priority|change_frequency, published_at, detached, authors) → _common.yml (all languages; warning); " +
-    "everything else (incl. unknown meta.*) → locale. meta_target is ignored (warning).\n\n" +
+    "Page-level fields (fixed system rule, fieldScope: funnel.*, published_at, detached, authors) → _common.yml (all languages; warning); " +
+    "everything else (incl. meta.robots|priority|change_frequency, which are per language, and unknown meta.*) → locale. meta_target is ignored (warning).\n\n" +
     "Live gate: live writes need meta.page_title + meta.description; editor.required cannot be cleared on live. Drafts exempt.\n" +
     "CIRCULAR TRAP: if both meta.description and body description are empty, set BOTH in this one updates[] call.\n\n" +
     "funnel.stage / funnel.products (and funnel / reset:true) write page _common.yml journey membership. " +
@@ -3337,6 +3444,30 @@ export function registerPageTools(
         if (variant) assertSafeSegment(variant, "variant");
       } catch (e) {
         return fail((e as Error).message);
+      }
+
+      if (inputUpdates.some(touchesMetaRedirects)) {
+        return fail(
+          "meta.redirects (the page's old addresses) cannot be written with update_fields. Use update_redirect: live (edit_redirects) or variant for a draft (seo_edit).",
+          {
+            code: "meta_redirects_use_update_redirect",
+            field_paths: inputUpdates.filter(touchesMetaRedirects).map((u) => u.field_path),
+            next_actions: [
+              {
+                tool: "update_redirect",
+                priority: "required",
+                reason: "One old address per call; pass variant + content_type + slug + locale to stage it on a draft.",
+                args_hint: {
+                  action: "add",
+                  ...(variant
+                    ? { variant, content_type: contentType, slug, locale }
+                    : {}),
+                  ...(site ? { site } : {}),
+                },
+              },
+            ],
+          },
+        );
       }
 
       let updates = inputUpdates;
@@ -3623,7 +3754,6 @@ export function registerPageTools(
 
       if (resetUpdates.length > 0) {
         const ct = resolved.contentType;
-        const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
         const resetResults: Array<{
           field_path: string;
           noop: boolean;
@@ -3632,10 +3762,10 @@ export function registerPageTools(
         }> = [];
         for (const u of resetUpdates) {
           try {
-            const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(ct)}/field-reset/${encodeURIComponent(slug)}${q}`;
+            const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(ct)}/field-reset/${encodeURIComponent(slug)}`;
             const res = await fetch(url, {
               method: "POST",
-              headers: internalHeaders(mcpToken),
+              headers: internalHeaders(mcpToken, { site: domain }),
               body: JSON.stringify({ field: u.field_path, locale, variant: variant || undefined }),
             });
             const data = await res.json() as {
@@ -3974,6 +4104,9 @@ export function registerPageTools(
       const commonRelPath = `${contentFolder}/${ctDir}/${slug}/_common.yml`;
 
       if (localeEntries.length > 0 && !fs.existsSync(pathInfo.filePath)) {
+        if (!variant && layoutTarget === "entry") {
+          return missingLocaleFail({ tool: "update_fields", mode: "write", contentType: resolved.contentType, slug, locale, contentPath });
+        }
         return fail(`File not found: ${pathInfo.relativeHint}`);
       }
 
@@ -4447,6 +4580,23 @@ export function registerPageTools(
         const p = u.field_path.startsWith("meta.") ? u.field_path : u.field_path;
         return p.startsWith("meta.") || (!isFunnelFieldPath(p) && !p.startsWith("sections."));
       });
+      if (updates.some(touchesMetaRedirects)) {
+        return fail(
+          "meta.redirects (old addresses) cannot be bulk-written. Use update_redirect, one address per call.",
+          {
+            code: "meta_redirects_use_update_redirect",
+            field_paths: updates.filter(touchesMetaRedirects).map((u) => u.field_path),
+            next_actions: [
+              {
+                tool: "update_redirect",
+                priority: "required",
+                reason: "Live: edit_redirects. Draft: pass variant + content_type + slug + locale (seo_edit).",
+                args_hint: { action: "add", ...(site ? { site } : {}) },
+              },
+            ],
+          },
+        );
+      }
       for (const u of updates) {
         const p = u.field_path;
         if (p.startsWith("sections.") || (!p.startsWith("meta.") && !isFunnelFieldPath(p) && !ALL_KNOWN_META_FIELDS.has(p))) {
@@ -4490,12 +4640,10 @@ export function registerPageTools(
       }
 
       try {
-        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content/bulk-update-entry-attributes${
-          domain ? `?__site=${encodeURIComponent(domain)}` : ""
-        }`;
+        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content/bulk-update-entry-attributes`;
         const res = await fetch(url, {
           method: "POST",
-          headers: internalHeaders(mcpToken),
+          headers: internalHeaders(mcpToken, { site: domain }),
           body: JSON.stringify({
             slugs,
             locale,
@@ -4551,6 +4699,9 @@ export function registerPageTools(
           }
           if (w.includes("funnel_locale_agnostic")) {
             warnings.push({ code: "funnel_locale_agnostic", message: w });
+          }
+          if (w.includes("tracking_values_too_long")) {
+            warnings.push({ code: "tracking_values_too_long", message: w });
           }
         }
 
@@ -4719,7 +4870,6 @@ export function registerPageTools(
       const ctDir = getDirectory(ct, resolved.config);
       const dbSlug = resolved.config.database?.slug as string | undefined;
       const defaultStorage = mappedFieldsStorageFor(ct, siteResult.contentPath);
-      const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
       const getHint = {
         tool: "get_entry_fields",
         reason: "Re-check provenance after write",
@@ -4738,10 +4888,10 @@ export function registerPageTools(
           const layerFile = variant ? `${variant}.${locale}.yml` : `${locale}.yml`;
           const dbPath = `db/${dbSlug || "<database>"}/overrides.json`;
           const ctPath = `${ctDir}/${slug}/${layerFile}`;
-          const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(ct)}/field-reset/${encodeURIComponent(slug)}${q}`;
+          const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(ct)}/field-reset/${encodeURIComponent(slug)}`;
           const res = await fetch(url, {
             method: "POST",
-            headers: internalHeaders(mcpToken),
+            headers: internalHeaders(mcpToken, { site: domain }),
             body: JSON.stringify({ field, locale, variant: variant || undefined }),
           });
           const data = await res.json() as {
@@ -4801,10 +4951,10 @@ export function registerPageTools(
 
         if (level === "database") {
           const relPath = `db/${dbSlug || "<database>"}/overrides.json`;
-          const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(ct)}/db-overrides/${encodeURIComponent(slug)}${q}`;
+          const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(ct)}/db-overrides/${encodeURIComponent(slug)}`;
           const res = await fetch(url, {
             method: "PUT",
-            headers: internalHeaders(mcpToken),
+            headers: internalHeaders(mcpToken, { site: domain }),
             body: JSON.stringify({ fields: { [field]: value } }),
           });
           const data = await res.json() as { error?: string };
@@ -4834,10 +4984,10 @@ export function registerPageTools(
 
         const layerFile = variant ? `${variant}.${locale}.yml` : `${locale}.yml`;
         const relPathFallback = `${ctDir}/${slug}/${layerFile}`;
-        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(ct)}/field-overrides/${encodeURIComponent(slug)}${q}`;
+        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(ct)}/field-overrides/${encodeURIComponent(slug)}`;
         const res = await fetch(url, {
           method: "PUT",
-          headers: internalHeaders(mcpToken),
+          headers: internalHeaders(mcpToken, { site: domain }),
           body: JSON.stringify({
             locale,
             variant: variant || undefined,
@@ -4987,7 +5137,10 @@ export function registerPageTools(
   mcp.tool(
     "get_entry_fields",
     "Inspect mapping fields with effective value and provenance " +
-    "(original | db_override | ct_override | entry_default). " +
+    "(original | db_override | ct_override | entry_default). entry_default = the page's own YAML value (no override), not a type fallback. " +
+    "YAML-backed rows add stored_in (locale_file | draft_file | page_common | type_template | not_set) + stored_in_path = the file the shown value comes from; " +
+    "also_in[] = other files holding a shadowed copy (locale_file + page_common for a page-level field = legacy copy publish drops → display_values_change); " +
+    "publishes_to: page_common = page-level field (funnel, authors, published_at, detached) staged in a draft → applies to all languages on publish. " +
     "Requires non-empty fields: string[] of field paths (e.g. title, seo.refresh_tier). " +
     "Omit fields or pass [] → action_required select_fields with available_fields names only (no values). " +
     "Unknown names reject the whole call (catalog + unknown_fields). " +
@@ -5085,11 +5238,10 @@ export function registerPageTools(
 
       const requestedSet = new Set(requested);
       const q = new URLSearchParams({ locale });
-      if (domain) q.set("__site", domain);
       if (variant) q.set("variant", variant);
       try {
-        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(resolved.contentType)}/field-provenance/${encodeURIComponent(slug)}?${q}`;
-        const res = await fetch(url, { headers: internalHeaders(mcpToken) });
+        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(resolved.contentType)}/field-provenance/${encodeURIComponent(slug)}?`;
+        const res = await fetch(url, { headers: internalHeaders(mcpToken, { site: domain }) });
         const data = await res.json();
         if (!res.ok) return fail((data as { error?: string }).error || `Server error: ${res.status}`);
 
@@ -5241,6 +5393,9 @@ export function registerPageTools(
     "List extra versions (drafts/A-B variants) for a page: slug, traffic allocation, locale. " +
     "Live-only pages have no versioning.yml: hasVersioning is false, variants is [], live_locales lists published locales — that is not unpublished. " +
     "versioning.yml is created by create_variant, not by hand; extra versions start at 0% traffic. " +
+    "unregistered_variants lists variant files versioning.yml is missing (no traffic until staff register them). " +
+    "started_at gives each locale's test run date. Warnings cover page tests: ab_testing_not_setup, ab_check_failing, " +
+    "variant_assignment_sticky (visitors keep their version; allocation is staff-only), split_mismatch (results unreliable). " +
     "Use before create_variant or editing an existing draft. Requires content_view.",
     {
       contentType: z.string().describe("Content type, e.g. 'program', 'page', 'landing'"),
@@ -5262,8 +5417,8 @@ export function registerPageTools(
 
       try {
         const versioningSlug = versioningApiSlug(contentType, slug, contentPath);
-        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/versioning/${encodeURIComponent(contentType)}/${encodeURIComponent(versioningSlug)}${domain ? `?__site=${encodeURIComponent(domain)}` : ""}`;
-        const res = await fetch(url, { headers: internalHeaders(mcpToken) });
+        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/versioning/${encodeURIComponent(contentType)}/${encodeURIComponent(versioningSlug)}`;
+        const res = await fetch(url, { headers: internalHeaders(mcpToken, { site: domain }) });
         const data = await res.json() as Record<string, unknown>;
         if (!res.ok) {
           return fail((data.error as string) || `Server error: ${res.status}`);
@@ -5273,6 +5428,20 @@ export function registerPageTools(
           .filter(([, isLive]) => isLive)
           .map(([loc]) => loc);
         const hasLiveDefault = data.hasLiveDefault === true;
+        const unregistered_variants =
+          (data.unregisteredVariants as Array<{ locale: string; slug: string; fileName: string }> | undefined) ?? [];
+        const unregisteredWarnings = unregistered_variants.length
+          ? [
+              {
+                code: "unregistered_variant_files",
+                message:
+                  `${unregistered_variants.length} variant file(s) exist but versioning.yml does not list them: ` +
+                  unregistered_variants.map((v) => `${contentType}/${versioningSlug}/${v.fileName}`).join(", ") +
+                  ". They get no traffic and cannot be promoted or allocated until listed. Staff fix: Versions panel → Add to versions (0%), " +
+                  "or the register-unlisted-variants validation fixer. Live content does not change. Do not create a variant with the same slug (409).",
+              },
+            ]
+          : [];
         if (!data.hasVersioningFile || !data.versioning) {
           const unpublished = !hasLiveDefault;
           return ok(
@@ -5287,9 +5456,10 @@ export function registerPageTools(
               hasLiveDefault,
               live_locales,
               variants: [],
+              unregistered_variants,
             },
             {
-              warnings: unpublished
+              warnings: [...unregisteredWarnings, ...(unpublished
                 ? [
                     {
                       code: "unpublished",
@@ -5313,15 +5483,28 @@ export function registerPageTools(
                       code: "zero_traffic_on_create",
                       message: "Extra versions start at 0% traffic. Live YAML is unchanged until promote_variant.",
                     },
-                  ],
+                  ])],
               next_actions: [],
             },
           );
         }
-        const versioning = data.versioning as Record<string, { variants?: Array<{ slug: string; allocation: number }> }>;
+        const versioning = data.versioning as Record<
+          string,
+          { variants?: Array<{ slug: string; allocation: number }>; started_at?: string }
+        >;
         const variants = Object.entries(versioning).flatMap(([locale, localeData]) =>
           (localeData.variants || []).map(v => ({ locale, slug: v.slug, allocation: v.allocation }))
         );
+        const started_at = Object.fromEntries(
+          Object.entries(versioning)
+            .filter(([, localeData]) => typeof localeData.started_at === "string")
+            .map(([locale, localeData]) => [locale, localeData.started_at as string]),
+        );
+        const abWarnings = abTestingWarnings({
+          versioning,
+          ab_testing: data.ab_testing as { set_up?: boolean; latest_check_ok?: boolean } | undefined,
+          split_health: data.split_health as Parameters<typeof abTestingWarnings>[0]["split_health"],
+        });
         return ok(
           {
             message: `Found ${variants.length} extra version(s).`,
@@ -5331,8 +5514,10 @@ export function registerPageTools(
             hasLiveDefault,
             live_locales,
             variants,
+            ...(Object.keys(started_at).length ? { started_at } : {}),
+            unregistered_variants,
           },
-          { warnings: [], next_actions: [] },
+          { warnings: [...unregisteredWarnings, ...abWarnings], next_actions: [] },
         );
       } catch (e) {
         return fail(`Failed to list variants: ${(e as Error).message}`);
@@ -5478,10 +5663,10 @@ export function registerPageTools(
           );
         }
 
-        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/versioning/${encodeURIComponent(contentType)}/${encodeURIComponent(versioningSlug)}${domain ? `?__site=${encodeURIComponent(domain)}` : ""}`;
+        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/versioning/${encodeURIComponent(contentType)}/${encodeURIComponent(versioningSlug)}`;
         const res = await fetch(url, {
           method: "POST",
-          headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id }),
+          headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id, site: domain }),
           body: JSON.stringify({ variantSlug, locale, ...(sourceVariant ? { sourceVariant } : {}) }),
         });
         const data = await res.json() as Record<string, unknown>;
@@ -5658,9 +5843,10 @@ export function registerPageTools(
     "Also fails when resolved meta.page_title / meta.description are empty, when editor.required fields " +
     "(e.g. blog title + description) are empty, or when a detached locale would go live empty (EMPTY_LOCALE: no sections and no content). " +
     "Confirm with the user before calling — this makes the page live. " +
-    "Page-level fields in the draft (funnel, meta.robots/priority/change_frequency, published_at, authors) move to _common.yml (all languages); null on those fields deletes them. " +
+    "Page-level fields in the draft (funnel, published_at, authors, detached) move to _common.yml (all languages); null on those fields deletes them. meta.robots/priority/change_frequency are per language. " +
     "Rejections: proposal_required (swarm roles), draft_in_proposal (draft under an open proposal — apply that proposal instead), translation_source_changed, " +
     "draft_base_stale / draft_base_unknown (retry with confirm_overwrite_newer_live only after the user agrees), " +
+    "display_values_change (a live locale file still holds a legacy page-level copy that publish drops; details.fields before → after; confirm_display_change after the user agrees), " +
     "render_review_required (entry-owned page layout never reviewed or restructured since — run review_page_render on the draft first). " +
     "On success, next_actions requires run_entry_diagnostics (hard + one slug → job_id; poll get_diagnostics_job).",
     {
@@ -5675,6 +5861,10 @@ export function registerPageTools(
         .boolean()
         .optional()
         .describe("Publish translations whose source locale changed after translating (ask the user first)."),
+      confirm_display_change: z
+        .boolean()
+        .optional()
+        .describe("After display_values_change: publish even though a language will show the _common.yml value instead of its legacy locale copy (ask the user first)."),
       report: z
         .string()
         .describe(AGENT_REPORT_MUTATE_DESC),
@@ -5683,7 +5873,7 @@ export function registerPageTools(
         .describe("Required. From agent_session start."),
       site: z.string().optional().describe(SITE_PARAM_DESC),
     },
-    async ({ contentType, slug, variantSlug, confirm_overwrite_newer_live, confirm_source_changed, report, agent_session_id, site }) => {
+    async ({ contentType, slug, variantSlug, confirm_overwrite_newer_live, confirm_source_changed, confirm_display_change, report, agent_session_id, site }) => {
       const siteResult = resolveSiteContext(site);
       if (!siteResult.ok) return siteFailResult(siteResult.error);
 
@@ -5730,15 +5920,16 @@ export function registerPageTools(
       try {
         // Entry slug as-is (same as promote_variant) — do not remap attached entries to "single".
         const versioningSlug = slug;
-        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/versioning/${encodeURIComponent(contentType)}/${encodeURIComponent(versioningSlug)}/publish${domain ? `?__site=${encodeURIComponent(domain)}` : ""}`;
+        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/versioning/${encodeURIComponent(contentType)}/${encodeURIComponent(versioningSlug)}/publish`;
         const res = await fetch(url, {
           method: "POST",
-          headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id }),
+          headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id, site: domain }),
           body: JSON.stringify({
             variantSlug,
             report: trimmedReport,
             ...(confirm_overwrite_newer_live ? { confirm_overwrite_newer_live: true } : {}),
             ...(confirm_source_changed ? { confirm_source_changed: true } : {}),
+            ...(confirm_display_change ? { confirm_display_change: true } : {}),
           }),
         });
         const data = await res.json() as Record<string, unknown>;
@@ -5763,6 +5954,15 @@ export function registerPageTools(
               locale: typeof data.locale === "string" ? data.locale : undefined,
               variant: variantSlug,
               publish: true,
+            });
+          }
+          if (serverCode === CONSENT_REQUIRED_CODE) {
+            return consentRequiredResult(errMsg, data, {
+              slug,
+              contentType,
+              locale: typeof data.locale === "string" ? data.locale : undefined,
+              variant: variantSlug,
+              retryTool: "publish_draft",
             });
           }
           if (serverCode === THEME_COLORS_CODE) {
@@ -5856,11 +6056,13 @@ export function registerPageTools(
     "Promote a variant to become the live version for ONE locale: overwrites the default locale file with the variant's content, " +
     "removes the variant from versioning.yml (deletes versioning.yml when it empties), and deletes the variant file. " +
     "A draft seo: block replaces live seo:; drafts without seo: keep live seo:. " +
-    "Page-level fields (funnel, meta.robots/priority/change_frequency, published_at, authors) move to _common.yml (all languages); null on those fields deletes them. " +
+    "Page-level fields (funnel, published_at, authors, detached) move to _common.yml (all languages); null on those fields deletes them. meta.robots/priority/change_frequency are per language. " +
     "If live changed after the draft was created, non-overlapping edits are rebuilt on top of live (warning draft_rebuilt); overlaps fail with draft_base_stale (details.conflicting_fields) — " +
     "retry with confirm_overwrite_newer_live only after the user agrees to discard those live changes. draft_base_unknown = draft has no recorded base (same confirm). " +
     "Other rejections: proposal_required (swarm roles), draft_in_proposal (apply that proposal instead), translation_source_changed (confirm_source_changed), attached_draft_structure, " +
-    "render_review_required (entry-owned layout changed vs live with no matching review_page_render). " +
+    "display_values_change (live locale file holds a legacy page-level copy that publish drops; details.fields before → after; confirm_display_change after the user agrees), " +
+    "render_review_required (entry-owned layout changed vs live with no matching review_page_render), " +
+    "robots_change_on_publish (effective meta.robots would change for this locale; details.live_robots vs draft_robots; ask the user, retry with robots_on_publish keep_live | use_draft). " +
     "dry_run: true runs every check and returns published_diff without writing. " +
     "For attached shared-layout entries, pass the entry slug (not \"single\") to promote entry drafts from translate_entry " +
     "({variantSlug}.{locale}.yml under the entry folder). Pass slug \"single\" only to promote a type-root template variant. " +
@@ -5882,12 +6084,22 @@ export function registerPageTools(
         .boolean()
         .optional()
         .describe("Publish a translation whose source locale changed after translating. Ask the user first."),
+      confirm_display_change: z
+        .boolean()
+        .optional()
+        .describe("After display_values_change: publish even though this language will show the _common.yml value instead of its legacy locale copy. Ask the user first."),
       dry_run: z.boolean().optional().describe("Run every check and return published_diff without writing."),
       seo_standalone_reason: z
         .string()
         .optional()
         .describe(
           "New language on an SEO-monitored page whose draft sets seo.pillar_path: null: why it stays out of every cluster (min 40 chars). Idea-born pages also need a fast_decay_news/broken_url origin idea.",
+        ),
+      robots_on_publish: z
+        .enum(["keep_live", "use_draft"])
+        .optional()
+        .describe(
+          "After robots_change_on_publish: keep_live publishes the draft but keeps this language's live meta.robots; use_draft publishes the draft's. Ask the user first.",
         ),
       report: z
         .string()
@@ -5904,8 +6116,10 @@ export function registerPageTools(
       locale,
       confirm_overwrite_newer_live,
       confirm_source_changed,
+      confirm_display_change,
       dry_run,
       seo_standalone_reason,
+      robots_on_publish,
       report,
       agent_session_id,
       site,
@@ -5962,16 +6176,18 @@ export function registerPageTools(
         // Entry slug as-is: attached translate drafts live under the entry folder.
         // Use slug "single" only for type-root template variants.
         const versioningSlug = slug;
-        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/versioning/${encodeURIComponent(contentType)}/${encodeURIComponent(versioningSlug)}/${encodeURIComponent(locale)}/promote/${encodeURIComponent(variantSlug)}${domain ? `?__site=${encodeURIComponent(domain)}` : ""}`;
+        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/versioning/${encodeURIComponent(contentType)}/${encodeURIComponent(versioningSlug)}/${encodeURIComponent(locale)}/promote/${encodeURIComponent(variantSlug)}`;
         const res = await fetch(url, {
           method: "POST",
-          headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id }),
+          headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id, site: domain }),
           body: JSON.stringify({
             report: trimmedReport,
             ...(confirm_overwrite_newer_live ? { confirm_overwrite_newer_live: true } : {}),
             ...(confirm_source_changed ? { confirm_source_changed: true } : {}),
+            ...(confirm_display_change ? { confirm_display_change: true } : {}),
             ...(dry_run ? { dry_run: true } : {}),
             ...(seo_standalone_reason ? { seo_standalone_reason } : {}),
+            ...(robots_on_publish ? { robots_on_publish } : {}),
           }),
         });
         const data = await res.json() as Record<string, unknown>;
@@ -6011,6 +6227,39 @@ export function registerPageTools(
               ],
             });
           }
+          if (serverCode === "locale_url_slug_required") {
+            return actionRequired(
+              {
+                success: false,
+                action_required: "set_locale_url_slug",
+                code: serverCode,
+                message: errMsg,
+                details: { ...(details ?? {}), property_path: "slug" },
+                warnings: [
+                  {
+                    code: "locale_url_slug_required",
+                    message:
+                      `New language of a live page: without its own slug: in ${locale}.yml the URL reuses the folder name "${slug}" (picked for another language). ` +
+                      "The folder name stays the page ID; other languages' addresses do not change. Same word allowed only for a name that works in every language. Uniqueness is checked at publish.",
+                  },
+                ],
+              },
+              [
+                {
+                  tool: "update_fields",
+                  reason: `Set this language's own address on the draft (field_path slug, a word in ${locale}), then retry promote_variant.`,
+                  priority: "required",
+                  args_hint: {
+                    slug,
+                    locale,
+                    contentType,
+                    variant: variantSlug,
+                    updates: [{ field_path: "slug", value: `<address-in-${locale}>` }],
+                  },
+                },
+              ],
+            );
+          }
           if (serverCode === TEXT_LIMITS_EXCEEDED_CODE) {
             return textLimitsExceededResult(errMsg, data, {
               slug,
@@ -6029,6 +6278,15 @@ export function registerPageTools(
               publish: true,
             });
           }
+          if (serverCode === CONSENT_REQUIRED_CODE) {
+            return consentRequiredResult(errMsg, data, {
+              slug,
+              contentType,
+              locale,
+              variant: variantSlug,
+              retryTool: "promote_variant",
+            });
+          }
           if (serverCode === THEME_COLORS_CODE) {
             return themeColorsRequiredResult(errMsg, data, {
               slug,
@@ -6040,6 +6298,16 @@ export function registerPageTools(
           }
           if (serverCode === RENDER_REVIEW_REQUIRED_CODE) {
             return renderReviewRequiredResult(errMsg, data, {
+              retryTool: "promote_variant",
+              contentType,
+              slug,
+              locale,
+              variantSlug,
+              site,
+            });
+          }
+          if (serverCode === ROBOTS_CHANGE_ON_PUBLISH_CODE) {
+            return robotsChangeOnPublishResult(errMsg, data, {
               retryTool: "promote_variant",
               contentType,
               slug,
@@ -6234,7 +6502,6 @@ export function registerPageTools(
 
       try {
         const q = new URLSearchParams();
-        if (domain) q.set("__site", domain);
         if (cleanup_orphan === true) q.set("cleanup_orphan", "true");
         const qs = q.toString();
         const url =
@@ -6243,7 +6510,7 @@ export function registerPageTools(
           (qs ? `?${qs}` : "");
         const res = await fetch(url, {
           method: "DELETE",
-          headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id }),
+          headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id, site: domain }),
         });
         const data = await res.json() as Record<string, unknown>;
         if (!res.ok) {
@@ -6490,8 +6757,8 @@ const next_actions: NextAction[] = entryDeleted
       }
 
       try {
-        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/versioning/${encodeURIComponent(contentType)}/${encodeURIComponent(slug)}/${encodeURIComponent(locale)}/convert-to-draft${domain ? `?__site=${encodeURIComponent(domain)}` : ""}`;
-        const res = await fetch(url, { method: "POST", headers: internalHeaders(mcpToken) });
+        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/versioning/${encodeURIComponent(contentType)}/${encodeURIComponent(slug)}/${encodeURIComponent(locale)}/convert-to-draft`;
+        const res = await fetch(url, { method: "POST", headers: internalHeaders(mcpToken, { site: domain }) });
         const data = await res.json() as Record<string, unknown>;
         if (!res.ok) {
           return fail((data.error as string) || `Server error: ${res.status}`, {
@@ -6968,6 +7235,9 @@ const next_actions: NextAction[] = entryDeleted
           }
         }
       }
+
+      const pausedCreate = await writePausedResult("create_entry");
+      if (pausedCreate) return pausedCreate;
 
       fs.mkdirSync(pageDir, { recursive: true });
 
@@ -7560,6 +7830,9 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         return fail((e as Error).message);
       }
       if (!fs.existsSync(pathInfo.filePath)) {
+        if (!variant && layoutTarget === "entry") {
+          return missingLocaleFail({ tool: "remove_section", mode: "write", contentType: resolved.contentType, slug, locale, contentPath });
+        }
         return fail(`Locale file not found: ${pathInfo.relativeHint}`);
       }
 
@@ -7751,6 +8024,9 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         return fail((e as Error).message);
       }
       if (!fs.existsSync(pathInfo.filePath)) {
+        if (!variant && layoutTarget === "entry") {
+          return missingLocaleFail({ tool: "reorder_sections", mode: "write", contentType: resolved.contentType, slug, locale, contentPath });
+        }
         return fail(`Locale file not found: ${pathInfo.relativeHint}`);
       }
 
@@ -7958,6 +8234,9 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         return fail((e as Error).message);
       }
       if (!fs.existsSync(pathInfo.filePath)) {
+        if (!variant && layoutTarget === "entry") {
+          return missingLocaleFail({ tool: "replace_entry_sections", mode: "write", contentType: resolved.contentType, slug, locale, contentPath });
+        }
         return fail(`File not found: ${pathInfo.relativeHint}`);
       }
 
@@ -8665,6 +8944,9 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         }
       }
 
+      const pausedTranslate = await writePausedResult("translate_entry");
+      if (pausedTranslate) return pausedTranslate;
+
       const isNew = !fileExistedAtStart;
       fs.writeFileSync(targetFilePath, intendedContent, "utf-8");
       const writeEventId = notifyMcpContentWrite(targetFilePath, mcpWriteAuthor(mcpToken));
@@ -9281,9 +9563,8 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
           sectionIndex: String(sectionIndex),
           locale,
         });
-        if (domain) params.set("__site", domain);
         const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/bindings/section?${params}`;
-        const res = await fetch(url, { headers: internalHeaders(mcpToken) });
+        const res = await fetch(url, { headers: internalHeaders(mcpToken, { site: domain }) });
         const data = await res.json() as Record<string, unknown>;
         if (!res.ok) {
           return fail((data.error as string) || `Server error: ${res.status}`);
@@ -9346,9 +9627,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         if ("deny" in agenticGate) return agenticGate.deny;
       }
       try {
-        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content/delete-entries${
-          domain ? `?__site=${encodeURIComponent(domain)}` : ""
-        }`;
+        const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content/delete-entries`;
         if (confirm === true) {
           const trimmedReport = typeof report === "string" ? report.trim() : "";
           if (trimmedReport.length < 80) {
@@ -9366,7 +9645,7 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         const trimmedReport = typeof report === "string" ? report.trim() : "";
         const res = await fetch(url, {
           method: "POST",
-          headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id }),
+          headers: internalHeaders(mcpToken, { agentSessionId: agent_session_id, site: domain }),
           body: JSON.stringify({
             contentType,
             slugs,
@@ -9659,9 +9938,8 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       let schema_org_coverage: Array<Record<string, unknown>> = [];
       if (schema_org_requirements.length > 0) {
         try {
-          const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
           const res = await fetch(
-            `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(contentType)}/schema-org-coverage${q}`,
+            `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(contentType)}/schema-org-coverage`,
           );
           if (res.ok) {
             const data = (await res.json()) as { coverage?: Array<Record<string, unknown>> };
@@ -9720,6 +9998,12 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
               "Any editor.required true|attached requires a valid strategy (non-empty purpose). " +
               "Clear rejected while required fields remain (code: missing_strategy). " +
               "Not insights_intent. Patch via update_content_type (strategy-only call, separate from field_action).",
+            ads_optimized: config.ads?.optimize === true,
+            ads_optimized_note:
+              "Staff-only toggle (content type dashboard → Optimize for ads; content-types.yml ads.optimize). update_content_type does not set it. " +
+              "When true, pages of this type: load Tag Manager on page open; count as consented on landing in notice countries (ask countries unchanged); " +
+              "use the site's own anonymous visit counts (data/<site>/visits.db, no cookies) for page stats and get_analytics_report page_detail instead of GA4. " +
+              "Does not change page content, the Ads report, or Google Ads / Meta conversions.",
             field_patch_note:
               "Schema fields: MCP update_content_type with field_action add|update|remove (one field per call). " +
               "Preview (omit confirm) then confirm:true after principal approval. " +
@@ -10012,15 +10296,12 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
           editor: editor as ContentTypeEditorHint | undefined,
           confirm,
           site,
-          domain,
           contentPath,
           mcpToken,
           mainServerPort: MAIN_SERVER_PORT,
-          internalHeaders,
+          internalHeaders: (token) => internalHeaders(token, { site: domain }),
         });
       }
-
-      const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
       const ymlPath = `${path.basename(contentPath)}/content-types.yml`;
 
       if (hasSharedToggle) {
@@ -10040,10 +10321,10 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
         }
         try {
           const res = await fetch(
-            `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(contentType)}/config${q}`,
+            `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(contentType)}/config`,
             {
               method: "PUT",
-              headers: { ...internalHeaders(mcpToken), "Content-Type": "application/json" },
+              headers: { ...internalHeaders(mcpToken, { site: domain }), "Content-Type": "application/json" },
               body: JSON.stringify(body),
             },
           );
@@ -10204,10 +10485,10 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
 
       try {
         const res = await fetch(
-          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(contentType)}/config${q}`,
+          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(contentType)}/config`,
           {
             method: "PUT",
-            headers: { ...internalHeaders(mcpToken), "Content-Type": "application/json" },
+            headers: { ...internalHeaders(mcpToken, { site: domain }), "Content-Type": "application/json" },
             body: JSON.stringify(body),
           },
         );
@@ -10304,14 +10585,12 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
       if (mcpToken && !(await checkCap(mcpToken, "seo_settings"))) {
         return denyResponse("seo_settings");
       }
-
-      const q = domain ? `?__site=${encodeURIComponent(domain)}` : "";
       try {
         const res = await fetch(
-          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(contentType)}/schema-org-ensure${q}`,
+          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(contentType)}/schema-org-ensure`,
           {
             method: "POST",
-            headers: { ...internalHeaders(mcpToken, { agentSessionId: agent_session_id }), "Content-Type": "application/json" },
+            headers: { ...internalHeaders(mcpToken, { agentSessionId: agent_session_id, site: domain }), "Content-Type": "application/json" },
             body: JSON.stringify({
               schema_type,
               dry_run: !!dry_run,
@@ -10439,7 +10718,6 @@ appendSharedTemplateHtmlCacheWarning(warnings, apiResult.data, layoutTarget);
           try {
             const params = new URLSearchParams();
             if (locale) params.set("locale", locale);
-            if (domain) params.set("__site", domain);
             const url = `http://127.0.0.1:${MAIN_SERVER_PORT}/api/content-types/${encodeURIComponent(ct)}/seo-entries?${params}`;
             const res = await fetch(url);
             if (!res.ok) {

@@ -31,6 +31,7 @@ export type ChecklistId =
   | "review_mode_inert"
   | "title_description_ctr"
   | "internal_links"
+  | "hub_split"
   | "funnel_persona_product_stage"
   | "locale_translation"
   | "verify_copy"
@@ -39,7 +40,12 @@ export type ChecklistId =
   | "existence_unknown"
   | "target_missing"
   | "layout_structure"
-  | "template_blast_radius";
+  | "template_blast_radius"
+  | "third_party_evidence";
+
+/** Staff always-visible line when a new named third-party claim has no evidence row. */
+export const EVIDENCE_MISSING_STAFF_NOTE =
+  "Names a partner, press outlet or award with no proof on file. Add a row with a source link to an evidence database, or dismiss the name if it isn't a claim about us.";
 
 /** Staff always-visible line when idea_opportunity_harm is active. */
 export const IDEA_OPPORTUNITY_HARM_STAFF_NOTE =
@@ -72,6 +78,10 @@ export const TITLE_DESCRIPTION_STAFF_NOTE =
 /** Staff always-visible line when internal_links checklist is active. */
 export const INTERNAL_LINKS_STAFF_NOTE =
   "Also check hub links — facts and locale targets intact, not punchier prose.";
+
+/** Staff always-visible line when hub_split checklist is active. */
+export const HUB_SPLIT_STAFF_NOTE =
+  "Hub split — removing links to the pages that moved is intended. Check that only those links go, the new hub is linked, and no facts are lost.";
 
 /** Staff always-visible line when funnel_persona_product_stage is active. */
 export const FUNNEL_CLASSIFICATION_STAFF_NOTE =
@@ -160,12 +170,14 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
     look_for: [
       "defensible technical or educational angle",
       "facts checked against the product",
-      "stat or company fact → check it against list_variables (site facts); a literal for a fact that varies by region → add_blocker asking for the token, unless it equals literal_ok for this page",
+      "number or stat (price, hire rate, rating) → check it against list_variables (site facts); a literal for a fact that varies by region → add_blocker asking for the token, unless it equals literal_ok for this page",
+      "named partner, client, press outlet or award → review_context.evidence (evidence databases), not list_variables",
       "fact disagrees with the catalog → the catalog wins; if the author says it is stale, ask for a notes handoff to update the variable (not a literal)",
       "CTA or link to a real program",
       "reject or add_blocker if any of the three fails",
       "SEO topology in reader copy: body/H2 must not expose our content architecture, series inventory, or cluster membership to readers (e.g. \"Nth piece in our … cluster\", \"companion pieces\", \"Recent cluster updates\") — add_blocker; teaching what a topic cluster is when that is the topic is OK; staff summaries / seo.* / YAML cluster_* stay technical",
       "idea-born page: seo.main_keyword / pillar_path match the idea's locked idea_seo_target; a different value needs seo_target_override.reason — judge it (hub renamed, keyword now owned elsewhere) and reject weak overrides",
+      "new language: the draft's own slug is a word in that language and matches the idea's locked url_slug; a different slug needs url_slug_override.reason — judge it; the same word as the folder only for names that work in every language",
     ],
     priority: 10,
   },
@@ -208,11 +220,12 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "Goal: one 90-day outcome — cite, rank, or assist a real program (not fill a cluster hole)",
       "Evidence: follow declared demand label when present (anticipated_demand / existing_demand / fast_decay_news / broken_url); with no label, score the summary — demand keyword volume only for a search claim; search/cite + volume/KD without existing_demand → add_blocker naming the label; launch or 404 cues without a label → add_blocker naming the label",
       "Fit: not a dupe of a sibling; locale justified; wrong vehicle (funnel/SERP/hub-links-only) → close and refile as edits",
-      "Brand: educational angle, checkable facts, real program CTA — invent/endorsement without source → reject or close",
-      "stat or company fact → check it against list_variables (site facts); a literal for a fact that varies by region → add_blocker asking for the token, unless it equals literal_ok for this page",
+      "One change: the brief pitches one site change you can accept or close as written. If/then branches (do X only if Y), preconditions only a person can check (Search Console, analytics UI, request indexing) or tasks for staff (find the source, investigate) → close other and tell the author to refile as notes; do not add_blocker asking for the precondition",
+      "Brand: educational angle, checkable facts, real program CTA — invented endorsement → reject or close; a named partner/press/award counts as sourced when review_context.evidence shows a sourced row",
+      "number or stat → check it against list_variables (site facts); a literal for a fact that varies by region → add_blocker asking for the token, unless it equals literal_ok for this page",
       "fact disagrees with the catalog → the catalog wins; if the author says it is stale, ask for a notes handoff to update the variable (not a literal)",
-      "Dilution: if this ships and gets ~0 visits, would we still tax hubs, crawl, freshness, inventory?",
-      "Kill criterion named; refresh_tier:fast needs owner + recrawl trigger; default zero new hub links",
+      "Dilution: if this ships and gets ~0 visits, would we still pay crawl, freshness, inventory? A page that does not deserve a hub link does not deserve accept",
+      "Kill criterion named (including removing the hub link if the page is retired); refresh_tier:fast needs owner + recrawl trigger; accepted idea gets a hub → spoke link at go-live (chained internal_links proposal with applies_after_proposal_id)",
       "Dilution improvement alone ≠ pass (e.g. hub deletion still needs visit/redirect evidence)",
       "Disposition: accept | add_blocker | close | reject — never apply or revise_entries",
     ],
@@ -285,6 +298,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "next_step is concrete (min 20 characters)",
       "new-URL ideas: structured idea_funnel (stage + products) required before accept — missing → add_blocker; do not invent funnel for the author; products \"all\" only with awareness",
       "new-URL ideas on SEO-monitored types: idea_seo_target required (accept refuses without it) — main_keyword matches the brief's search claim (not a broader head term); join hub fits the topic; hub-mode members are real live posts that belong under it; standalone only for fast_decay_news / broken_url with a credible reason — weak fit → add_blocker naming the better hub",
+      "idea_seo_target.kw_monthly_volume + kw_difficulty both set from the author's keyword research — missing either → add_blocker (volume in the brief text alone does not count)",
       "follow-up edits use implements_proposal_id matching this idea",
       "if the accepted_entry type is layout_owner entry (landing, downloadable…), the brief should describe the page structure; missing structure → add_blocker",
       "do not report the page as live after accept",
@@ -339,7 +353,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "score only: facts intact, no new unsupported claims, each new href exists + correct locale + topical hub/pillar/sibling, force (anchors on existing phrases vs minted CTAs)",
       "facts: live numbers, years, employers, sources still present in proposed body",
       "claims: no new salary/ranking/mejor/headcount the live article does not already support",
-      "links: destinations exist, same locale as the article, hub/pillar or in-cluster sibling — not broken placeholders or money-page spray",
+      "links: destinations exist, same locale as the article, hub/pillar or in-cluster sibling — not broken placeholders or money-page spray; a link to the page of this proposal's applies_after predecessor counts as existing (apply is refused until that page is live)",
       "force: one link per idea is fine; sales sentence minted only to carry the link → add_blocker (wrap existing phrase; delete the pitch)",
       "if gates 1–3 pass, apply even if prose is a bit wooden — do not reject as weaker-than-live copy",
       "SEO topology packaging ≠ allowable wooden: series maps, piece-count-in-cluster, companion-piece inventory, or \"for the full picture start with…\" as our content TOC → add_blocker (link by page job instead); teaching topic clusters when that is the subject is OK",
@@ -351,6 +365,22 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
     ],
     priority: 28,
   },
+  hub_split: {
+    id: "hub_split",
+    title: "Original hub rewrite after a split",
+    why: "The original hub hands a subtopic to a new hub. Dropping links to the moved pages is the point — dropping facts or unrelated links is not.",
+    look_for: [
+      "removed links: only to pages the split idea moves into the new hub (idea_seo_target.cluster.members); any other removed link → add_blocker",
+      "new hub link: the rewritten section links the new hub (same locale) with an anchor that names its subtopic",
+      "summary paragraph: honestly describes what the new hub covers — no invented claims, no SEO topology talk for readers",
+      "facts: live numbers, years, employers, and sources outside the moved section still present",
+      "1–2 direct links to moved pages that matter to this hub's main topic may stay — not a blocker either way",
+      "chain: applies_after_proposal_id must point at the edits proposal that publishes the new hub; missing → add_blocker (apply would link a page that is not live)",
+      "do not re-add links to pages with a pending member move (they are leaving this hub)",
+      "ops vs live only — ignore staff summary wording; never block because summary ≠ ops",
+    ],
+    priority: 27,
+  },
   funnel_persona_product_stage: {
     id: "funnel_persona_product_stage",
     title: "Check persona → product → stage",
@@ -358,6 +388,7 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
     look_for: [
       "score Persona / Product / Stage then Ship: pass|fail|warn / pass|fail / pass|fail / yes|no — in that order",
       "Persona: content intent matches a real persona id on a product (list_products → get_product); missing audience → product-only OK with warn (do not invent persona ids); wrong/invented persona → block",
+      "Persona: read who this page talks to (title, hero, CTAs) and compare every persona on the product — sibling pages using a persona is not evidence either way",
       "Product: proposed bindings follow from that fit; multiple { product, persona? } OK when two+ personas truly fit; products:all only when no single product's personas fit better; breadth/company-report alone ≠ all; all never carries personas",
       "Stage: awareness|consideration|decision|post-enrollment matches readiness — re-check full cascade even if only stage or only products moved",
       "ops vs live funnel + product audience — ignore staff summary / Titulo/Meta blurb; never block because blurb ≠ ops",
@@ -478,6 +509,22 @@ export const THINK_TEMPLATES: Record<ChecklistId, ThinkTemplate> = {
       "apply needs confirm_affected_entries equal to the count",
     ],
     priority: 12,
+  },
+  third_party_evidence: {
+    id: "third_party_evidence",
+    title: "Named third party → evidence rows attached",
+    why: "The text presents someone as choosing, partnering with, covering or awarding us. review_context.evidence lists each name with the evidence row the server matched.",
+    look_for: [
+      "sourced → pass; open the row (discovery get_database_item) and confirm the claim is not stronger than the row (e.g. \"contracted\" vs \"selected\") — stronger → add_blocker",
+      "unsourced (row has no link) → warning only; you may still apply",
+      "sourced but row.archive_status is not archived (evidence_not_archived) → warning only; the live server keeps an Internet Archive copy of the link",
+      "unverified (an agent last changed the row's link or claim) → add_blocker asking staff to verify the row",
+      "no_evidence → apply is refused (evidence_missing); add_blocker asking for a sourced row, or for staff to dismiss the name",
+      "already_live → the claim is already published; warning only, never a blocker",
+      "dismissed → staff marked it \"not a claim about us\"; do not review again",
+      "numbers and stats still go to list_variables; evidence covers named relationships only",
+    ],
+    priority: 9,
   },
   target_missing: {
     id: "target_missing",

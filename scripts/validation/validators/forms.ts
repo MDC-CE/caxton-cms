@@ -7,6 +7,8 @@
  * - missing conversion_name when a bound form-settings object is present
  *   (absent nested forms, e.g. CTA-only heroes, are allowed)
  * - form fields.*.source.related_field issues (empty/missing/broken/slugs combo)
+ * - forms (and form_overrides that switch event) with no mandatory consent checkbox,
+ *   forms with two (General + Marketing), and a site without a Default consent
  *
  * Settings (conversion events, auth) come from the context's site, not the
  * default site.
@@ -24,11 +26,16 @@ import { validateSignupFormFields } from "../../../shared/authSignupFieldMap";
 import { validateFormFieldSources } from "../../../shared/validateFormFieldSources";
 import { resolveBoundFormSettingsPath } from "../../../shared/wipeOnDuplicate";
 import { getContentTypeConfig } from "../../../server/content-types";
-import { getTrackingSettings, getAuthSettings, getAuthConversionEventConfig } from "../../../server/settings";
+import { getTrackingSettings, getAuthSettings, getAuthConversionEventConfig, getConsentFallback } from "../../../server/settings";
+import { checkFormConsent, formObjectAtPath } from "../../../shared/formConsentCheck";
+import { normalizeConsentFallbackKey } from "../../../shared/consent-settings";
+import type { ConversionEventDefaults } from "../../../shared/resolveFormDefaults";
 import { loadAllFieldEditors } from "../../../server/component-registry";
 import { escapeTemplateVars, unescapeObjectVars } from "../../../shared/templateVars";
 import { getDefaultContentRoot } from "../../../server/site-config";
 import { FORMS_ISSUE_CODES } from "./forms.issueCodes";
+import { checkTrackingOverride, type TrackingOverride } from "../../../shared/tracking-context";
+import { loadTrackingKeyIndex } from "../../../server/product/tracking-key-index";
 
 function isYamlFile(name: string): boolean {
   return name.endsWith(".yml") || name.endsWith(".yaml");
@@ -53,6 +60,33 @@ function collectEntryDirs(context: ValidationContext, root: string): Map<string,
     }
   }
   return dirs;
+}
+
+function hiddenDefault(fields: unknown, key: string): string | undefined {
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) return undefined;
+  const cfg = (fields as Record<string, unknown>)[key];
+  const value =
+    typeof cfg === "string" ? cfg : cfg && typeof cfg === "object" ? (cfg as { default?: unknown }).default : undefined;
+  if (typeof value !== "string" || !value.trim() || value.includes("{{")) return undefined;
+  return value.trim();
+}
+
+/** `fields.product` / `fields.persona` defaults on the form and on each form_overrides entry. */
+function trackingOverridesIn(formObj: Record<string, unknown>): { where: string; override: TrackingOverride }[] {
+  const out: { where: string; override: TrackingOverride }[] = [];
+  const add = (where: string, fields: unknown) => {
+    const product = hiddenDefault(fields, "product");
+    const persona = hiddenDefault(fields, "persona");
+    if (product || persona) out.push({ where, override: { product, persona } });
+  };
+  add(".fields", formObj.fields);
+  const overrides = formObj.form_overrides;
+  if (Array.isArray(overrides)) {
+    overrides.forEach((o, idx) => {
+      if (o && typeof o === "object") add(`.form_overrides[${idx}].fields`, (o as Record<string, unknown>).fields);
+    });
+  }
+  return out;
 }
 
 function safeLoadYaml(filePath: string): Record<string, unknown> | null {
@@ -85,6 +119,10 @@ export const formsValidator: Validator = {
     const authConversion = getAuthConversionEventConfig(root);
     const signupFieldMap = getAuthSettings(root).signup?.field_map;
     const allFieldEditors = loadAllFieldEditors();
+    const conversionEvents = getTrackingSettings(root).conversion_events as ConversionEventDefaults[];
+    const consentFallback = getConsentFallback(root);
+    const trackingKeys = loadTrackingKeyIndex(root);
+    let formsRelyingOnDefault = 0;
 
     for (const [entryDir, ct] of Array.from(collectEntryDirs(context, root))) {
       if (!fs.existsSync(entryDir)) continue;
@@ -160,18 +198,44 @@ export const formsValidator: Validator = {
           }
 
           if (formSettingsPath != null) {
-            const formObj = (() => {
-              if (!formSettingsPath) return sec;
-              const parts = formSettingsPath.split(".").filter(Boolean);
-              let current: unknown = sec;
-              for (const part of parts) {
-                if (!current || typeof current !== "object" || Array.isArray(current)) return null;
-                current = (current as Record<string, unknown>)[part];
-              }
-              if (!current || typeof current !== "object" || Array.isArray(current)) return null;
-              return current as Record<string, unknown>;
-            })();
+            const formObj = formObjectAtPath(sec, formSettingsPath);
             const formLabel = formSettingsPath || "form";
+            if (formObj) {
+              for (const v of checkFormConsent(formObj, conversionEvents, consentFallback)) {
+                const where = v.where === "form" ? formLabel : `${formLabel}.${v.where}`;
+                const eventNote = v.conversionName ? ` (conversion event: ${v.conversionName})` : "";
+                if (v.reliesOnDefault) formsRelyingOnDefault++;
+                if (v.required.length === 0) {
+                  errors.push({
+                    type: "error",
+                    code: "FORM_NO_REQUIRED_CONSENT",
+                    message: `sections[${i}].${where} has no mandatory consent checkbox${eventNote}. File: ${relativePath}`,
+                    file: relativePath,
+                    suggestion:
+                      "Turn on the site Default consent in Settings, or turn on General or Marketing for this form or its conversion event. SMS, Email and WhatsApp are always optional. Publishing this page is blocked until fixed.",
+                  });
+                } else if (v.twoRequired) {
+                  warnings.push({
+                    type: "warning",
+                    code: "FORM_TWO_REQUIRED_CONSENTS",
+                    message: `sections[${i}].${where} makes visitors tick two boxes (General and Marketing)${eventNote}. File: ${relativePath}`,
+                    file: relativePath,
+                    suggestion: "Allowed. Turn one of them off if a single mandatory checkbox is enough.",
+                  });
+                }
+              }
+            }
+            for (const ov of formObj ? trackingOverridesIn(formObj) : []) {
+              for (const issue of checkTrackingOverride(ov.override, trackingKeys)) {
+                warnings.push({
+                  type: "warning",
+                  code: issue.code,
+                  message: `sections[${i}].${formLabel}${ov.where}: ${issue.message} File: ${relativePath}`,
+                  file: relativePath,
+                  suggestion: FORMS_ISSUE_CODES[issue.code]?.suggestion,
+                });
+              }
+            }
             const signupErr = validateSignupFormFields(formObj, signupFieldMap, formLabel);
             if (signupErr) {
               errors.push({
@@ -185,6 +249,16 @@ export const formsValidator: Validator = {
           }
         }
       }
+    }
+
+    if (!normalizeConsentFallbackKey(consentFallback)) {
+      errors.push({
+        type: "error",
+        code: "SITE_NO_DEFAULT_CONSENT",
+        message: `This site has no Default consent (settings.yml consent.fallback). ${formsRelyingOnDefault} form(s) checked here have no mandatory checkbox of their own and rely on it.`,
+        file: path.relative(process.cwd(), path.join(root, "settings.yml")),
+        suggestion: "Turn on a Default consent (General) in Settings → consent copy.",
+      });
     }
 
     return {

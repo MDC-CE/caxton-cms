@@ -4,7 +4,8 @@ import { checkCap, denyResponse } from "../lib/auth.js";
 import { hasCapAnyScope, type CatalogGrant } from "../lib/tool-catalog.js";
 import { ok, fail } from "../lib/respond.js";
 import { resolveSiteContext, resolveContentType, loadPage, safeLoad, getDirectory } from "../lib/content.js";
-import { getTokenUsername } from "../lib/oauth.js";
+import { buildLoopbackHeaders } from "../lib/loopback.js";
+import { missingLocaleDetails } from "../lib/missing-locale.js";
 import { SITE_PARAM_DESC, siteFailResult } from "../lib/entry-helpers.js";
 import fs from "fs";
 import path from "path";
@@ -23,26 +24,9 @@ import {
 } from "../lib/validation-issues-mcp.js";
 
 const MAIN_SERVER_PORT = process.env.PORT || "5000";
-const INTERNAL_SECRET = process.env.MCP_SERVER_SECRET || process.env.MCP_API_KEY || "";
 
-function internalHeaders(mcpToken?: string): Record<string, string> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (INTERNAL_SECRET) {
-    headers.Authorization = `Bearer ${INTERNAL_SECRET}`;
-    const username = mcpToken ? getTokenUsername(mcpToken) : undefined;
-    if (username) headers["x-mcp-author"] = username;
-  } else if (mcpToken) {
-    const username = getTokenUsername(mcpToken);
-    if (username) headers["x-mcp-author"] = username;
-  }
-  return headers;
-}
-
-function siteQuery(domain: string | null, extra = ""): string {
-  const parts: string[] = [];
-  if (domain) parts.push(`__site=${encodeURIComponent(domain)}`);
-  if (extra) parts.push(extra);
-  return parts.length ? `?${parts.join("&")}` : "";
+function internalHeaders(mcpToken?: string, site?: string): Record<string, string> {
+  return buildLoopbackHeaders(mcpToken, { site });
 }
 
 async function requireMetricsView(mcpToken: string | undefined, grants: CatalogGrant[] | undefined) {
@@ -55,20 +39,27 @@ async function requireMetricsView(mcpToken: string | undefined, grants: CatalogG
 /** Resolve public URL for slug/locale when possible. */
 function resolveSlugUrl(
   slug: string,
-  locale: string,
+  requestedLocale: string | undefined,
   contentType: string | undefined,
   contentPath: string,
-): { url?: string; error?: string } {
+): { url?: string; error?: string; localeFallback?: { from: string; to: string } } {
   const resolved = resolveContentType(slug, contentType, contentPath);
   if (!resolved) {
     return { error: `Page not found for slug '${slug}'` };
   }
-  const result = loadPage(resolved.contentType, slug, locale, contentPath);
-  if (!result) {
-    return { error: `Locale '${locale}' not found for page '${slug}'` };
+  let locale = requestedLocale || "en";
+  let localeFallback: { from: string; to: string } | undefined;
+  if (!loadPage(resolved.contentType, slug, locale, contentPath)) {
+    const { available_locales, suggested_locale } = missingLocaleDetails(resolved.contentType, slug, locale, contentPath);
+    if (requestedLocale || !suggested_locale) {
+      const live = available_locales.length ? `Live languages: ${available_locales.join(", ")}.` : "No live language files.";
+      return { error: `Locale '${locale}' not found for page '${slug}'. ${live}` };
+    }
+    localeFallback = { from: locale, to: suggested_locale };
+    locale = suggested_locale;
   }
   const urlPattern = resolved.config.url_pattern;
-  if (!urlPattern) return {};
+  if (!urlPattern) return { localeFallback };
   let localeSlug = slug;
   const pageDir = path.join(contentPath, getDirectory(resolved.contentType, resolved.config), slug);
   for (const ext of ["yml", "yaml"]) {
@@ -84,8 +75,8 @@ function resolveSlugUrl(
     break;
   }
   const pattern = urlPattern[locale] || urlPattern["default"];
-  if (typeof pattern !== "string") return {};
-  return { url: pattern.replace(":slug", localeSlug) };
+  if (typeof pattern !== "string") return { localeFallback };
+  return { url: pattern.replace(":slug", localeSlug), localeFallback };
 }
 
 function mapOpenIssue(
@@ -108,6 +99,7 @@ function mapOpenIssue(
     if (row.staleSourceDatabase) base.stale_source_database = row.staleSourceDatabase;
   }
   if (row.redirectSuggestion) base.redirect_suggestion = row.redirectSuggestion;
+  if (row.externalLink) base.external_link = row.externalLink;
   if (opts?.includeLastFullRunAt && row.lastFullRunAt != null) {
     base.lastFullRunAt = row.lastFullRunAt;
   }
@@ -132,7 +124,7 @@ export function registerValidationIssuesTools(
       "Content agents fixing pages should use run_entry_diagnostics instead. Requires metrics_view.",
     {
       slug: z.string().optional().describe("Entry folder slug — resolves to URL for filtering"),
-      locale: z.string().optional().describe("Locale when using slug (default en)"),
+      locale: z.string().optional().describe("Locale when using slug (default en; when omitted and the page has no en, its own language)"),
       contentType: z.string().optional().describe("Content type hint when resolving slug"),
       url: z.string().optional().describe("Exact or path URL filter"),
       code: z.string().optional(),
@@ -198,10 +190,16 @@ export function registerValidationIssuesTools(
       if (args.slug?.trim()) {
         const resolved = resolveSlugUrl(
           args.slug.trim(),
-          (args.locale || "en").trim(),
+          args.locale?.trim() || undefined,
           args.contentType,
           contentPath,
         );
+        if (resolved.localeFallback) {
+          warnings.push({
+            code: "locale_fallback",
+            message: `Page '${args.slug}' has no live ${resolved.localeFallback.from}.yml; issues are for its ${resolved.localeFallback.to} address. Pass locale to choose another.`,
+          });
+        }
         if (resolved.error) {
           warnings.push({ code: "slug_unresolved", message: resolved.error });
         } else if (resolved.url) {
@@ -214,15 +212,14 @@ export function registerValidationIssuesTools(
         }
       }
 
-      const headers = internalHeaders(mcpToken);
-      const q = siteQuery(domain);
+      const headers = internalHeaders(mcpToken, domain);
 
       let open_stats = { errors: 0, warnings: 0, total: 0 };
       let resolved_stats = resolvedStatsFromArchiveSummary({});
 
       try {
         const openRes = await fetch(
-          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/cache-issues${q}`,
+          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/cache-issues`,
           { headers },
         );
         if (openRes.ok) {
@@ -243,7 +240,7 @@ export function registerValidationIssuesTools(
 
       try {
         const resolvedRes = await fetch(
-          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/resolved-issues${q}${q ? "&" : "?"}limit=1`,
+          `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/resolved-issues?limit=1`,
           { headers },
         );
         if (resolvedRes.ok) {
@@ -296,10 +293,9 @@ export function registerValidationIssuesTools(
         if (args.validator?.trim()) qs.set("validator", args.validator.trim());
         if (args.category?.trim()) qs.set("category", args.category.trim());
         if (args.search?.trim()) qs.set("search", args.search.trim());
-        const sep = q ? `${q}&` : "?";
         try {
           const res = await fetch(
-            `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/resolved-issues${sep}${qs.toString()}`,
+            `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/resolved-issues?${qs.toString()}`,
             { headers },
           );
           if (!res.ok) {
@@ -354,7 +350,7 @@ export function registerValidationIssuesTools(
       if (args.category?.trim()) qs.set("category", args.category.trim());
       if (args.search?.trim()) qs.set("search", args.search.trim());
       const extra = qs.toString();
-      const sep = q ? (extra ? `${q}&${extra}` : q) : extra ? `?${extra}` : "";
+      const sep = extra ? `?${extra}` : "";
       try {
         const res = await fetch(
           `http://127.0.0.1:${MAIN_SERVER_PORT}/api/validation/cache-issues${sep}`,

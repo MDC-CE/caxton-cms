@@ -4,7 +4,8 @@ import { getDefaultContentRoot, getDefaultContentFolder } from "./site-config";
 import path from "path";
 import yaml from "js-yaml";
 import type { ZodSchema } from "zod";
-import { escapeTemplateVars, unescapeObjectVars, escapeObjectVars, unescapeYamlDump } from "../shared/templateVars";
+import { escapeTemplateVars, unescapeObjectVars } from "../shared/templateVars";
+import { dumpContentYaml } from "./content-yaml";
 import { deepMerge } from "./utils/deepMerge";
 import { regenerateSectionIds } from "./utils/regenerateSectionIds";
 import { normalizeUrlPattern, getAllConfigs, getFieldMapping, resolveUrlPatternWithMapping, getFullFieldMapping, getFieldMappingDefaults, extractUrlPatternParams, getContentTypeConfig, getHreflangsSource, resolveHreflangsFromRecord } from "./content-types";
@@ -18,6 +19,7 @@ import { loadYamlWithTemplateVars } from "./yaml-parse-cache";
 import { isEntryDetached } from "./shared-layout-entry";
 import { isEmptyDetachedLocaleEntry } from "./empty-locale";
 import { isReservedContentSlug } from "../shared/safe-href";
+import { slugKey } from "../shared/slug";
 import {
   findBestSingleMirrorSource,
   buildMirroredLocaleSingle,
@@ -97,14 +99,33 @@ export interface ContentTypeConfig {
   };
 }
 
+/** `slug:` values declared in the entry's files. Missing on snapshots built before this field existed. */
+export interface EntryDeclaredSlugs {
+  common?: string;
+  locales?: Record<string, string>;
+}
+
 export interface ContentEntry {
+  /** Page ID: the entry folder name, verbatim. */
   slug: string;
   contentType: string;
   directory: string;
   files: string[];
   locales: string[];
   title?: string;
+  slugs?: EntryDeclaredSlugs;
 }
+
+/** One way to name a page: its ID, its `_common.yml` slug, or a language's slug. */
+export interface SlugAlias {
+  entryId: string;
+  kind: "id" | "common_slug" | "locale_slug";
+  value: string;
+  locale?: string;
+}
+
+const LIVE_LOCALE_STEM = /^[a-z]{2}(-[a-z]{2})?$/;
+const DECLARED_SLUG_RE = /^slug:\s+["']?([^\s"'\n#]+)["']?/m;
 
 export interface FindOptions {
   contentType?: string;
@@ -140,6 +161,16 @@ export interface SeoEntry {
   file: string;
 }
 
+type ByUrlEntry = {
+  contentType: string;
+  slug: string;
+  entry: ContentEntry;
+  params: Record<string, string>;
+  patternLocale: string;
+  /** Missing means database, so older snapshots keep the previous resolve behavior. */
+  source?: "yaml" | "database";
+};
+
 export interface CommonFieldInfo {
   common: string[];
   partial: { key: string; count: number; total: number }[];
@@ -158,16 +189,20 @@ export class ContentIndex {
   private menuUsage: Map<string, { contentType: string; slug: string; source: string; position: "top" | "bottom" }[]> = new Map();
   private seoIndex: Map<string, SeoEntry> = new Map();
   private clusterIndex: Map<string, string[]> = new Map();
-  private byUrl: Map<string, { contentType: string; slug: string; entry: ContentEntry; params: Record<string, string>; patternLocale: string }> = new Map();
+  private byUrl: Map<string, ByUrlEntry> = new Map();
+  /** `${contentType}:${slug}` → locale → public path. Built with `byUrl` at scan time. */
+  private alternateByKey: Map<string, Record<string, string>> = new Map();
   private dbIndexedTypes: Set<string> = new Set();
+  /** type → slugKey → aliases. Derived from `entries`; rebuilt lazily after any entry change. */
+  private slugKeyIndex: Map<string, Map<string, SlugAlias[]>> | null = null;
+  /** True between queueing a background index refresh and applying its snapshot. */
+  private refreshPending = false;
   private initialized = false;
   private slowPhaseReady = false;
   /** Debounce timer for coalescing background slow scans. */
   private slowScanTimer: ReturnType<typeof setTimeout> | null = null;
   private slowScanRunning = false;
   private slowScanQueued = false;
-  private refreshRunning = false;
-  private refreshQueued = false;
   /**
    * When set, image/variable/menu/SEO extractors write into these maps instead of
    * the live ones so scanSlow can swap atomically (same idea as redirectEntries).
@@ -223,6 +258,14 @@ export class ContentIndex {
       log.error({ err: err }, "[ContentIndex] Failed to read content-types.yml:");
       return {};
     }
+  }
+
+  /**
+   * Re-read `content-types.yml`. The web process only scans at boot; worker
+   * snapshots and single-folder upserts reuse these configs to build URLs.
+   */
+  reloadContentTypeConfigs(): void {
+    this.contentTypeConfigs = this.loadContentTypes();
   }
 
   buildUrl(contentType: string, locale: string, slug: string, params?: Record<string, string>): string {
@@ -305,8 +348,10 @@ export class ContentIndex {
     // slowPhaseReady until scanSlow swaps in a fresh set — avoids empty
     // admin/API windows during async reindexing after content edits.
     this.localeSlugMap = new Map();
+    this.slugKeyIndex = null;
     this.commonFieldsCache = new Map();
     this.byUrl = new Map();
+    this.alternateByKey = new Map();
     this.dbIndexedTypes = new Set();
 
     for (const contentType of contentTypes) {
@@ -347,21 +392,8 @@ export class ContentIndex {
           }
         }
 
-        // Lightweight localeSlugMap update via regex — avoids full YAML parse per locale file
-        for (const file of files) {
-          const locale = file.replace(/\.(yml|yaml)$/, "");
-          if (locale.startsWith("_") || !/^[a-z]{2}(-[a-z]{2})?$/.test(locale)) continue;
-          try {
-            const raw = fs.readFileSync(path.join(folderPath, file), "utf-8");
-            const m = raw.match(/^slug:\s+["']?([^\s"'\n#]+)["']?/m);
-            if (m) {
-              const localeSlug = m[1].trim();
-              if (localeSlug !== slug) {
-                this.localeSlugMap.set(`${localeSlug}:${contentType}`, slug);
-              }
-            }
-          } catch {}
-        }
+        const declared = this.readDeclaredSlugs(folderPath, files);
+        this.rememberDeclaredSlugs(contentType, slug, declared);
 
         const entry: ContentEntry = {
           slug,
@@ -370,6 +402,7 @@ export class ContentIndex {
           files,
           locales,
           title,
+          slugs: declared,
         };
 
         this.entries.push(entry);
@@ -408,7 +441,11 @@ export class ContentIndex {
             const url = resolveUrlPatternWithMapping(pattern, item, locale, fieldMapping, defaults);
             if (!url) continue;
             const params = this.extractUrlParams(pattern, url) || {};
-            this.byUrl.set(url, { contentType, slug: itemSlug, entry: templateEntry, params, patternLocale: localeKey });
+            this.rememberPublicUrl(
+              url,
+              { contentType, slug: itemSlug, entry: templateEntry, params, patternLocale: localeKey, source: "database" },
+              locale,
+            );
           }
         }
         this.dbIndexedTypes.add(contentType);
@@ -416,7 +453,11 @@ export class ContentIndex {
     }
 
     this.initialized = true;
-    log.info(`[ContentIndex] Fast scan: ${this.entries.length} YAML entries, ${this.byUrl.size} DB-backed URLs in lookup (image/variable/redirect/SEO deferred to background)`);
+    for (const entry of this.entries) {
+      this.indexYamlEntryUrls(entry);
+    }
+    this.attachHreflangAlternates();
+    log.info(`[ContentIndex] Fast scan: ${this.entries.length} YAML entries, ${this.byUrl.size} public URLs in lookup (image/variable/redirect/SEO deferred to background)`);
   }
 
   /**
@@ -462,33 +503,8 @@ export class ContentIndex {
               (Boolean(variantLocaleMatch) ||
                 /^(?:template|single)\.[a-z0-9-]+\./i.test(baseName) ||
                 /^[a-z0-9-]+\.[a-z]{2}/i.test(baseName));
-            if (isVariantLayer && variantLocaleMatch) {
-              const liveLocale = variantLocaleMatch[1]!;
-              const hasLive =
-                entry.files.some(
-                  (f) =>
-                    f === `${liveLocale}.yml` ||
-                    f === `${liveLocale}.yaml` ||
-                    f === `template.${liveLocale}.yml` ||
-                    f === `template.${liveLocale}.yaml` ||
-                    f === `single.${liveLocale}.yml` ||
-                    f === `single.${liveLocale}.yaml`,
-                ) || entry.locales.includes(liveLocale);
-              if (hasLive) {
-                // Redirects on variant overlays are ignored when a live locale exists.
-              } else {
-                const localeSlugForRedirect =
-                  parsed.slug && typeof parsed.slug === "string" ? parsed.slug : entry.slug;
-                this.extractRedirects(
-                  parsed,
-                  entry.slug,
-                  liveLocale,
-                  entry.contentType,
-                  relFilePath,
-                  localeSlugForRedirect,
-                  nextRedirects,
-                );
-              }
+            if (isVariantLayer) {
+              // Draft / variant redirects take effect only when the variant is published.
             } else if (isLiveLocale || baseName === "_common") {
               const localeSlugForRedirect =
                 parsed.slug && typeof parsed.slug === "string" ? parsed.slug : entry.slug;
@@ -862,6 +878,131 @@ export class ContentIndex {
    * - DB: `_hreflangs` locale→slug map on the mapped item (lookup by current URL slug)
    * By default skips empty detached locales (public). Pass includeEmptyLocales for admin.
    */
+  /**
+   * Record one public URL. YAML does not replace a database URL already stored
+   * at the same path. `publicLocale` is the en/es key callers look up.
+   */
+  private rememberPublicUrl(url: string, value: ByUrlEntry, publicLocale: string): void {
+    if (!url) return;
+    const prev = this.byUrl.get(url);
+    if (prev && prev.source !== "yaml" && value.source === "yaml") return;
+    this.byUrl.set(url, value);
+    const key = `${value.contentType}:${value.slug}`;
+    const urls = this.alternateByKey.get(key) ?? {};
+    urls[publicLocale] = url;
+    this.alternateByKey.set(key, urls);
+  }
+
+  private forgetYamlUrls(contentType: string, slug: string): void {
+    const key = `${contentType}:${slug}`;
+    for (const [url, val] of [...this.byUrl]) {
+      if (val.source === "yaml" && val.contentType === contentType && val.slug === slug) {
+        this.byUrl.delete(url);
+      }
+    }
+    const urls = this.alternateByKey.get(key);
+    if (!urls) return;
+    for (const [locale, url] of Object.entries(urls)) {
+      const row = this.byUrl.get(url);
+      if (!row) delete urls[locale];
+    }
+    if (Object.keys(urls).length === 0) this.alternateByKey.delete(key);
+  }
+
+  /** Public slug for one language: the language's own slug, else the `_common.yml` slug, else the page ID. */
+  private localeSlugFromFile(entry: ContentEntry, locale: string): string {
+    const declared = entry.slugs?.locales?.[locale];
+    if (declared) return declared;
+    if (!entry.slugs) {
+      const basePath = path.join(process.cwd(), entry.directory);
+      const fromFile = this.declaredSlugInFolder(basePath, locale);
+      if (fromFile) return fromFile;
+      return this.declaredSlugInFolder(basePath, "_common") || entry.slug;
+    }
+    return entry.slugs.common || entry.slug;
+  }
+
+  /** Regex read of `slug:` in `{stem}.yml` / `.yaml` (no full YAML parse). */
+  private declaredSlugInFolder(folderPath: string, stem: string): string | undefined {
+    for (const candidate of [`${stem}.yml`, `${stem}.yaml`]) {
+      const filePath = path.join(folderPath, candidate);
+      if (!fs.existsSync(filePath)) continue;
+      try {
+        const m = fs.readFileSync(filePath, "utf-8").match(DECLARED_SLUG_RE);
+        if (m) return m[1].trim();
+      } catch {
+        /* fall through */
+      }
+      break;
+    }
+    return undefined;
+  }
+
+  /** Build this entry's public URLs once. Extra pattern params (category) are read here, not per request. */
+  private indexYamlEntryUrls(entry: ContentEntry): void {
+    const config = this.contentTypeConfigs[entry.contentType];
+    if (!config?.url_pattern) return;
+    this.forgetYamlUrls(entry.contentType, entry.slug);
+    for (const locale of entry.locales) {
+      try {
+        const localeSlug = this.localeSlugFromFile(entry, locale);
+        const params = this.resolveUrlPatternParamsForEntry(entry.contentType, entry.slug, locale) || {};
+        const url = this.buildUrl(entry.contentType, locale, localeSlug, params);
+        this.rememberPublicUrl(
+          url,
+          {
+            contentType: entry.contentType,
+            slug: entry.slug,
+            entry,
+            params,
+            patternLocale: locale,
+            source: "yaml",
+          },
+          locale,
+        );
+      } catch {
+        /* one bad entry must not drop the rest of the index */
+      }
+    }
+  }
+
+  /** Point each database slug at the public URLs of its hreflang siblings. */
+  private attachHreflangAlternates(): void {
+    const types = new Set<string>(this.dbIndexedTypes);
+    for (const val of this.byUrl.values()) {
+      if (val.source !== "yaml") types.add(val.contentType);
+    }
+    for (const contentType of types) {
+      if (!getHreflangsSource(contentType, this.contentRoot)) continue;
+      const typeItems = loadItemsForType(this, contentType);
+      if (!typeItems) continue;
+      for (const item of typeItems.items) {
+        const itemSlug = String(item.slug ?? "");
+        if (!itemSlug) continue;
+        const map = resolveHreflangsFromRecord(item, contentType, this.contentRoot);
+        if (!map) continue;
+        const urls: Record<string, string> = {};
+        for (const [locale, localeSlug] of Object.entries(map)) {
+          const url = this.alternateByKey.get(`${contentType}:${localeSlug}`)?.[locale];
+          if (url) urls[locale] = url;
+        }
+        if (Object.keys(urls).length > 0) {
+          this.alternateByKey.set(`${contentType}:${itemSlug}`, urls);
+        }
+      }
+    }
+  }
+
+  private indexedAlternateUrls(slug: string, contentType: string): Record<string, string> | null {
+    const direct = this.alternateByKey.get(`${contentType}:${slug}`);
+    if (direct && Object.keys(direct).length > 0) return { ...direct };
+    const baseSlug = this.resolveBaseSlug(slug, contentType);
+    if (baseSlug === slug) return null;
+    const viaBase = this.alternateByKey.get(`${contentType}:${baseSlug}`);
+    if (viaBase && Object.keys(viaBase).length > 0) return { ...viaBase };
+    return null;
+  }
+
   getAlternateUrls(
     slug: string,
     contentType: string,
@@ -869,8 +1010,14 @@ export class ContentIndex {
   ): Record<string, string> {
     this.ensureInitialized();
     const normalized = this.normalizeType(contentType);
-    const config = this.contentTypeConfigs[normalized];
     const includeEmpty = options?.includeEmptyLocales === true;
+    const indexed = this.indexedAlternateUrls(slug, normalized);
+    if (indexed) {
+      const baseSlug = this.resolveBaseSlug(slug, normalized);
+      return includeEmpty
+        ? indexed
+        : this.filterEmptyDetachedAlternateUrls(baseSlug, normalized, indexed);
+    }
 
     const dbUrls = getHreflangsSource(normalized, this.contentRoot)
       ? this.getAlternateUrlsFromDatabase(slug, normalized)
@@ -1323,7 +1470,8 @@ export class ContentIndex {
   private ensureInitialized(): void {
     if (!this.initialized) {
       this.scanFast();
-      this.startSlowScanAsync();
+      // Slow maps (redirects, images, variables, menus, SEO) are built on Sidequest.
+      this.enqueueIndexRefresh();
     }
   }
 
@@ -1396,11 +1544,125 @@ export class ContentIndex {
     return results;
   }
 
+  /** Exact lookup: page ID, else a declared language or `_common.yml` slug. Spelling variants go through `resolveEntryRef`. */
   resolveBaseSlug(slug: string, contentType: string): string {
     this.ensureInitialized();
     const normalized = this.normalizeType(contentType);
     if (this.bySlug.has(slug) && this.bySlug.get(slug)?.some(e => e.contentType === normalized)) return slug;
     return this.localeSlugMap.get(`${slug}:${normalized}`) || slug;
+  }
+
+  /** Every alias (ID, `_common.yml` slug, language slug) whose `slugKey` equals the ref's key. */
+  findSlugAliases(contentType: string, ref: string): SlugAlias[] {
+    this.ensureInitialized();
+    const key = slugKey(ref);
+    if (!key) return [];
+    const byKey = this.getSlugKeyIndex().get(this.normalizeType(contentType));
+    return byKey?.get(key)?.map((a) => ({ ...a })) ?? [];
+  }
+
+  /** Declared slugs for an indexed entry (undefined when not indexed or from an older snapshot). */
+  getDeclaredSlugs(contentType: string, entryId: string): EntryDeclaredSlugs | undefined {
+    const entry = this.findBySlug(entryId, { contentType })[0];
+    return entry?.slugs ? structuredClone(entry.slugs) : undefined;
+  }
+
+  /**
+   * Keys shared by more than one page of the same type. `resolvesTo` is set when exactly one of them
+   * owns the key as its page ID (that page wins lookups; the others' slug is shadowed).
+   */
+  getSlugKeyCollisions(
+    contentType?: string,
+  ): { contentType: string; key: string; entryIds: string[]; resolvesTo?: string }[] {
+    this.ensureInitialized();
+    const out: { contentType: string; key: string; entryIds: string[]; resolvesTo?: string }[] = [];
+    const wanted = contentType ? this.normalizeType(contentType) : null;
+    for (const [type, byKey] of this.getSlugKeyIndex()) {
+      if (wanted && type !== wanted) continue;
+      for (const [key, aliases] of byKey) {
+        const ids = [...new Set(aliases.map((a) => a.entryId))];
+        if (ids.length < 2) continue;
+        const idOwners = [...new Set(aliases.filter((a) => a.kind === "id").map((a) => a.entryId))];
+        out.push({
+          contentType: type,
+          key,
+          entryIds: ids.sort(),
+          ...(idOwners.length === 1 ? { resolvesTo: idOwners[0] } : {}),
+        });
+      }
+    }
+    return out.sort((a, b) => a.key.localeCompare(b.key));
+  }
+
+  /** True while a queued background refresh has not been applied yet, or before the first full build. */
+  isRefreshPending(): boolean {
+    return this.refreshPending || !this.slowPhaseReady;
+  }
+
+  private readDeclaredSlugs(folderPath: string, files: string[]): EntryDeclaredSlugs {
+    const out: EntryDeclaredSlugs = {};
+    for (const file of files) {
+      const stem = file.replace(/\.(yml|yaml)$/, "");
+      const isCommon = stem === "_common";
+      if (!isCommon && !LIVE_LOCALE_STEM.test(stem)) continue;
+      try {
+        const m = fs.readFileSync(path.join(folderPath, file), "utf-8").match(DECLARED_SLUG_RE);
+        if (!m) continue;
+        const value = m[1].trim();
+        if (isCommon) out.common = value;
+        else (out.locales ??= {})[stem] = value;
+      } catch {}
+    }
+    return out;
+  }
+
+  /** Language slugs win over the `_common.yml` slug for the same exact address. */
+  private rememberDeclaredSlugs(contentType: string, entryId: string, declared: EntryDeclaredSlugs): void {
+    this.slugKeyIndex = null;
+    for (const localeSlug of Object.values(declared.locales ?? {})) {
+      if (localeSlug !== entryId) this.localeSlugMap.set(`${localeSlug}:${contentType}`, entryId);
+    }
+    const common = declared.common;
+    if (common && common !== entryId && !this.localeSlugMap.has(`${common}:${contentType}`)) {
+      this.localeSlugMap.set(`${common}:${contentType}`, entryId);
+    }
+  }
+
+  private getSlugKeyIndex(): Map<string, Map<string, SlugAlias[]>> {
+    if (this.slugKeyIndex) return this.slugKeyIndex;
+    const index = new Map<string, Map<string, SlugAlias[]>>();
+    const add = (contentType: string, alias: SlugAlias) => {
+      const key = slugKey(alias.value);
+      if (!key) return;
+      let byKey = index.get(contentType);
+      if (!byKey) index.set(contentType, (byKey = new Map()));
+      const list = byKey.get(key) ?? [];
+      const dup = list.some(
+        (a) => a.entryId === alias.entryId && a.kind === alias.kind && a.value === alias.value && a.locale === alias.locale,
+      );
+      if (!dup) list.push(alias);
+      byKey.set(key, list);
+    };
+    const withDeclared = new Set<string>();
+    for (const e of this.entries) {
+      add(e.contentType, { entryId: e.slug, kind: "id", value: e.slug });
+      if (!e.slugs) continue;
+      withDeclared.add(`${e.contentType}:${e.slug}`);
+      if (e.slugs.common) add(e.contentType, { entryId: e.slug, kind: "common_slug", value: e.slugs.common });
+      for (const [locale, value] of Object.entries(e.slugs.locales ?? {})) {
+        add(e.contentType, { entryId: e.slug, kind: "locale_slug", value, locale });
+      }
+    }
+    // Snapshots built before declared slugs existed: aliases without a known language.
+    for (const [mapKey, entryId] of this.localeSlugMap) {
+      const sep = mapKey.lastIndexOf(":");
+      if (sep < 0) continue;
+      const contentType = mapKey.slice(sep + 1);
+      if (withDeclared.has(`${contentType}:${entryId}`)) continue;
+      add(contentType, { entryId, kind: "locale_slug", value: mapKey.slice(0, sep) });
+    }
+    this.slugKeyIndex = index;
+    return index;
   }
 
   resolveLocaleFromUrlSlug(urlSlug: string, contentType: string): string | undefined {
@@ -1416,6 +1678,7 @@ export class ContentIndex {
     return undefined;
   }
 
+  /** Public slug for one language: the language's own slug, else the `_common.yml` slug, else the page ID. */
   getLocaleSlug(baseSlug: string, contentType: string, locale: string): string {
     this.ensureInitialized();
     try {
@@ -1428,6 +1691,11 @@ export class ContentIndex {
         if (parsed?.slug && typeof parsed.slug === "string") {
           return parsed.slug;
         }
+      }
+      // Database types resolve to the type folder; only an entry folder's `_common.yml` names the page.
+      if (path.basename(folderPath) === this.resolveBaseSlug(baseSlug, normalized)) {
+        const common = this.declaredSlugInFolder(folderPath, "_common");
+        if (common) return common;
       }
     } catch {}
     return baseSlug;
@@ -1464,24 +1732,15 @@ export class ContentIndex {
 
   /**
    * Re-read custom-redirects.yml from disk into redirectEntries.
-   * Never leaves the index in a misleading custom-only + ready state: if the slow
-   * phase is not ready yet, runs a full slow rebuild. Once ready, always uses the
-   * cheap custom-only path (even when there are zero content redirects).
+   * If the slow phase is not ready yet, returns the redirects already in memory
+   * and enqueues the Sidequest index job. Once ready, always uses the cheap
+   * custom-only path (even when there are zero content redirects).
    */
   refreshCustomRedirects(): RedirectEntry[] {
     this.ensureInitialized();
 
     if (!this.slowPhaseReady) {
-      this.cancelPendingSlowScan();
-      this.slowScanRunning = true;
-      try {
-        this.scanSlow();
-      } finally {
-        this.slowScanRunning = false;
-        if (this.slowScanQueued) {
-          this.startSlowScanAsync(0);
-        }
-      }
+      this.enqueueIndexRefresh();
       return [...this.redirectEntries];
     }
 
@@ -1501,7 +1760,7 @@ export class ContentIndex {
    *
    * - `custom-redirects.yml` → cheap re-read of that file
    * - page `meta.redirects` → re-extract redirects from that one source file
-   * - unknown / not-ready → non-blocking background slow scan
+   * - unknown / not-ready → enqueue the Sidequest index job (no site parse on this process)
    */
   refreshAfterRedirectWrite(writtenPath?: string): void {
     this.ensureInitialized();
@@ -1511,7 +1770,7 @@ export class ContentIndex {
       return;
     }
     if (!this.refreshRedirectsFromContentSource(source)) {
-      this.startSlowScanAsync(0);
+      this.enqueueIndexRefresh();
     }
   }
 
@@ -1580,31 +1839,8 @@ export class ContentIndex {
           /^(?:template|single)\.[a-z0-9-]+\./i.test(baseName) ||
           /^[a-z0-9-]+\.[a-z]{2}/i.test(baseName));
 
-      if (isVariantLayer && variantLocaleMatch) {
-        const liveLocale = variantLocaleMatch[1]!;
-        const hasLive =
-          entry.files.some(
-            (f) =>
-              f === `${liveLocale}.yml` ||
-              f === `${liveLocale}.yaml` ||
-              f === `template.${liveLocale}.yml` ||
-              f === `template.${liveLocale}.yaml` ||
-              f === `single.${liveLocale}.yml` ||
-              f === `single.${liveLocale}.yaml`,
-          ) || entry.locales.includes(liveLocale);
-        if (!hasLive) {
-          const localeSlugForRedirect =
-            parsed.slug && typeof parsed.slug === "string" ? parsed.slug : entry.slug;
-          this.extractRedirects(
-            parsed,
-            entry.slug,
-            liveLocale,
-            entry.contentType,
-            sourceRel,
-            localeSlugForRedirect,
-            next,
-          );
-        }
+      if (isVariantLayer) {
+        // Draft / variant redirects take effect only when the variant is published.
       } else if (isLiveLocale || baseName === "_common") {
         const localeSlugForRedirect =
           parsed.slug && typeof parsed.slug === "string" ? parsed.slug : entry.slug;
@@ -1749,10 +1985,17 @@ export class ContentIndex {
     this.ensureInitialized();
     const cleanUrl = url.split("?")[0].split("#")[0];
 
-    // For DB-backed content types: use exact URL index (prevents duplicate URLs and false positives)
-    const dbMatch = this.byUrl.get(cleanUrl);
-    if (dbMatch) {
-      return { contentType: dbMatch.contentType, slug: dbMatch.slug, entry: dbMatch.entry, fromDatabase: true, params: dbMatch.params, patternLocale: dbMatch.patternLocale };
+    // Exact public URL from the scan. YAML hits are not database pages.
+    const indexed = this.byUrl.get(cleanUrl);
+    if (indexed) {
+      return {
+        contentType: indexed.contentType,
+        slug: indexed.slug,
+        entry: indexed.entry,
+        fromDatabase: indexed.source === "yaml" ? undefined : true,
+        params: indexed.params,
+        patternLocale: indexed.patternLocale,
+      };
     }
 
     for (const [contentType, config] of Object.entries(this.contentTypeConfigs)) {
@@ -1779,6 +2022,12 @@ export class ContentIndex {
           const found = this.findBySlug(slug, { contentType });
           if (found.length > 0) {
             const patternLocale = localeKey === "default" ? "en" : localeKey;
+            // A spelling variant of the official address (e.g. a mixed-case folder name) is not a
+            // second live URL; the fallback redirect sends it to the official address.
+            const official = found[0].locales.includes(patternLocale)
+              ? this.localeSlugFromFile(found[0], patternLocale)
+              : slug;
+            if (official !== slug && slugKey(official) === slugKey(slug)) continue;
             const expectedParams = this.resolveUrlPatternParamsForEntry(contentType, found[0].slug, patternLocale);
             if (expectedParams) {
               const mismatch = Object.entries(expectedParams).some(
@@ -1861,37 +2110,50 @@ export class ContentIndex {
   }
 
   /**
-   * Reindex content. Default is non-blocking: scanFast + coalesced background
-   * scanSlow (same as the file-watcher path). Pass `{ syncSlow: true }` when
-   * redirects/index must be correct before the caller returns (GitHub pull,
-   * rename-with-redirect, raw YAML save, explicit refresh-cache).
-   * Does not rebuild public HTML. Callers enqueue the pages that changed.
+   * Ask Sidequest to rebuild the full index. Does not walk or parse the site
+   * on this process. `syncSlow` is accepted so existing callers compile; the
+   * request returns as soon as the job is queued (one live job per site).
+   * Does not rebuild public HTML.
    */
-  refresh(opts?: { syncSlow?: boolean }): void {
-    const syncSlow = opts?.syncSlow === true;
+  refresh(_opts?: { syncSlow?: boolean }): void {
+    this.reloadContentTypeConfigs();
     this.getDatabase().clearMappedMemo();
-
-    if (!syncSlow) {
-      this.scanFast();
-      this.startSlowScanAsync();
-      invalidateStaticListingCache(undefined, this.contentRoot);
-      return;
-    }
-
-    if (this.refreshRunning) {
-      this.refreshQueued = true;
-      return;
-    }
-    this.refreshRunning = true;
-    try {
-      do {
-        this.refreshQueued = false;
-        this.scan();
-      } while (this.refreshQueued);
-    } finally {
-      this.refreshRunning = false;
-    }
+    this.enqueueIndexRefresh();
     invalidateStaticListingCache(undefined, this.contentRoot);
+  }
+
+  /**
+   * Queue IndexRefreshJob for this site. Coalesces with any index_refresh
+   * already waiting or running. Only the Express web process enqueues
+   * (`WEBLIFY_PROCESS=web`); MCP, Sidequest, diagnostics, prebuild, and other
+   * entrypoints no-op. Also no-op under vitest so unit tests do not open the
+   * Sidequest database; callers spy on this method to assert the enqueue.
+   */
+  enqueueIndexRefresh(): void {
+    if (process.env.VITEST || process.env.WEBLIFY_PROCESS !== "web") {
+      return;
+    }
+    this.refreshPending = true;
+    const site = this.contentRootName;
+    const contentRoot = this.contentRoot;
+    void import("./jobs/queue")
+      .then(async ({ enqueueJob }) => {
+        let generation = 0;
+        try {
+          const { getLatestWriteGeneration } = await import("./events/event-store");
+          generation = getLatestWriteGeneration(site);
+        } catch (err) {
+          log.warn({ err, site }, "[ContentIndex] write generation unavailable; enqueueing index refresh at 0");
+        }
+        await enqueueJob(
+          "index_refresh",
+          { site, contentRoot, generation },
+          { uniqueKey: `index:${site}`, uniqueWithArgs: false },
+        );
+      })
+      .catch((err) => {
+        log.warn({ err, site }, "[ContentIndex] Failed to enqueue index refresh");
+      });
   }
 
   getStats(): { total: number; byType: Record<string, number> } {
@@ -2012,6 +2274,16 @@ export class ContentIndex {
       log.error({ err: error }, `Error loading common data for ${contentType}/${slug}:`);
       return null;
     }
+  }
+
+  /**
+   * Language a matched address is served in: the URL pattern's locale, else (one
+   * address for every language, e.g. /landing/:slug) the entry's `_common.yml` `locale`, else en.
+   */
+  servedLocale(contentType: string, slug: string, patternLocale?: string): string {
+    if (patternLocale && patternLocale !== "default") return patternLocale;
+    const common = this.loadCommonData(contentType as ContentType, slug)?.locale;
+    return typeof common === "string" && common ? common : "en";
   }
 
   loadMergedContent(
@@ -2454,10 +2726,11 @@ export class ContentIndex {
     for (let i = 0; i < parsedFiles.length; i++) {
       const { file } = parsedFiles[i];
       const outputPath = path.join(absTargetDir, file);
-      const { escaped, map } = escapeObjectVars(regenerated[i]);
-      const dumped = yaml.dump(escaped, { lineWidth: 120, noRefs: true, sortKeys: false });
-      const yamlStr = unescapeYamlDump(dumped, map);
-      fs.writeFileSync(outputPath, yamlStr, "utf-8");
+      fs.writeFileSync(
+        outputPath,
+        dumpContentYaml(regenerated[i], { lineWidth: 120, noRefs: true, sortKeys: false }, outputPath),
+        "utf-8",
+      );
       copiedFiles.push(file);
     }
 
@@ -2617,9 +2890,11 @@ export class ContentIndex {
         });
 
         parsed.sections = kept;
-        const { escaped: escapedOut, map: mapOut } = escapeObjectVars(parsed);
-        const dumped = yaml.dump(escapedOut, { lineWidth: 120, noRefs: true, sortKeys: false });
-        fs.writeFileSync(absFilePath, unescapeYamlDump(dumped, mapOut), "utf-8");
+        fs.writeFileSync(
+          absFilePath,
+          dumpContentYaml(parsed, { lineWidth: 120, noRefs: true, sortKeys: false }, absFilePath),
+          "utf-8",
+        );
       } catch (e) {
         log.error({ err: e }, `Error processing ${absFilePath}:`);
       }
@@ -2659,6 +2934,8 @@ export class ContentIndex {
     for (const [k, v] of this.byPath) byPath[k] = structuredClone(v);
     const byUrl: Record<string, unknown> = {};
     for (const [k, v] of this.byUrl) byUrl[k] = structuredClone(v);
+    const alternateByKey: Record<string, Record<string, string>> = {};
+    for (const [k, v] of this.alternateByKey) alternateByKey[k] = { ...v };
     const localeSlugMap: Record<string, string> = {};
     for (const [k, v] of this.localeSlugMap) localeSlugMap[k] = v;
     const imageUsage: Record<string, string[]> = {};
@@ -2676,6 +2953,7 @@ export class ContentIndex {
       bySlug,
       byPath,
       byUrl,
+      alternateByKey,
       localeSlugMap,
       imageUsage,
       variableUsage,
@@ -2695,15 +2973,30 @@ export class ContentIndex {
     latestWriteGeneration: number,
   ): boolean {
     if (latestWriteGeneration > snapshot.generation) return false;
+    this.reloadContentTypeConfigs();
+    this.slugKeyIndex = null;
+    this.refreshPending = false;
     this.entries = structuredClone(snapshot.entries);
     this.bySlug = new Map(Object.entries(snapshot.bySlug));
     this.byPath = new Map(Object.entries(snapshot.byPath));
+    this.initialized = true;
     this.byUrl = new Map(
-      Object.entries(snapshot.byUrl) as [
-        string,
-        { contentType: string; slug: string; entry: ContentEntry; params: Record<string, string>; patternLocale: string },
-      ][],
+      Object.entries(snapshot.byUrl) as [string, ByUrlEntry][],
     );
+    if (snapshot.alternateByKey) {
+      this.alternateByKey = new Map(
+        Object.entries(snapshot.alternateByKey).map(([key, urls]) => [key, { ...urls }]),
+      );
+    } else {
+      this.alternateByKey = new Map();
+      for (const [url, val] of this.byUrl) {
+        const locale = val.patternLocale === "default" ? "en" : val.patternLocale;
+        const key = `${val.contentType}:${val.slug}`;
+        const urls = this.alternateByKey.get(key) ?? {};
+        urls[locale] = url;
+        this.alternateByKey.set(key, urls);
+      }
+    }
     this.localeSlugMap = new Map(Object.entries(snapshot.localeSlugMap));
     this.imageUsage = new Map(
       Object.entries(snapshot.imageUsage).map(([k, v]) => [k, new Set(v)]),
@@ -2722,13 +3015,24 @@ export class ContentIndex {
     );
     this.redirectEntries = structuredClone(snapshot.redirectEntries);
     this.slowPhaseReady = snapshot.slowPhaseReady;
-    this.initialized = true;
     this.clearLiveRedirectCache();
     return true;
   }
 
+  /** Drop locale-slug keys that already point at this folder and content type. */
+  private forgetLocaleSlugs(contentType: string, folderSlug: string): void {
+    for (const [key, value] of this.localeSlugMap) {
+      const sep = key.lastIndexOf(":");
+      if (sep < 0) continue;
+      if (value === folderSlug && key.slice(sep + 1) === contentType) {
+        this.localeSlugMap.delete(key);
+      }
+    }
+  }
+
   /**
    * Re-index a single entry folder after a save (one-folder fast scan, no site scan).
+   * If the folder is gone, the previous URLs and locale slugs for it are removed.
    */
   upsertEntry(filePath: string): void {
     this.ensureInitialized();
@@ -2738,6 +3042,7 @@ export class ContentIndex {
     const folderName = path.basename(dirRel);
 
     // Remove prior entry for this directory
+    this.slugKeyIndex = null;
     this.entries = this.entries.filter((e) => e.directory !== dirRel);
     for (const [slug, list] of [...this.bySlug]) {
       const filtered = list.filter((e) => e.directory !== dirRel);
@@ -2746,12 +3051,16 @@ export class ContentIndex {
     }
     this.byPath.delete(dirRel);
     for (const [url, val] of [...this.byUrl]) {
-      if (val.entry?.directory === dirRel) this.byUrl.delete(url);
+      if (val.entry?.directory === dirRel) {
+        this.byUrl.delete(url);
+        this.alternateByKey.delete(`${val.contentType}:${val.slug}`);
+      }
     }
 
     const parts = dirRel.split("/");
     if (parts.length < 3) return;
     const contentType = this.normalizeType(parts[parts.length - 2]!);
+    this.forgetLocaleSlugs(contentType, folderName);
     const folderPath = path.join(process.cwd(), dirRel);
     if (!fs.existsSync(folderPath)) return;
 
@@ -2774,44 +3083,17 @@ export class ContentIndex {
       }
     }
 
-    for (const file of files) {
-      const locale = file.replace(/\.(yml|yaml)$/, "");
-      if (locale.startsWith("_") || !/^[a-z]{2}(-[a-z]{2})?$/.test(locale)) continue;
-      try {
-        const raw = fs.readFileSync(path.join(folderPath, file), "utf-8");
-        const m = raw.match(/^slug:\s+["']?([^\s"'\n#]+)["']?/m);
-        if (m) {
-          const localeSlug = m[1].trim();
-          if (localeSlug !== slug) {
-            this.localeSlugMap.set(`${localeSlug}:${contentType}`, slug);
-          }
-        }
-      } catch {}
-    }
+    const declared = this.readDeclaredSlugs(folderPath, files);
+    this.rememberDeclaredSlugs(contentType, slug, declared);
 
-    const entry: ContentEntry = { slug, contentType, directory: dirRel, files, locales, title };
+    const entry: ContentEntry = { slug, contentType, directory: dirRel, files, locales, title, slugs: declared };
     this.entries.push(entry);
     const existing = this.bySlug.get(slug) || [];
     existing.push(entry);
     this.bySlug.set(slug, existing);
     this.byPath.set(dirRel, entry);
 
-    // Rebuild URL index for this entry
-    const config = this.contentTypeConfigs[contentType];
-    if (config?.url_pattern) {
-      for (const locale of locales) {
-        try {
-          const url = this.buildUrl(contentType, locale, slug);
-          this.byUrl.set(url, {
-            contentType,
-            slug,
-            entry,
-            params: {},
-            patternLocale: locale,
-          });
-        } catch {}
-      }
-    }
+    this.indexYamlEntryUrls(entry);
   }
 }
 

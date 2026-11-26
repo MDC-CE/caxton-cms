@@ -15,6 +15,7 @@ import {
   listDraftLocales,
 } from "./draft-entry";
 import { isTemplateVersioningSlug } from "./shared-layout-entry";
+import { AB_CHECK_SLUG, isAbCheckPage } from "./ab-testing/state";
 import path from "path";
 const log = child({ module: "sitemap" });
 
@@ -74,11 +75,6 @@ function getBaseUrl(ctx?: ActiveSiteCtx): string {
     return process.env.SITE_URL.replace(/\/$/, "");
   }
 
-  // Fall back to Replit's domain
-  if (process.env.REPLIT_DEV_DOMAIN) {
-    return `https://${process.env.REPLIT_DEV_DOMAIN}`;
-  }
-
   // Development fallback
   return "http://localhost:5000";
 }
@@ -98,6 +94,8 @@ type EntryType =
 interface CanonicalSitemapEntry {
   loc: string;
   lastmod?: string;
+  /** Full ISO editorial `updated_at`; never written to the XML. */
+  editorialUpdatedAt?: string;
   label: string;
   type: EntryType;
   locale?: string;
@@ -308,7 +306,11 @@ function formatLocaleLabel(locale: string): string {
  * Editorial lastmod (YYYY-MM-DD) from locale YAML `updated_at` else `published_at`.
  * Empty when neither is set — callers omit `<lastmod>` rather than using today.
  */
-function getYmlFileLastmod(contentType: string, dirSlug: string, locale: string): string {
+function getYmlFileDates(
+  contentType: string,
+  dirSlug: string,
+  locale: string,
+): { lastmod: string; editorialUpdatedAt?: string } {
   const iso = resolveEntryUpdatedAt({
     contentType,
     slug: dirSlug,
@@ -316,7 +318,7 @@ function getYmlFileLastmod(contentType: string, dirSlug: string, locale: string)
     contentRoot: _activeSiteCtx?.contentRootName ?? _contentFolder(),
     isDb: false,
   });
-  return toSitemapLastmod(iso, false);
+  return { lastmod: toSitemapLastmod(iso, false), ...(iso ? { editorialUpdatedAt: iso } : {}) };
 }
 
 /**
@@ -373,7 +375,7 @@ function buildCanonicalSitemapEntries(
 
     addEntry({
       loc: url,
-      lastmod: getYmlFileLastmod("program", program.dirSlug, program.locale),
+      ...getYmlFileDates("program", program.dirSlug, program.locale),
       label: `${program.title} (${formatLocaleLabel(program.locale)})`,
       type: "program",
       locale: program.locale,
@@ -395,7 +397,7 @@ function buildCanonicalSitemapEntries(
 
     addEntry({
       loc: url,
-      lastmod: getYmlFileLastmod("location", location.dirSlug, location.locale),
+      ...getYmlFileDates("location", location.dirSlug, location.locale),
       label: `Location: ${location.name} (${formatLocaleLabel(location.locale)})`,
       type: "location",
       locale: location.locale,
@@ -415,7 +417,7 @@ function buildCanonicalSitemapEntries(
 
     addEntry({
       loc: `${getBaseUrl(ctx)}${ci.buildUrl("page", page.locale, page.slug)}`,
-      lastmod: getYmlFileLastmod("page", page.dirSlug, page.locale),
+      ...getYmlFileDates("page", page.dirSlug, page.locale),
       label: `Page: ${page.title} (${formatLocaleLabel(page.locale)})`,
       type: "template_page",
       locale: page.locale,
@@ -478,6 +480,7 @@ function buildCanonicalSitemapEntries(
         addEntry({
           loc: itemUrl,
           ...(lastmod ? { lastmod } : {}),
+          ...(updatedIso ? { editorialUpdatedAt: updatedIso } : {}),
           label: `${typeLabel}: ${title} (${formatLocaleLabel(locale)})`,
           type: "static",
           locale,
@@ -542,7 +545,7 @@ function buildCanonicalSitemapEntries(
 
           addEntry({
             loc: url,
-            lastmod: getYmlFileLastmod(typeName, slug, locale),
+            ...getYmlFileDates(typeName, slug, locale),
             label: `${typeLabel}: ${title} (${formatLocaleLabel(locale)})`,
             type: typeName,
             locale,
@@ -696,6 +699,40 @@ export function getSitemapUrls(ctx?: ActiveSiteCtx, ignoreSiteBlock = false): Ar
     ? buildCanonicalSitemapEntries(ctx, { ignoreSiteBlock: true })
     : getCanonicalEntries(ctx);
   return entriesToHumanReadable(Array.from(entriesMap.values()));
+}
+
+export type PublicUrlSnapshotEntry = {
+  url: string;
+  entryKey: string | null;
+  contentType: string | null;
+  slug: string | null;
+  locale: string | null;
+  updatedAt: string | null;
+};
+
+/**
+ * Public URLs (sitemap rules applied) with the full editorial `updated_at`.
+ * Always a fresh walk: callers run in background jobs whose content index is
+ * new per run, so caching here would keep stale indexes alive.
+ */
+export function getPublicUrlSnapshot(ctx?: ActiveSiteCtx): PublicUrlSnapshotEntry[] {
+  const entriesMap = buildCanonicalSitemapEntries(ctx);
+  const out: PublicUrlSnapshotEntry[] = [];
+  const seen = new Set<string>();
+  for (const entry of entriesMap.values()) {
+    if (seen.has(entry.loc)) continue;
+    seen.add(entry.loc);
+    const { content_type, slug } = splitContentKey(entry.contentKey);
+    out.push({
+      url: entry.loc,
+      entryKey: entry.contentKey && entry.locale ? `${entry.contentKey}:${entry.locale}` : entry.contentKey ?? null,
+      contentType: content_type ?? null,
+      slug: slug ?? null,
+      locale: entry.locale ?? null,
+      updatedAt: entry.editorialUpdatedAt ?? null,
+    });
+  }
+  return out;
 }
 
 export type DebugSitemapUrl = {
@@ -979,6 +1016,9 @@ function buildDebugSitemapUrlsUncached(ctx?: ActiveSiteCtx): DebugSitemapUrl[] {
       isDraft?: boolean;
     }) => {
       if (seen.has(opts.loc)) return;
+      const { content_type, slug } = splitContentKey(opts.contentKey);
+      // The hidden A/B check page never appears in staff lists.
+      if (content_type && slug === AB_CHECK_SLUG && isAbCheckPage(content_type, slug, contentRoot)) return;
       seen.add(opts.loc);
       const inSitemap = !siteBlocked && opts.indexable && !opts.isDraft;
       pushDebugUrl(out, {
@@ -1291,6 +1331,14 @@ export function clearSitemapCache(): { success: boolean; message: string } {
   };
 }
 
+/** Drop one site's cached sitemap (and the default-site cache) so the next request rebuilds it from disk. */
+export function clearSiteSitemapCache(contentRootName: string, ci?: typeof contentIndex): void {
+  if (ci) _perSiteSitemapCache.delete(ci);
+  sitemapCache = null;
+  invalidateDebugSitemapUrls(contentRootName);
+  log.info(`[Sitemap] Cache cleared for ${contentRootName}`);
+}
+
 export function getSitemapCacheStatus(): {
   cached: boolean;
   generatedAt: number | null;
@@ -1322,172 +1370,35 @@ export function getSitemapCacheStatus(): {
 }
 
 // ============================================================================
-// Targeted cache mutation API
+// Content-change invalidation API
 // ============================================================================
 
-/**
- * Remove exactly one entry from the cache by its composite map key.
- * Key format: `${contentKey}:${locale}` (or `loc` URL for static/keyless entries).
- * No-op when cache is cold.
- */
+// Callers do not say which site they wrote to, so every cached sitemap is dropped.
+// Each site rebuilds from disk on its next sitemap request.
+function dropCachedSitemaps(reason: string): void {
+  invalidateDebugSitemapUrls();
+  if (!sitemapCache && _perSiteSitemapCache.size === 0) return;
+  sitemapCache = null;
+  _perSiteSitemapCache.clear();
+  log.info(`[Sitemap] Cache dropped after change to ${reason}`);
+}
+
+/** Content behind one sitemap key (`${contentKey}:${locale}` or a static `loc`) changed. */
 export function invalidateSitemapEntry(mapKey: string): void {
-  invalidateDebugSitemapUrls();
-  if (!sitemapCache) return;
-  sitemapCache.entries.delete(mapKey);
-  log.info(`[Sitemap] Invalidated entry: ${mapKey}`);
+  dropCachedSitemaps(mapKey);
 }
 
-/**
- * Remove all entries whose `contentKey` field equals the given value.
- * Covers all locales of a single piece of content, and clears stale URL
- * entries produced by slug-field edits.
- * No-op when cache is cold.
- */
+/** Any locale of one content entry (`${type}:${dirSlug}`) changed. */
 export function invalidateSitemapEntriesByContentKey(contentKey: string): void {
-  invalidateDebugSitemapUrls();
-  if (!sitemapCache) return;
-  let removed = 0;
-  for (const [key, entry] of sitemapCache.entries) {
-    if (entry.contentKey === contentKey) {
-      sitemapCache.entries.delete(key);
-      removed++;
-    }
-  }
-  if (removed > 0) {
-    log.info(`[Sitemap] Invalidated ${removed} entr${removed === 1 ? "y" : "ies"} for contentKey: ${contentKey}`);
-  }
+  dropCachedSitemaps(contentKey);
 }
 
-/**
- * Insert or replace one entry in the cache.
- * No-op when cache is cold (avoids creating a partial single-entry cache).
- */
-export function upsertSitemapEntry(entry: CanonicalSitemapEntry): void {
-  if (!sitemapCache) return;
-  const key = buildMapKey(entry);
-  sitemapCache.entries.set(key, entry);
-  log.info(`[Sitemap] Upserted entry: ${key} → ${entry.loc}`);
-}
-
-/**
- * Build a single CanonicalSitemapEntry for one locale of a YAML-driven content
- * type. Returns null when the content is not found or not indexable.
- * Blog posts are DB-backed and are not handled here.
- * Location indexing is robots-only (visibility no longer gates the sitemap).
- */
-function buildSingleEntry(type: string, dirSlug: string, locale: string): CanonicalSitemapEntry | null {
-  const merged = loadMergedContent(type, dirSlug, locale);
-  if (!merged) return null;
-
-  const meta = (merged.meta as ContentMeta) || {};
-  if (!shouldIndex(meta.robots, resolveSitemapContentRoot(_activeSiteCtx ?? undefined))) return null;
-
-  // Prefer resolved merged.slug; fall back to dirSlug only when merged has no slug field
-  // (classic YAML types). Never index unresolved {{ single.slug }} placeholders.
-  const urlSlug =
-    resolveSitemapUrlSlug(merged.slug) ??
-    (merged.slug == null || merged.slug === "" ? dirSlug : null);
-  if (!urlSlug) {
-    log.warn(
-      `[Sitemap] Skipping ${type} entry "${dirSlug}" (${locale}): slug is missing or unresolved template expression`,
-    );
-    return null;
-  }
-  const url = `${getBaseUrl(_activeSiteCtx ?? undefined)}${_ci().buildUrl(type, locale, urlSlug)}`;
-  const title = meta.page_title || (merged.title as string) || (merged.name as string) || dirSlug;
-
-  let entryType: EntryType = type;
-  let label: string;
-
-  if (type === "program") {
-    label = `${title} (${formatLocaleLabel(locale)})`;
-  } else if (type === "location") {
-    label = `Location: ${title} (${formatLocaleLabel(locale)})`;
-  } else if (type === "page") {
-    entryType = "template_page";
-    label = `Page: ${title} (${formatLocaleLabel(locale)})`;
-  } else {
-    const typeLabel = type.charAt(0).toUpperCase() + type.slice(1);
-    label = `${typeLabel}: ${title} (${formatLocaleLabel(locale)})`;
-  }
-
-  return {
-    loc: url,
-    lastmod: getYmlFileLastmod(type, dirSlug, locale),
-    label,
-    type: entryType,
-    locale,
-    contentKey: `${type}:${dirSlug}`,
-  };
-}
-
-/**
- * Targeted update for one locale of a YAML-driven content entry.
- *
- * Only removes the exact map entry for this type+dirSlug+locale triple
- * (key: `${type}:${dirSlug}:${locale}`), then re-reads the source YAML
- * and upserts if `shouldIndex()` is true.
- *
- * Because the map key is stable and does not include the URL, slug-field
- * changes in the YAML are handled correctly: the stale URL entry is removed
- * and the new URL is inserted at the same key — without affecting sibling
- * locales.
- *
- * No-op for DB-backed content types and unsupported locales.
- * Safe to call when cache is cold — invalidation is a no-op and no partial
- * cache is created.
- */
+/** One locale of a content entry was saved, published, unpublished, or deleted. */
 export function refreshSitemapEntry(type: string, dirSlug: string, locale: string): void {
-  // DB-backed types are not handled via YAML refresh
-  if (getContentTypeConfig(type)?.database) return;
-
-  // Only process supported locales
-  if (!getSupportedLocales(_contentFolder()).includes(locale)) return;
-
-  // Remove only this locale's entry — does not affect sibling locales
-  invalidateSitemapEntry(`${type}:${dirSlug}:${locale}`);
-
-  // If cache isn't warm, don't pre-populate a partial cache
-  if (!sitemapCache) return;
-
-  const entry = buildSingleEntry(type, dirSlug, locale);
-  if (entry) {
-    upsertSitemapEntry(entry);
-  }
+  dropCachedSitemaps(`${type}:${dirSlug}:${locale}`);
 }
 
-/**
- * Targeted update for multiple locales of a YAML-driven content entry in a
- * single pass.
- *
- * Invalidates the content key once (covering stale URLs from slug-field edits
- * and noindex transitions), then re-reads and upserts each valid locale.
- * This avoids the re-invalidation problem that would occur if `refreshSitemapEntry`
- * were called per-locale in a loop: each call would purge the locales added by
- * previous calls.
- *
- * Use this for edits that affect all locales simultaneously (e.g. `_common.yml`
- * saves or `edit-common` requests where no locale is specified).
- *
- * No-op for DB-backed content types.
- * Safe to call when cache is cold.
- */
-export function refreshSitemapEntriesForContentKey(type: string, dirSlug: string, locales: string[]): void {
-  // Purge all stale entries for this content key once
-  invalidateSitemapEntriesByContentKey(`${type}:${dirSlug}`);
-
-  // If cache isn't warm, don't pre-populate a partial cache
-  if (!sitemapCache) return;
-
-  // DB-backed types are not handled via YAML refresh
-  if (getContentTypeConfig(type)?.database) return;
-
-  const supported = getSupportedLocales(_contentFolder());
-  for (const locale of locales) {
-    if (!supported.includes(locale)) continue;
-    const entry = buildSingleEntry(type, dirSlug, locale);
-    if (entry) {
-      upsertSitemapEntry(entry);
-    }
-  }
+/** Several locales (or `_common.yml`) of a content entry changed. */
+export function refreshSitemapEntriesForContentKey(type: string, dirSlug: string, _locales: string[]): void {
+  dropCachedSitemaps(`${type}:${dirSlug}`);
 }

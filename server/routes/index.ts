@@ -211,7 +211,8 @@ import {
 //
 //   geo.ts          /api/geo, /api/ip
 //   auth.ts         /api/auth, /api/debug-token
-//   forms.ts        /api/leads, /api/form-options
+//   forms.ts        /api/form-options
+//   webhooks.ts     /api/leads/webhook-delivery, /api/webhooks
 //   settings.ts     /api/settings, /api/content-types, /api/menus, /api/faqs
 //   content.ts      /api/content, /api/landings, /api/locations, /api/pages,
 //                   /api/career-programs, /api/content-pages, /api/preview
@@ -227,7 +228,6 @@ import {
 //   ai.ts           /api/ai, /api/chat, /api/brand-context
 //   validation.ts   /api/validation, /api/diagnostics, /api/debug
 //   ecommerce.ts    /api/ecommerce
-//   webhooks.ts     /api/webhooks
 //
 // Each file exports a single registerXxxRoutes(app: Express): void function.
 // Add your function call to the register block in registerRoutes() below.
@@ -250,6 +250,8 @@ import { registerComponentsRoutes } from "./components";
 import { registerPlaygroundCatalogRoutes } from "./playground-catalog";
 import { registerCatalogSyncRoutes } from "./catalog-sync";
 import { registerVersioningRoutes } from "./versioning";
+import { registerAbTestingRoutes, scheduleAbTestingBootRecovery } from "./ab-testing";
+import { registerInternalContentRoutes } from "./internal-content";
 import { registerGithubRoutes } from "./github";
 import { registerStaffAuthRoutes } from "./staff-auth";
 import { registerMediaRoutes } from "./media";
@@ -261,11 +263,14 @@ import { registerEcommerceRoutes } from "./ecommerce";
 import { registerAnalyticsRoutes } from "./analytics";
 import { registerFunnelRoutes } from "./funnel";
 import { registerProductRoutes } from "./product";
+import { registerTrackingKeyRoutes } from "./tracking-keys";
 import { registerWebhooksRoutes } from "./webhooks";
 import { registerOverlaysRoutes } from "./overlays";
 import { registerConsentRoutes } from "./consent";
+import { registerPageReadyRoutes } from "./page-ready";
 import { registerAdsRoutes } from "./ads";
-import { attachPageVersionToJson } from "./_helpers";
+import { registerIndexNowRoutes } from "./indexnow";
+import { attachPageVersionToJson, attachTrackingToJson } from "./_helpers";
 import { setWorkerRunNow } from "./_worker-state";
 import { getSiteInfo, getSiteContextMap, writeDevSiteFile, clearDevSiteFile } from "../site-manager";
 import { getSiteConfigs, getDefaultContentFolder } from "../site-config";
@@ -284,10 +289,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const { loadSyncStateFromBucket } = await import("../sync-state");
 
   await loadSyncLog();
-  const { getReplitCheckpoint, refreshGithubCommit } = await import(
+  const { getAppCheckpoint, refreshGithubCommit } = await import(
     "../sync-log"
   );
-  const restartMessage = `Server started (instance=${getInstanceId()}, checkpoint=${getReplitCheckpoint()}, env=${process.env.NODE_ENV || "development"}, pid=${process.pid})`;
+  const restartMessage = `Server started (instance=${getInstanceId()}, checkpoint=${getAppCheckpoint()}, env=${process.env.NODE_ENV || "development"}, pid=${process.pid})`;
   try {
     for (const ctx of Array.from(getSiteContextMap().values())) {
       ctx.syncLog.log("RESTART", restartMessage);
@@ -324,7 +329,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Apply redirect middleware for 301 redirects from YAML content
   app.use(redirectMiddleware);
 
-  app.use("/api", (req, res, next) => (req.method === "GET" ? attachPageVersionToJson(req, res, next) : next()));
+  app.use("/api", (req, res, next) => {
+    if (req.method !== "GET") return next();
+    attachPageVersionToJson(req, res, () => attachTrackingToJson(req, res, next));
+  });
 
 
   registerGeoRoutes(app);
@@ -332,6 +340,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerStaffAuthRoutes(app);
   registerFormsRoutes(app);
   registerConsentRoutes(app);
+  registerPageReadyRoutes(app);
   registerAdsRoutes(app);
   registerSettingsRoutes(app);
   registerContentRoutes(app);
@@ -340,6 +349,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerCatalogServiceRoutes(app);
   registerSectionsRoutes(app);
   registerSeoRoutes(app);
+  registerIndexNowRoutes(app);
   registerAdminRoutes(app);
   registerSidequestDashboardRoutes(app);
   registerSidequestAdminRoutes(app);
@@ -347,6 +357,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerPlaygroundCatalogRoutes(app);
   registerCatalogSyncRoutes(app);
   registerVersioningRoutes(app);
+  registerAbTestingRoutes(app);
+  scheduleAbTestingBootRecovery();
+  registerInternalContentRoutes(app);
   registerGithubRoutes(app);
   registerMediaRoutes(app);
   registerAiRoutes(app);
@@ -357,6 +370,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerAnalyticsRoutes(app);
   registerFunnelRoutes(app);
   registerProductRoutes(app);
+  registerTrackingKeyRoutes(app);
   registerWebhooksRoutes(app);
   registerOverlaysRoutes(app);
 
@@ -378,16 +392,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // These write/delete the .local/dev-site-override file on disk.
   // siteResolutionMiddleware reads that file synchronously on every request
   // to determine which site context to use.
-  //
-  // ⚠️  DO NOT switch this to a cookie-based approach.
-  //
-  //   Cookies fail silently in the Replit workspace because the app runs in a
-  //   cross-origin iframe (worf.replit.dev embedded inside replit.com).
-  //   Chrome 115+ blocks third-party cookies in this context — both
-  //   document.cookie writes on the client AND Set-Cookie response headers
-  //   from the server are ignored. SameSite=Lax and SameSite=None; Secure
-  //   were both tested and both fail. The file-based approach is the only
-  //   mechanism that works reliably.
   //
   // The client (devSite.ts) mirrors the value in localStorage so that
   // injectDevSite() can also append ?__site= to TanStack Query API calls

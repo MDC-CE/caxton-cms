@@ -31,10 +31,40 @@ export interface VersioningVariant {
 
 export interface VersioningLocale {
   variants: VersioningVariant[];
+  /** YYYY-MM-DD the current test run started. */
+  started_at?: string;
+}
+
+/** Site-wide A/B testing readiness (Settings → Tracking → A/B testing). */
+export interface AbTestingStatus {
+  set_up: boolean;
+  latest_check_ok: boolean;
+}
+
+export type SplitHealthStatus = "ok" | "mismatch" | "collecting" | "unavailable";
+
+export interface SplitHealthSource {
+  status: SplitHealthStatus;
+  counts: Record<string, number>;
+  total: number;
+  observed_pct: Record<string, number>;
+  p_value: number | null;
+  /** GA4 only: last ads-sync day included. */
+  through_date?: string | null;
+}
+
+export interface SplitHealthLocale {
+  experiment_id: string;
+  expected_pct: Record<string, number>;
+  server: SplitHealthSource;
+  ga4: SplitHealthSource;
+  status: SplitHealthStatus;
 }
 
 export interface VersioningResponse {
   versioning: Record<string, VersioningLocale> | null;
+  ab_testing?: AbTestingStatus;
+  split_health?: Record<string, SplitHealthLocale>;
   hasVersioningFile: boolean;
   filePath: string;
   availableLocales?: string[];
@@ -54,6 +84,8 @@ export interface VersioningResponse {
   publishedAt?: string | null;
   /** `{locale: {variant: badge}}` for drafts linked to a proposal. */
   proposalsByVariant?: Record<string, Record<string, VariantProposalLink>>;
+  /** Variant files on disk that versioning.yml does not list (no traffic, not manageable yet). */
+  unregisteredVariants?: Array<{ locale: string; slug: string; fileName: string }>;
 }
 
 export interface VariantProposalLink {
@@ -65,6 +97,22 @@ export interface VariantProposalLink {
   status?: string;
   proposer_username?: string;
   proposer_kind?: "agent" | "staff";
+  /** Epoch ms of the proposal's last change. */
+  updated_at?: number;
+}
+
+/** Open proposal on this page (or on the shared layout it is attached to), from entry-activity-count. */
+export interface PendingProposalForPage {
+  id: string;
+  title: string;
+  status: string;
+  proposer_username: string;
+  proposer_kind: "agent" | "staff";
+  updated_at: number;
+  open_blocker_count: number;
+  entries: Array<{ locale: string; variant: string | null }>;
+  shared_layout: boolean;
+  affected_count: number | null;
 }
 
 export interface ContentInfo {

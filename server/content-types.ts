@@ -11,6 +11,7 @@ import {
   getValueByPath,
   resolveFieldValue as resolveMappedFieldValue,
 } from "./transform";
+import { fieldMappingSource, isRowsFilterMapping, parseRowsFilters, type RowsFilter } from "@shared/validateEditorFieldTypes";
 import { child } from "./logger";
 import {
   KNOWN_SEO_FIELDS,
@@ -38,6 +39,15 @@ export interface ContentTypeFunnelConfig {
 /** Whether entries of this type may become sellable products. Omitted = false (unless back-compat). */
 export interface ContentTypeProductsConfig {
   allow_sellable_entries?: boolean;
+}
+
+/**
+ * Ads-first treatment. Omitted / false = off. When on: Tag Manager loads on page open,
+ * implied consent on landing in notice countries, and the site's own anonymous visit
+ * counts (data/<site>/visits.db) power page stats instead of GA4.
+ */
+export interface ContentTypeAdsConfig {
+  optimize?: boolean;
 }
 
 export interface LayoutMenuConfig {
@@ -132,7 +142,14 @@ export interface ContentTypeEntry {
   directory: string;
   url_pattern: Record<string, string>;
   unique_fields?: string[];
-  field_mapping?: Record<string, string | { source: string; default: string | null }>;
+  field_mapping?: Record<string, string | { source: string; default: string | null } | { rows_filters: RowsFilter[] }>;
+  /**
+   * Which cached rows become pages. Same shape as a section filter
+   * (`item_property_slug` + `value`, all must match). Missing = every row
+   * with a slug and url_pattern is a page. Not `rows_filters` and not a
+   * section `permanent_filters`.
+   */
+  entry_filters?: Array<{ item_property_slug: string; value: unknown }>;
   /** Editor widgets for Fields tab / ItemEditModal (keyed by mapping field name). */
   editor?: Record<string, ContentTypeEditorHint>;
   indexes?: string[];
@@ -175,6 +192,8 @@ export interface ContentTypeEntry {
    * for back-compat when the type already has purchasable products).
    */
   products?: ContentTypeProductsConfig;
+  /** Ads-first landing treatment (staff toggle on the content type dashboard). */
+  ads?: ContentTypeAdsConfig;
   /**
    * Type-level strategy brief for staff/agents (main why of this content type).
    * Required before any editor.required true|attached. Context only for field fill_intent.
@@ -221,6 +240,10 @@ const CONFIG_HEADER = `# Content Types Configuration
 #     { source, default } — schema key with default (default may be null)
 #     other path — remap DB column → schema key (DB-attached types only)
 #     function:… — computed; ?prefix — optional non-identity source
+#     { rows_filters } — other rows from this database. Each filter names
+#       rows_property_slug (column on the other rows) and value_from_current_row
+#       (column on the row being filled; that cell is the value to compare).
+#       Resolved before functions, max 50 rows or the field is [].
 #   System specials (DB identity / routing; auto-exposed on single as slug|locale|image|updated_at
 #   and _slug|_locale|_image|_updated_at — not {{ entry._hreflangs }}):
 #     _slug — entry identity for URLs / lookups
@@ -245,6 +268,13 @@ const CONFIG_HEADER = `# Content Types Configuration
 #
 # database (optional):
 #   slug: database name (matches a db config in 4geeks-com/db/)
+#
+# entry_filters (optional, database-backed types):
+#   Which cached rows are pages (listings, sitemap, and the entry URL).
+#   Same shape as a section filter: item_property_slug + value, all must match.
+#   Values are fixed text (boolean true matches "true"). Not a section filter
+#   and not field_mapping rows_filters. The database screen still shows the
+#   full cache. A row that fails has no URL (404 once the type is indexed).
 #
 # layout (optional):
 #   menu:
@@ -476,6 +506,18 @@ export function getContentTypeConfig(type: string, contentRoot?: string): Conten
   return reg.types[singular];
 }
 
+export function isAdsOptimizedType(type: string, contentRoot?: string): boolean {
+  return getContentTypeConfig(type, contentRoot)?.ads?.optimize === true;
+}
+
+/** Content types with "Optimize for ads" on (registry keys). */
+export function getAdsOptimizedTypes(contentRoot?: string): string[] {
+  const reg = loadRegistry(contentRoot);
+  return Object.entries(reg.types)
+    .filter(([, cfg]) => cfg.ads?.optimize === true)
+    .map(([key]) => key);
+}
+
 export function getPreviewConfig(
   type: string,
   contentRoot?: string,
@@ -595,12 +637,14 @@ export function isForbiddenSchemaFieldName(key: string): boolean {
   return FORBIDDEN_SCHEMA_KEYS.has(key);
 }
 
-type FieldMappingValue = string | { source: string; default: string | null };
+type FieldMappingValue = string | { source: string; default: string | null } | { rows_filters: RowsFilter[] };
 type FieldMappingRecord = Record<string, FieldMappingValue>;
 
 function mappingValueToSource(value: FieldMappingValue | undefined): string {
   if (!value) return "";
-  return typeof value === "object" ? value.source : value;
+  if (typeof value !== "object") return value;
+  if (isRowsFilterMapping(value)) return "";
+  return value.source ?? "";
 }
 
 /**
@@ -825,9 +869,27 @@ export function getFullFieldMapping(type: string, contentRoot?: string): Record<
   if (!mapping) return null;
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(mapping)) {
+    if (isRowsFilterMapping(value)) continue;
     result[key] = typeof value === "object" ? value.source : value;
   }
   return Object.keys(result).length > 0 ? result : null;
+}
+
+/** Content-type fields filled from other rows of the same database cache. */
+export function getRowsFilterFields(
+  type: string,
+  contentRoot?: string,
+): Array<{ field: string; filters: RowsFilter[] }> {
+  const reg = loadRegistry(contentRoot);
+  const entry = reg.types[getType(type, contentRoot)];
+  const mapping = entry?.field_mapping;
+  if (!mapping) return [];
+  const fields: Array<{ field: string; filters: RowsFilter[] }> = [];
+  for (const [key, value] of Object.entries(mapping)) {
+    const filters = parseRowsFilters(value);
+    if (isRowsFilterMapping(value)) fields.push({ field: key, filters });
+  }
+  return fields;
 }
 
 /** Schema-field defaults from object-form field_mapping entries (`{ source, default }`). */
@@ -868,8 +930,7 @@ export function getSlugField(type: string, contentRoot?: string): string | null 
   const entry = reg.types[singular];
   const slugConfig = entry?.field_mapping?._slug;
   if (!slugConfig) return null;
-  if (typeof slugConfig === "object") return slugConfig.source;
-  return slugConfig;
+  return fieldMappingSource(slugConfig);
 }
 
 export function getLocaleKey(type: string, contentRoot?: string): string | null {
@@ -878,7 +939,8 @@ export function getLocaleKey(type: string, contentRoot?: string): string | null 
   const entry = reg.types[singular];
   const localeConfig = entry?.field_mapping?._locale;
   if (!localeConfig) return null;
-  const raw = typeof localeConfig === "object" ? localeConfig.source : localeConfig;
+  const raw = fieldMappingSource(localeConfig);
+  if (!raw) return null;
   if (raw.startsWith("function:")) {
     const mapping = entry?.field_mapping;
     if (mapping) {
@@ -897,8 +959,7 @@ export function getLocaleSource(type: string, contentRoot?: string): string | nu
   const entry = reg.types[singular];
   const localeConfig = entry?.field_mapping?._locale;
   if (!localeConfig) return null;
-  if (typeof localeConfig === "object") return localeConfig.source;
-  return localeConfig;
+  return fieldMappingSource(localeConfig);
 }
 
 export function getLocaleDefault(type: string, contentRoot?: string): string {
@@ -906,7 +967,7 @@ export function getLocaleDefault(type: string, contentRoot?: string): string {
   const singular = getType(type, contentRoot);
   const entry = reg.types[singular];
   const localeConfig = entry?.field_mapping?._locale;
-  if (localeConfig && typeof localeConfig === "object" && localeConfig.default) {
+  if (localeConfig && typeof localeConfig === "object" && "default" in localeConfig && localeConfig.default) {
     return localeConfig.default;
   }
   return getDefaultLocale(contentRoot);
@@ -919,8 +980,7 @@ export function getHreflangsSource(type: string, contentRoot?: string): string |
   const entry = reg.types[singular];
   const config = entry?.field_mapping?._hreflangs;
   if (!config) return null;
-  if (typeof config === "object") return config.source;
-  return config;
+  return fieldMappingSource(config);
 }
 
 /** Source path or function for field_mapping._updated_at. */
@@ -930,8 +990,7 @@ export function getUpdatedAtSource(type: string, contentRoot?: string): string |
   const entry = reg.types[singular];
   const config = entry?.field_mapping?._updated_at;
   if (!config) return null;
-  if (typeof config === "object") return config.source || null;
-  return config || null;
+  return fieldMappingSource(config) || null;
 }
 
 export type ResolveEntryUpdatedAtOpts = {
@@ -1186,7 +1245,9 @@ export function hasFieldMapping(type: string, contentRoot?: string): boolean {
   return !!getFieldMapping(type, contentRoot);
 }
 
-export type ContentTypeConfigUpdate = Partial<Omit<ContentTypeEntry, "database" | "preview" | "editor" | "seo_monitoring" | "funnel" | "products" | "strategy">> & {
+export type ContentTypeConfigUpdate = Partial<Omit<ContentTypeEntry, "database" | "preview" | "editor" | "seo_monitoring" | "funnel" | "products" | "strategy" | "ads">> & {
+  /** Pass `null` to remove ads (same as omitted = off). */
+  ads?: ContentTypeAdsConfig | null;
   /** Pass `null` to unlink a database-backed type (removes the `database` key). */
   database?: DatabaseConfig | null;
   /** Pass `null` to remove preview screenshot config. */
@@ -1225,6 +1286,7 @@ export function updateContentTypeConfig(type: string, update: ContentTypeConfigU
     funnel: funnelUpdate,
     products: productsUpdate,
     strategy: strategyUpdate,
+    ads: adsUpdate,
     ...rest
   } = update;
   const merged: ContentTypeEntry = { ...existing, ...rest };
@@ -1278,6 +1340,16 @@ export function updateContentTypeConfig(type: string, update: ContentTypeConfigU
     delete merged.strategy;
   } else if (strategyUpdate) {
     merged.strategy = strategyUpdate;
+  }
+
+  if (adsUpdate === null) {
+    delete merged.ads;
+  } else if (adsUpdate) {
+    if (adsUpdate.optimize === true) {
+      merged.ads = { optimize: true };
+    } else {
+      delete merged.ads;
+    }
   }
 
   // Database-backed types always use a shared template.

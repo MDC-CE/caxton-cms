@@ -30,11 +30,13 @@ import { loadResolvedArchivesFromBucket } from "./services/resolvedIssuesArchive
 import { loadGscInspectionStoresFromBucket } from "./gsc-url-inspection";
 import { emitEntryEventsFromFileChange } from "./content-events";
 import { startEventPruneTimer, wipeAllSiteEventStores } from "./events/event-store";
+import { startPublicUrlChangesPruneTimer } from "./public-url-changes/store";
 import { startEventDispatcher } from "./events/dispatcher";
 import { startEventWebhookDueScan } from "./events/event-webhooks";
 import { registerAllJobs } from "./jobs/register";
 import { configureJobQueue } from "./jobs/queue";
 import { ensurePipelineDbForSites } from "./pipeline-db/runner";
+import { ensureVisitsDbForSites } from "./analytics/first-party/visits-db";
 import { warnIfLiveServerMisconfigured } from "./live-server";
 import { markInterruptedOnBoot } from "./data-migrations/ledger";
 import { startJobApplier, stopJobApplier } from "./jobs/applier";
@@ -51,6 +53,9 @@ import { getOptimizationSettings } from "./settings";
 import { BOOT_ID, BOOT_TIME, getLastSoftReload, registerShutdownHandler } from "./server-control";
 import { beginRequest, endRequest, flushTick, noteApi, resolveApiRoute, startTick } from "./process-stats";
 import logger from "./logger";
+
+// Only this process may enqueue ContentIndex index_refresh (see enqueueIndexRefresh).
+process.env.WEBLIFY_PROCESS = "web";
 // Note: gcs.initFromEnv() is called by media.initFromEnv() in routes.ts,
 // which happens before sync-state needs it.
 
@@ -451,6 +456,9 @@ app.use((req, res, next) => {
 
   app.use(siteResolutionMiddleware);
 
+  const { contentWritePauseMiddleware } = await import("./content-write-pause");
+  app.use(contentWritePauseMiddleware);
+
   const server = await registerRoutes(app);
 
   // Fallback redirects: only fire for URLs that would otherwise 404
@@ -470,12 +478,16 @@ app.use((req, res, next) => {
       res.status(403).json({ ok: false });
       return;
     }
-    const body = req.body as { keys?: unknown } | undefined;
+    const body = req.body as { keys?: unknown; dropKeys?: unknown } | undefined;
     const keys = Array.isArray(body?.keys)
       ? body.keys.filter((key): key is string => typeof key === "string")
       : [];
-    const { adoptHtmlCacheKeys } = await import("./html-page-cache");
-    res.json({ ok: true, adopted: adoptHtmlCacheKeys(keys) });
+    const dropKeys = Array.isArray(body?.dropKeys)
+      ? body.dropKeys.filter((key): key is string => typeof key === "string")
+      : [];
+    const { adoptHtmlCacheKeys, invalidateHtmlPageCacheKey } = await import("./html-page-cache");
+    for (const key of dropKeys) invalidateHtmlPageCacheKey(key);
+    res.json({ ok: true, adopted: adoptHtmlCacheKeys(keys), dropped: dropKeys.length });
   });
 
   // Serve cached anonymous HTML before initial-data resolution / SSR work.
@@ -487,7 +499,7 @@ app.use((req, res, next) => {
       getCachedHtml,
       isEditDocumentRequest,
       shouldBypassHtmlCache,
-      htmlDocumentCacheControl,
+      htmlDocumentCacheControlFor,
       logHtmlRender,
       pickCachedEncoding,
       rehydrateHtmlPageCache,
@@ -495,6 +507,7 @@ app.use((req, res, next) => {
     const { urlBakesStoredPageQuery } = await import("./initial-data-middleware");
     rehydrateHtmlPageCache();
     const { resolveHtmlVariantKey } = await import("./html-variant-key");
+    const { applyPageBoot, needsPageBoot } = await import("./ads/ads-first");
     app.use(async (req, res, next) => {
       if (req.path.startsWith("/api/") || req.path.startsWith("/private/")) {
         return next();
@@ -514,9 +527,27 @@ app.use((req, res, next) => {
       const cleanUrl = (req.originalUrl || req.url || "/")
         .split("?")[0]
         .split("#")[0];
-      const variantKey = resolveHtmlVariantKey(req, res);
-      (res.locals as any).htmlVariantKey = variantKey;
       const cachePath = canonicalHtmlCachePath(cleanUrl, site?.contentIndex);
+      const { prepareLlmHtmlRequest, renderAudienceLlmMiss, sendCachedHtmlPage, LLM_HTML_CACHE_CONTROL } = await import("./llm-html-request");
+      const llmHit = prepareLlmHtmlRequest(req, res, siteId, cachePath);
+      const baked = urlBakesStoredPageQuery(req.originalUrl || req.url || "/", site?.contentIndex);
+      if (llmHit && !baked) {
+        logHtmlRender({ url: cleanUrl, ms: 0, cache: "HIT" });
+        sendCachedHtmlPage(req, res, llmHit, LLM_HTML_CACHE_CONTROL);
+        return;
+      }
+      if ((res.locals as { htmlVariantKey?: string }).htmlVariantKey === "live" && !baked) {
+        const startedLlm = performance.now();
+        if (await renderAudienceLlmMiss(req, res, site, cachePath)) {
+          logHtmlRender({ url: cleanUrl, ms: Math.round(performance.now() - startedLlm), cache: "MISS" });
+          return;
+        }
+      }
+      if (!(res.locals as { htmlVariantKey?: string }).htmlVariantKey) {
+        const variantKey = resolveHtmlVariantKey(req, res);
+        (res.locals as any).htmlVariantKey = variantKey;
+      }
+      const variantKey = (res.locals as any).htmlVariantKey || "live";
       const cacheKey = buildHtmlCacheKey(siteId, cachePath, variantKey);
       const started = performance.now();
       const cached = getCachedHtml(cacheKey);
@@ -525,8 +556,12 @@ app.use((req, res, next) => {
         return next();
       }
 
-      const encoding = pickCachedEncoding(req.headers["accept-encoding"]);
-      const body = encoding === "br" ? cached.br : encoding === "gzip" ? cached.gzip : cached.html;
+      // Per-request page boot (token, ads-first flags) cannot go into precompressed bodies.
+      const boot = needsPageBoot(res);
+      const encoding = boot ? "identity" : pickCachedEncoding(req.headers["accept-encoding"]);
+      const body = boot
+        ? applyPageBoot(cached.html, req, res)
+        : encoding === "br" ? cached.br : encoding === "gzip" ? cached.gzip : cached.html;
       logHtmlRender({
         url: cleanUrl,
         ms: Math.round(performance.now() - started),
@@ -537,7 +572,7 @@ app.use((req, res, next) => {
       }
       res.status(cached.status);
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.setHeader("Cache-Control", htmlDocumentCacheControl());
+      res.setHeader("Cache-Control", htmlDocumentCacheControlFor(res));
       res.setHeader("X-HTML-Cache", "HIT");
       res.setHeader("Vary", "Accept-Encoding");
       if (encoding !== "identity") res.setHeader("Content-Encoding", encoding);
@@ -579,7 +614,8 @@ app.use((req, res, next) => {
 
   // Run the fast content-index scan synchronously before the server begins
   // listening so the first request is never blocked by the initial scan.
-  // The slow phase (image/variable/redirect/SEO indexing) runs in the background.
+  // Redirects, images, variables, menus, and SEO are filled by IndexRefreshJob
+  // after databases warm up (see the listen callback).
   for (const ctx of getSiteContextMap().values()) {
     ctx.contentIndex.scanFast();
   }
@@ -599,15 +635,14 @@ app.use((req, res, next) => {
   // Other ports are firewalled. Default to 5000 if not specified.
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
-  // VPS: bind loopback only (Nginx proxies). Do not merge this hardcode to
-  // breatheco-de/Replit — there the process must listen on 0.0.0.0.
+  // VPS: bind loopback only (Nginx proxies).
   startTick({ processName: "web", processStartId: BOOT_ID, ingest: true });
 
   const port = parseInt(process.env.PORT || '5000', 10);
   server.listen({
     port,
     host: "127.0.0.1",
-    // SO_REUSEPORT is supported on Linux (Replit) but throws ENOTSUP on macOS.
+    // SO_REUSEPORT is supported on Linux but throws ENOTSUP on macOS.
     ...(process.platform === "linux" && { reusePort: true }),
   }, () => {
     log(`serving on port ${port}`);
@@ -627,6 +662,9 @@ app.use((req, res, next) => {
 
     // All deferred background tasks fire here — server is already ready to handle requests.
     startEventWebhookDueScan();
+    void import("./ads/lead-outbox")
+      .then(({ startLeadOutboxScan }) => startLeadOutboxScan())
+      .catch((err) => logger.warn({ err }, "failed to start lead outbox scan"));
     void import("./jobs/definitions/proposal-maintenance")
       .then(({ scheduleProposalMaintenance }) => scheduleProposalMaintenance())
       .catch((err) => logger.warn({ err }, "failed to schedule proposal maintenance jobs"));
@@ -653,7 +691,7 @@ app.use((req, res, next) => {
       .then(async () => {
         for (const ctx of getSiteContextMap().values()) {
           ctx.contentIndex.scanFast();
-          ctx.contentIndex.startSlowScanAsync();
+          ctx.contentIndex.enqueueIndexRefresh();
         }
         clearSitemapCache();
 
@@ -669,6 +707,13 @@ app.use((req, res, next) => {
           [...getSiteContextMap().values()].map((ctx) => ({ contentRoot: ctx.contentRoot })),
         ).catch((err) => {
           logger.error({ err, worker: "LinkIndex" }, "failed to load link indexes from GCS");
+        });
+
+        const { loadLinkStatusFromBucket } = await import("./link-check/status-store");
+        await loadLinkStatusFromBucket(
+          [...getSiteContextMap().values()].map((ctx) => ({ contentRoot: ctx.contentRoot })),
+        ).catch((err) => {
+          logger.error({ err, worker: "LinkStatus" }, "failed to load external link statuses from GCS");
         });
 
         const { loadRelationIndexesFromBucket } = await import("./relation-index");
@@ -696,10 +741,25 @@ app.use((req, res, next) => {
       })
       .catch((err) => {
         logger.error({ err, worker: "DatabaseManager" }, "warmup error");
+        for (const ctx of getSiteContextMap().values()) {
+          ctx.contentIndex.enqueueIndexRefresh();
+        }
       })
       .finally(() => {
         warmupComplete = true;
         log("warmup complete — serving full SSR on /");
+        import("./vector-index-reconcile")
+          .then(({ startVectorIndexReconcile }) =>
+            startVectorIndexReconcile(() =>
+              [...getSiteContextMap().values()].map((ctx) => ({
+                contentRoot: ctx.contentRoot,
+                database: ctx.database,
+              })),
+            ),
+          )
+          .catch((err) => {
+            logger.warn({ err, worker: "VectorIndex" }, "failed to start vector index reconcile");
+          });
         // Low-priority: component insights rebuild (after warmup; does not block listen)
         import("./component-insights")
           .then(({ runStartupInsightsRebuild }) => runStartupInsightsRebuild())
@@ -748,6 +808,11 @@ app.use((req, res, next) => {
       logger.error({ err, worker: "PipelineDb" }, "failed to apply pipeline SQLite migrations");
       process.exit(1);
     }
+    try {
+      ensureVisitsDbForSites(siteNames);
+    } catch (err) {
+      logger.error({ err, worker: "VisitsDb" }, "failed to migrate visits.db");
+    }
     warnIfLiveServerMisconfigured();
     markInterruptedOnBoot(siteNames);
     if (process.env.NODE_ENV !== "production") {
@@ -775,6 +840,7 @@ app.use((req, res, next) => {
     startJobApplier();
     startEngineWatchdog();
     startEventPruneTimer(siteNames);
+    startPublicUrlChangesPruneTimer(siteNames);
     /** Previous YAML bodies for redirects_changed gating (in-process seed). */
     const lastYamlContentByPath = new Map<string, string>();
     addFileModifiedListener((evt) => {
@@ -798,12 +864,10 @@ app.use((req, res, next) => {
             ? filePath
             : path.join(process.cwd(), filePath);
           const fileExists = fs.existsSync(abs);
-          if (fileExists) {
-            try {
-              ctx.contentIndex.upsertEntry(filePath);
-            } catch {
-              /* non-fatal */
-            }
+          try {
+            ctx.contentIndex.upsertEntry(filePath);
+          } catch {
+            /* non-fatal */
           }
           if (!fileExists) {
             break;
@@ -812,6 +876,10 @@ app.use((req, res, next) => {
             actor ?? (author ? { type: "ui" as const } : { type: "system" as const, source: "content-pipeline" });
           emitEntryEventsFromFileChange({
             filePath,
+            resolveFolderType: (folder) => {
+              const type = ctx.contentIndex.normalizeType(folder);
+              return ctx.contentIndex.getContentTypeConfig(type) ? type : null;
+            },
             prevRaw: lastYamlContentByPath.get(filePath),
             nextRaw:
               typeof content === "string"
@@ -868,6 +936,12 @@ app.use((req, res, next) => {
       flushTick();
     } catch (err) {
       logger.warn({ err }, "[Shutdown] process stats flush failed");
+    }
+    try {
+      const { flushAllVisits } = await import("./analytics/first-party/ingest");
+      flushAllVisits();
+    } catch (err) {
+      logger.warn({ err }, "[Shutdown] visit counts flush failed");
     }
 
     logger.info({ signal }, "[Shutdown] flushing pending GCS uploads…");

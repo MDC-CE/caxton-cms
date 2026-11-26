@@ -11,7 +11,7 @@ import { PROPOSAL_STATUS_UI, proposalStatusUi } from "./proposalStatusUi";
 describe("proposalCardMeta", () => {
   it("maps category to staff labels", () => {
     expect(proposalCategoryLabel("content.seo")).toBe("SEO");
-    expect(proposalCategoryLabel("content.field")).toBe("Field");
+    expect(proposalCategoryLabel("content.field")).toBe("Page content");
     expect(proposalCategoryLabel("other")).toBe("other");
   });
 
@@ -202,6 +202,21 @@ describe("proposalCardMeta", () => {
           closedBy: "casey",
         }).reviewLine?.text,
       ).toBe("Accepted by casey");
+    });
+
+    it("says Retired with the reason for retired accepted ideas", () => {
+      expect(
+        proposalAttributionLines({
+          ...base,
+          status: "finished",
+          closeReason: "already_done",
+          closedBy: "casey",
+        }).reviewLine?.text,
+      ).toBe("Retired by casey · already done");
+      expect(
+        proposalAttributionLines({ ...base, status: "finished", closeReason: "no_longer_relevant" })
+          .reviewLine?.text,
+      ).toBe("Retired · no longer relevant");
     });
 
     it("says Closed with the reason for park/close reasons", () => {

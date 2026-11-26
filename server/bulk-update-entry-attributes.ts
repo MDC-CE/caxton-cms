@@ -24,7 +24,7 @@ import {
 } from "./funnel-fields";
 import { assertFunnelAudienceGates } from "./product/funnel-audience-gates";
 import { markFileAsModified } from "./sync-state";
-import { flushAfterContentWrites, collectEntryHtmlPaths, type SitemapFlushEntry } from "./content-write-flush";
+import { flushAfterContentWrites, type SitemapFlushEntry } from "./content-write-flush";
 import { normalizeLocale } from "./settings";
 import type { ContentIndex } from "./content-index";
 import type { DatabaseManager } from "./database";
@@ -356,6 +356,9 @@ export async function bulkUpdateEntryAttributes(request: BulkEntryAttrRequest): 
     if (funnelWrite.relativePath) {
       markFileAsModified(funnelWrite.relativePath, request.author ?? "staff", undefined, request.contentRoot);
     }
+    for (const w of funnelWrite.warnings) {
+      if (w.code === "tracking_values_too_long") warnings.push(`tracking_values_too_long: ${slug}: ${w.message}`);
+    }
     const stripped = stripFunnelFromAllLocaleYamls(
       contentType,
       slug,
@@ -401,27 +404,12 @@ export async function bulkUpdateEntryAttributes(request: BulkEntryAttrRequest): 
           ? path.relative(process.cwd(), request.contentRoot)
           : request.contentRoot
         : request.ci.contentRootName);
-    const htmlPaths: string[] = [];
-    const seenPath = new Set<string>();
-    for (const entry of sitemapEntries) {
-      for (const p of collectEntryHtmlPaths(
-        request.ci,
-        entry.contentType,
-        entry.slug,
-        entry.locale,
-      )) {
-        if (seenPath.has(p)) continue;
-        seenPath.add(p);
-        htmlPaths.push(p);
-      }
-    }
     flushAfterContentWrites({
       ci: request.ci,
       contentTypes,
       sitemapEntries,
       commonMetaTouched: true, // funnel is on _common.yml
       siteId,
-      htmlPaths,
       syncSlow: false,
     });
     flushed = true;

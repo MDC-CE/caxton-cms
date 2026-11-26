@@ -17,6 +17,21 @@ import {
 
 const log = child({ module: "routes/analytics" });
 
+export const pageStatsSchema = z
+  .object({
+    path: z.string().trim().min(1).max(500),
+    scope: z.enum(["url", "entry"]).default("url"),
+    refresh: z.enum(["0", "1"]).optional(),
+    source: z.enum(["ga4", "first_party"]).optional(),
+    view: z.enum(["test"]).optional(),
+  })
+  .refine((q) => q.view !== "test" || q.scope === "url", {
+    message: "view=test needs scope=url: tests run per language.",
+    path: ["view"],
+  });
+
+type SiteLocals = { contentRoot?: string; contentRootName?: string; contentIndex?: import("../content-index").ContentIndex };
+
 const reportSchema = z.object({
   report: z.enum(ANALYTICS_REPORTS as unknown as [AnalyticsReportName, ...AnalyticsReportName[]]),
   days: z.coerce.number().int().min(1).max(90).optional(),
@@ -30,6 +45,7 @@ const reportSchema = z.object({
     .enum(ANALYTICS_ATTRIBUTIONS as unknown as [AnalyticsAttribution, ...AnalyticsAttribution[]])
     .optional(),
   item_id: z.string().optional(),
+  source: z.enum(["ga4", "first_party"]).optional(),
 });
 
 export function registerAnalyticsRoutes(app: Express): void {
@@ -49,6 +65,7 @@ export function registerAnalyticsRoutes(app: Express): void {
       event_names: req.query.event_names,
       attribution: req.query.attribution,
       item_id: req.query.item_id,
+      source: req.query.source,
     });
     if (!parsed.success) {
       return res.status(400).json({
@@ -68,6 +85,7 @@ export function registerAnalyticsRoutes(app: Express): void {
       event_names,
       attribution,
       item_id,
+      source,
     } = parsed.data;
     const eventList = event_names
       ? event_names
@@ -75,6 +93,7 @@ export function registerAnalyticsRoutes(app: Express): void {
           .map((s) => s.trim())
           .filter(Boolean)
       : undefined;
+    const site = res.locals.site as SiteLocals | undefined;
 
     try {
       const result = await getAnalyticsReport({
@@ -88,14 +107,69 @@ export function registerAnalyticsRoutes(app: Express): void {
         event_names: eventList,
         attribution,
         item_id,
+        source,
+        site: site?.contentRootName,
+        contentRoot: site?.contentRoot,
+        ci: site?.contentIndex,
       });
       res.json(result);
     } catch (err) {
       if (err instanceof AnalyticsReportValidationError) {
-        return res.status(400).json({ error: err.message });
+        return res.status(400).json(err.details ? { error: err.message, details: err.details } : { error: err.message });
       }
       log.error({ err }, "[AnalyticsRoutes] GET /api/analytics/report");
       res.status(500).json({ error: "Internal server error" });
     }
+  });
+
+  api.get(app, "/api/analytics/page-stats", { rate: "publicRead" }, async (req, res) => {
+    const { requireCapability } = await import("./_helpers");
+    const auth = await requireCapability(req, res, "metrics_view");
+    if (!auth.authorized) return;
+    const parsed = pageStatsSchema.safeParse({
+      path: req.query.path,
+      scope: req.query.scope,
+      refresh: req.query.refresh,
+      source: req.query.source,
+      view: req.query.view,
+    });
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
+    }
+    const site = res.locals.site as (SiteLocals & { versioningManager?: import("../versioning/VersioningManager").VersioningManager }) | undefined;
+    const { getDefaultContentFolder } = await import("../site-config");
+    const { contentIndex } = await import("../content-index");
+    const { getPageStats, getPageTestStats, PageStatsNotFoundError, PageTestNotFoundError } = await import("../analytics/page-stats");
+    const common = {
+      site: site?.contentRootName ?? getDefaultContentFolder(),
+      contentRoot: site?.contentRoot,
+      ci: site?.contentIndex ?? contentIndex,
+      path: parsed.data.path,
+      refresh: parsed.data.refresh === "1",
+      source: parsed.data.source,
+      versioningManager: site?.versioningManager,
+    };
+    try {
+      const report =
+        parsed.data.view === "test"
+          ? await getPageTestStats(common)
+          : await getPageStats({ ...common, scope: parsed.data.scope });
+      res.json(report);
+    } catch (err) {
+      if (err instanceof PageStatsNotFoundError) return res.status(400).json({ error: err.message });
+      if (err instanceof PageTestNotFoundError) return res.status(404).json({ error: err.message, code: "no_test" });
+      log.error({ err }, "[AnalyticsRoutes] GET /api/analytics/page-stats");
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  api.get(app, "/api/analytics/page-stats/benchmarks", { rate: "publicRead" }, async (req, res) => {
+    const { requireAnyCapability } = await import("./_helpers");
+    const auth = await requireAnyCapability(req, res, ["metrics_view", "seo_settings", "ads_settings"]);
+    if (!auth.authorized) return;
+    const site = res.locals.site as SiteLocals | undefined;
+    const { getDefaultContentFolder } = await import("../site-config");
+    const { readStageBenchmarks } = await import("../analytics/page-stats/benchmarks");
+    res.json(readStageBenchmarks(site?.contentRootName ?? getDefaultContentFolder()));
   });
 }

@@ -5,7 +5,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { editContent, editCommonContent } from "./content-editor";
-import { flushAfterContentWrites, collectEntryHtmlPaths, type SitemapFlushEntry } from "./content-write-flush";
+import { flushAfterContentWrites, type SitemapFlushEntry } from "./content-write-flush";
 import type { ContentIndex } from "./content-index";
 import { getContentTypeConfig, getDirectory, getAllConfigs } from "./content-types";
 import { normalizeLocale } from "./settings";
@@ -24,6 +24,9 @@ export const META_LOCALE_KEYS = new Set([
   "og_url",
   "og_locale",
   "canonical_url",
+  "robots",
+  "priority",
+  "change_frequency",
 ]);
 export const ALL_KNOWN_META_KEYS = new Set([...META_COMMON_KEYS, ...META_LOCALE_KEYS]);
 
@@ -172,7 +175,7 @@ export async function bulkUpdateMeta(request: BulkMetaRequest): Promise<{
   }
   if (request.variant && commonMetaTouched) {
     warnings.push(
-      "common_meta_ignores_variant: page-level meta (robots/priority/change_frequency) writes _common.yml and ignores variant.",
+      `common_meta_ignores_variant: page-level meta (${commonOps.map((o) => o.path).join(", ")}) writes _common.yml and ignores variant.`,
     );
   }
 
@@ -300,20 +303,6 @@ export async function bulkUpdateMeta(request: BulkMetaRequest): Promise<{
           ? path.relative(process.cwd(), request.contentRoot)
           : request.contentRoot
         : request.ci.contentRootName);
-    const htmlPaths: string[] = [];
-    const seenPath = new Set<string>();
-    for (const entry of sitemapEntries) {
-      for (const p of collectEntryHtmlPaths(
-        request.ci,
-        entry.contentType,
-        entry.slug,
-        entry.locale,
-      )) {
-        if (seenPath.has(p)) continue;
-        seenPath.add(p);
-        htmlPaths.push(p);
-      }
-    }
     const syncSlow = request.updates.some((u) => {
       const key = metaKeyFromPath(u.field_path);
       return key === "redirects" || u.field_path.includes("redirects");
@@ -324,7 +313,6 @@ export async function bulkUpdateMeta(request: BulkMetaRequest): Promise<{
       sitemapEntries,
       commonMetaTouched,
       siteId,
-      htmlPaths,
       syncSlow,
     });
     flushed = true;

@@ -20,6 +20,7 @@ import {
   type AdsConfigStatus,
 } from "./ads-config";
 import { validateConversionEventIntent } from "@shared/conversionEventIntent";
+import { parseStageTargets, serializeStageTargets, type StageTargets } from "@shared/page-objectives";
 import {
   type AuthSignupFieldMapEntry,
   parseAuthSignupFieldMap,
@@ -166,6 +167,8 @@ export interface TrackingBigQuerySettings {
   location: string;
   /** Daily export table prefix (GA4 default events_) */
   table_prefix: string;
+  /** GA4 property id when the export dataset is not named analytics_<propertyId>. */
+  ga4_property_id?: string;
 }
 
 export const DEFAULT_TRACKING_BIGQUERY: TrackingBigQuerySettings = {
@@ -215,6 +218,11 @@ export function parseTrackingBigQuerySettings(
         ? o.location.trim()
         : defaults.location,
     table_prefix: prefix.endsWith("_") ? prefix : `${prefix}_`,
+    ...(typeof o.ga4_property_id === "string" && o.ga4_property_id.trim()
+      ? { ga4_property_id: o.ga4_property_id.trim() }
+      : defaults.ga4_property_id
+        ? { ga4_property_id: defaults.ga4_property_id }
+        : {}),
   };
 }
 
@@ -461,6 +469,29 @@ export const DEFAULT_SEARCH_CONSOLE_SETTINGS: SearchConsoleSettings = {
   })),
 };
 
+/** IndexNow notices (Bing and other IndexNow engines). The key is public by design. */
+export interface IndexNowSettings {
+  enabled: boolean;
+  key: string;
+}
+
+export const DEFAULT_INDEXNOW_SETTINGS: IndexNowSettings = { enabled: false, key: "" };
+
+export const INDEXNOW_KEY_RE = /^[A-Za-z0-9-]{8,128}$/;
+
+export function isValidIndexNowKey(key: string): boolean {
+  return INDEXNOW_KEY_RE.test(key);
+}
+
+export function parseIndexNowSettings(raw: unknown): IndexNowSettings {
+  const obj =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : {};
+  const key = typeof obj.key === "string" && isValidIndexNowKey(obj.key.trim()) ? obj.key.trim() : "";
+  return { enabled: obj.enabled === true && key !== "", key };
+}
+
 /** OpenRush SERP inspect (non-secret). API key stays in OPENRUSH_API_KEY. */
 export interface OpenRushSettings {
   enabled: boolean;
@@ -530,14 +561,17 @@ export function parseOpenRushSettings(
   };
 }
 
-/** Site-wide funnel completeness enforcement (diagnostics + funnel write gates). */
+/** Site-wide funnel settings: completeness enforcement and per-stage objective targets. */
 export interface FunnelSettings {
   /** When true, enforced content types require funnel stage (+ products when site has purchasables). Default false. */
   enforcement: boolean;
+  /** Page stats objective targets per stage (YAML keys are the stage's metric ids); empty = benchmarks. */
+  targets?: StageTargets;
 }
 
 export const DEFAULT_FUNNEL_SETTINGS: FunnelSettings = {
   enforcement: false,
+  targets: {},
 };
 
 export function parseFunnelSettings(
@@ -545,11 +579,12 @@ export function parseFunnelSettings(
   defaults: FunnelSettings = DEFAULT_FUNNEL_SETTINGS,
 ): FunnelSettings {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return { ...defaults };
+    return { ...defaults, targets: { ...(defaults.targets ?? {}) } };
   }
   const o = raw as Record<string, unknown>;
   return {
     enforcement: typeof o.enforcement === "boolean" ? o.enforcement : defaults.enforcement,
+    targets: o.targets !== undefined ? parseStageTargets(o.targets) : { ...(defaults.targets ?? {}) },
   };
 }
 
@@ -580,6 +615,8 @@ export interface ProposalSettings {
   four_eyes: {
     enabled: boolean;
     staff_ui_exempt: boolean;
+    /** MCP: same username + same exact model as the proposer cannot apply/accept, whatever the role. */
+    same_model_blocked: boolean;
   };
   hold: {
     stewards_only: boolean;
@@ -597,6 +634,7 @@ export const DEFAULT_PROPOSAL_SETTINGS: ProposalSettings = {
   four_eyes: {
     enabled: true,
     staff_ui_exempt: false,
+    same_model_blocked: true,
   },
   hold: {
     stewards_only: true,
@@ -665,6 +703,10 @@ export function parseProposalSettings(
         typeof fourRaw.staff_ui_exempt === "boolean"
           ? fourRaw.staff_ui_exempt
           : defaults.four_eyes.staff_ui_exempt,
+      same_model_blocked:
+        typeof fourRaw.same_model_blocked === "boolean"
+          ? fourRaw.same_model_blocked
+          : defaults.four_eyes.same_model_blocked,
     },
     hold: {
       stewards_only:
@@ -715,6 +757,9 @@ export function parseProposalSettingsStrict(raw: unknown): ProposalSettings {
   if (typeof fourRaw.staff_ui_exempt !== "boolean") {
     throw new Error("four_eyes.staff_ui_exempt must be a boolean");
   }
+  if (fourRaw.same_model_blocked != null && typeof fourRaw.same_model_blocked !== "boolean") {
+    throw new Error("four_eyes.same_model_blocked must be a boolean");
+  }
   const holdRaw =
     o.hold && typeof o.hold === "object" && !Array.isArray(o.hold)
       ? (o.hold as Record<string, unknown>)
@@ -737,6 +782,10 @@ export function parseProposalSettingsStrict(raw: unknown): ProposalSettings {
     four_eyes: {
       enabled: fourRaw.enabled,
       staff_ui_exempt: fourRaw.staff_ui_exempt,
+      same_model_blocked:
+        typeof fourRaw.same_model_blocked === "boolean"
+          ? fourRaw.same_model_blocked
+          : DEFAULT_PROPOSAL_SETTINGS.four_eyes.same_model_blocked,
     },
     hold: { stewards_only: holdRaw.stewards_only },
     claim: { staff_ui_takeover: claimRaw.staff_ui_takeover },
@@ -924,6 +973,7 @@ interface SiteSettings {
   tracking: TrackingSettings;
   robots: RobotsSettings;
   search_console: SearchConsoleSettings;
+  indexnow: IndexNowSettings;
   openrush: OpenRushSettings;
   funnel: FunnelSettings;
   proposals: ProposalSettings;
@@ -1054,6 +1104,7 @@ function readSettingsFile(settingsPath: string, quiet = false): { ok: boolean; s
     },
     robots: { ...DEFAULT_ROBOTS_SETTINGS },
     search_console: { ...DEFAULT_SEARCH_CONSOLE_SETTINGS },
+    indexnow: { ...DEFAULT_INDEXNOW_SETTINGS },
     openrush: { ...DEFAULT_OPENRUSH_SETTINGS },
     funnel: { ...DEFAULT_FUNNEL_SETTINGS },
     proposals: {
@@ -1279,6 +1330,7 @@ function readSettingsFile(settingsPath: string, quiet = false): { ok: boolean; s
       tracking,
       robots,
       search_console: parseSearchConsoleSettings(parsed.search_console),
+      indexnow: parseIndexNowSettings(parsed.indexnow),
       openrush: parseOpenRushSettings(parsed.openrush),
       funnel: parseFunnelSettings(parsed.funnel),
       proposals: parseProposalSettings(parsed.proposals),
@@ -1647,6 +1699,10 @@ export function getRobotsSettings(contentRoot?: string): RobotsSettings {
 
 export function getSearchConsoleSettings(contentRoot?: string): SearchConsoleSettings {
   return loadSettings(contentRoot).search_console;
+}
+
+export function getIndexNowSettings(contentRoot?: string): IndexNowSettings {
+  return loadSettings(contentRoot).indexnow;
 }
 
 export function getOpenRushSettings(contentRoot?: string): OpenRushSettings {
@@ -2046,6 +2102,38 @@ export function updateSearchConsoleSettings(
   return updated;
 }
 
+export function updateIndexNowSettings(
+  input: Partial<IndexNowSettings>,
+  contentRoot?: string,
+): IndexNowSettings {
+  const settingsPath = getSettingsPath(contentRoot);
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const raw = fs.readFileSync(settingsPath, "utf-8");
+      existing = (yaml.load(raw) as Record<string, unknown>) || {};
+    } catch {}
+  }
+
+  const current = parseIndexNowSettings(existing.indexnow);
+  const key = input.key !== undefined ? input.key.trim() : current.key;
+  if (key && !isValidIndexNowKey(key)) {
+    throw new Error("IndexNow key must be 8 to 128 characters: letters, numbers and dashes");
+  }
+  const enabled = input.enabled !== undefined ? input.enabled : current.enabled;
+  if (enabled && !key) {
+    throw new Error("Generate a key before turning IndexNow on");
+  }
+  const updated: IndexNowSettings = { enabled, key };
+  existing.indexnow = { enabled: updated.enabled, key: updated.key };
+
+  const output = yaml.dump(existing, { lineWidth: 120, noRefs: true });
+  fs.writeFileSync(settingsPath, output, "utf-8");
+  resetSettings(resolveSettingsRoot(contentRoot));
+  log.info(`[Settings] Updated indexnow enabled=${updated.enabled} key=${updated.key ? "set" : "empty"}`);
+  return updated;
+}
+
 export function updateSearchConsoleBigQuerySettings(
   input: Partial<SearchConsoleBigQuerySettings>,
   contentRoot?: string,
@@ -2275,16 +2363,23 @@ export function updateFunnelSettings(
   }
 
   const current = parseFunnelSettings(existing.funnel);
-  const merged = parseFunnelSettings({ ...current, ...input }, DEFAULT_FUNNEL_SETTINGS);
+  const enforcement = typeof input.enforcement === "boolean" ? input.enforcement : current.enforcement;
+  // Input targets use the parsed shape ({ rate, cost }); round-trip through YAML keys to validate.
+  const targets =
+    input.targets !== undefined
+      ? parseStageTargets(serializeStageTargets(input.targets))
+      : (current.targets ?? {});
+  const serializedTargets = serializeStageTargets(targets);
   existing.funnel = {
-    enforcement: merged.enforcement,
+    enforcement,
+    ...(Object.keys(serializedTargets).length > 0 ? { targets: serializedTargets } : {}),
   };
 
   const output = yaml.dump(existing, { lineWidth: 120, noRefs: true });
   fs.writeFileSync(settingsPath, output, "utf-8");
   resetSettings(resolveSettingsRoot(contentRoot));
-  log.info(`[Settings] Updated funnel.enforcement=${merged.enforcement}`);
-  return merged;
+  log.info(`[Settings] Updated funnel.enforcement=${enforcement} targets=${Object.keys(serializedTargets).join(",") || "none"}`);
+  return { enforcement, targets };
 }
 
 /** Stable short hash of settings.yml bytes for optimistic concurrency on Rules saves. */
@@ -2328,6 +2423,7 @@ export function updateProposalSettings(
     four_eyes: {
       enabled: merged.four_eyes.enabled,
       staff_ui_exempt: merged.four_eyes.staff_ui_exempt,
+      same_model_blocked: merged.four_eyes.same_model_blocked,
     },
     hold: {
       stewards_only: merged.hold.stewards_only,

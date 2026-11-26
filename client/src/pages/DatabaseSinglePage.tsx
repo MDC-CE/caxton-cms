@@ -30,6 +30,7 @@ import LocaleUnavailable, {
 import Staff404Recovery, { Staff404SwitchToEditHint } from "@/components/editing/Staff404Recovery";
 import { useEditModeOptional } from "@/contexts/EditModeContext";
 import { useEagerSectionsReady } from "@/hooks/useEagerSectionsReady";
+import { usePageTrackingContext } from "@/hooks/usePageTrackingContext";
 
 interface DatabaseSinglePageProps {
   contentType: string;
@@ -91,6 +92,8 @@ export default function DatabaseSinglePage({ contentType }: DatabaseSinglePagePr
     },
     enabled: !!slug,
   });
+
+  usePageTrackingContext(page, { contentType, slug, skip: !!variantFromUrl || isStaff });
 
   const localeUnavailable =
     (failureReason as (Error & { localeUnavailable?: LocaleUnavailableInfo }) | null)
@@ -249,6 +252,7 @@ export default function DatabaseSinglePage({ contentType }: DatabaseSinglePagePr
           param={(page as { param?: Record<string, unknown> }).param}
           allowEntryStructuralOverrides={allowEntryStructuralOverrides}
           perEntryRemovedSections={page.perEntryRemovedSections}
+          funnel={(page as { funnel?: unknown }).funnel}
         />
       </MenuVisualContextProvider>
       <div className="group relative">

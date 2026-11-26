@@ -3,6 +3,7 @@ import { lazy, Suspense, type ReactNode } from "react";
 import NotFound from "@/pages/not-found";
 import { getDebugToken, useDebugAuth } from "@/hooks/useDebugAuth";
 import { resolvePrivatePageAccess } from "@/lib/private-page-access";
+import { AB_TESTING_CARD_IDS, AB_TESTING_HREF } from "@/lib/settings-tab";
 
 const ComponentShowcase = lazy(() => import("@/pages/ComponentShowcase"));
 const ComponentGallery = lazy(() => import("@/pages/ComponentGallery"));
@@ -41,7 +42,6 @@ const AgentsOrgChartPage = lazy(() => import("@/pages/AgentsOrgChartPage"));
 const ErrorLogPage = lazy(() => import("@/pages/ErrorLogPage"));
 const PerformancePage = lazy(() => import("@/pages/PerformancePage"));
 const BackgroundPipelinePage = lazy(() => import("@/pages/BackgroundPipelinePage"));
-const EventWebhooksPage = lazy(() => import("@/pages/EventWebhooksPage"));
 const PrivateOverlays = lazy(() => import("@/pages/PrivateOverlays"));
 const VariablesPage = lazy(() => import("@/pages/VariablesPage"));
 
@@ -92,11 +92,34 @@ function AgentsRedirect() {
   return null;
 }
 
+function WebhooksRedirect() {
+  const params = useParams<{ tab?: string }>();
+  const search = useSearch();
+  if (typeof window !== "undefined") {
+    if (params.tab === "logs") {
+      const qs = search.replace(/^\?/, "");
+      window.location.replace(qs ? `/private/agents/webhook-logs?${qs}` : "/private/agents/webhook-logs");
+    } else {
+      window.location.replace("/private/agents/webhooks");
+    }
+  }
+  return null;
+}
+
 function ServerLogsRedirect() {
   const search = useSearch();
   if (typeof window !== "undefined") {
     const qs = search.replace(/^\?/, "");
     window.location.replace(qs ? `/private/server/error-log?${qs}` : "/private/server/error-log");
+  }
+  return null;
+}
+
+function AbTestingSettingsRedirect() {
+  const params = useParams<{ tab?: string }>();
+  if (typeof window !== "undefined") {
+    const card = (AB_TESTING_CARD_IDS as readonly string[]).includes(`ab-${params.tab}`) ? `#ab-${params.tab}` : "";
+    window.location.replace(`${AB_TESTING_HREF}${card}`);
   }
   return null;
 }
@@ -164,11 +187,15 @@ export default function PrivateRouter() {
           <Route path="/private/settings/seo/og" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo/schema" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo/search-console" component={SeoGeoSettingsPage} />
+          <Route path="/private/settings/seo/indexnow" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo/openrush" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/ads/meta" component={AdsSettingsPage} />
           <Route path="/private/settings/ads/google" component={AdsSettingsPage} />
+          <Route path="/private/settings/ads/targets" component={AdsSettingsPage} />
           <Route path="/private/settings/ads" component={AdsSettingsPage} />
+          <Route path="/private/settings/ab-testing/:tab" component={AbTestingSettingsRedirect} />
+          <Route path="/private/settings/ab-testing" component={AbTestingSettingsRedirect} />
           <Route path="/private/settings/locales" component={SettingsPage} />
           <Route path="/private/settings/migrations" component={SettingsPage} />
           <Route path="/private/settings/brand" component={SettingsPage} />
@@ -186,6 +213,7 @@ export default function PrivateRouter() {
           <Route path="/private/store/product/:slug" component={StoreProductDetailPage} />
           <Route path="/private/store/conversions" component={ConversionsPage} />
           <Route path="/private/store/leads" component={LeadsPage} />
+          <Route path="/private/tracking/ab-testing" component={TrackingPage} />
           <Route path="/private/tracking/sgtm" component={TrackingPage} />
           <Route path="/private/tracking/ipn" component={TrackingPage} />
           <Route path="/private/tracking/ga4" component={TrackingPage} />
@@ -202,6 +230,8 @@ export default function PrivateRouter() {
           <Route path="/private/agents/orgchart" component={AgentsOrgChartPage} />
           <Route path="/private/agents/rules" component={AgentsOrgChartPage} />
           <Route path="/private/agents/outcomes" component={AgentsOrgChartPage} />
+          <Route path="/private/agents/webhooks" component={AgentsOrgChartPage} />
+          <Route path="/private/agents/webhook-logs" component={AgentsOrgChartPage} />
           <Route path="/private/agents/proposals/:id" component={AgentsOrgChartPage} />
           <Route path="/private/agents/proposals" component={AgentsOrgChartPage} />
           <Route path="/private/agents" component={AgentsRedirect} />
@@ -210,9 +240,8 @@ export default function PrivateRouter() {
           <Route path="/private/server" component={ServerLogsRedirect} />
           <Route path="/private/error-log" component={ServerLogsRedirect} />
           <Route path="/private/background-pipeline" component={BackgroundPipelinePage} />
-          <Route path="/private/webhooks/hooks" component={EventWebhooksPage} />
-          <Route path="/private/webhooks/logs" component={EventWebhooksPage} />
-          <Route path="/private/webhooks" component={EventWebhooksPage} />
+          <Route path="/private/webhooks/:tab" component={WebhooksRedirect} />
+          <Route path="/private/webhooks" component={WebhooksRedirect} />
           <Route path="/private/proposals/:id" component={ProposalsRedirect} />
           <Route path="/private/proposals" component={ProposalsRedirect} />
           <Route path="/private/overlays" component={PrivateOverlays} />

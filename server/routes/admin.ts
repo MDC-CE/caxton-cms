@@ -47,7 +47,7 @@ import { collectSystemAlerts, recheckDatabaseHealth, recheckDecisionModel } from
 import { runScan as runComponentInsightsScan, readInsightsFile } from "../component-insights";
 import { listEvents, listEventAuthors, clearAllEvents, listAgentSessions, getAgentSessionDetail, emitEvent, getLatestWriteGeneration, getOldestUnpublishedAgeMs, getUnpublishedCount, getUnpublishedEvents, findOpenAgentSession, resolveUsableAgentSession } from "../events/event-store";
 import { singleAttribution, EVENT_TYPES, type EventType } from "../events/types";
-import { isExactAgentModel, normalizeMcpClientName, sessionConflictPayload } from "../../shared/agent-identity";
+import { isExactAgentModel, issueAgentSessionId, normalizeMcpClientName, sessionConflictPayload } from "../../shared/agent-identity";
 import { seedDemoPipelineEvents } from "../events/seed-demo";
 import {
   expandKindIdsToTypes,
@@ -226,6 +226,8 @@ import {
   BREATHECODE_HOST,
   extractToken,
   requireCapability,
+  requireRedirectReadAccess,
+  requireRedirectWriteAccess,
   requireStaffSession,
   requireMutatingStaff,
   safeYamlLoad,
@@ -265,7 +267,15 @@ import {
 import { child } from "../logger";
 import { sqlite } from "../db";
 import { errorLogFingerprint } from "../utils/error-log-fingerprint";
-import { writeRedirectOnDestinationPage } from "../redirect-destination";
+import { resolveDestinationLocale, writeRedirectOnDestinationPage } from "../redirect-destination";
+import {
+  addDraftRedirect,
+  removeDraftRedirect,
+  type DraftRedirectResult,
+  type DraftRedirectTarget,
+} from "../redirect-draft";
+import { checkSimpleRedirectFrom, redirectsPageUrl } from "../redirect-simple-check";
+import { authorizeLiveRedirectWrite, relToContentRoot } from "../redirect-page-scope";
 import { listInboundRedirects, parseRemovedEntry, removeInboundRedirects } from "../removed-item-redirect";
 import { findEntryPresence } from "../entry-layer";
 import { api } from "../rate-limit/api.js";
@@ -286,6 +296,69 @@ function getContentRootName(res: Response): string {
 
 function getValidationCache(res: Response) {
   return (res.locals.site as any)?.validationCache ?? getValidationCacheService();
+}
+
+/**
+ * Add or remove one of a page's own old addresses on its draft (0% traffic).
+ * Needs Edit page SEO for the page's type; nothing changes live until publish.
+ */
+async function handleDraftRedirect(req: Request, res: Response, action: "add" | "delete"): Promise<void> {
+  const body = req.body ?? {};
+  const contentType = typeof body.content_type === "string" ? body.content_type.trim() : "";
+  const auth = await requireCapability(req, res, "seo_edit", contentType || undefined);
+  if (!auth.authorized) return;
+  try {
+    if (!body.from || typeof body.from !== "string") {
+      res.status(400).json({ code: "missing_from", error: "'from' is required" });
+      return;
+    }
+    const target: DraftRedirectTarget = {
+      contentType,
+      slug: typeof body.slug === "string" ? body.slug.trim() : "",
+      variant: String(body.variant).trim(),
+      locale: typeof body.locale === "string" ? body.locale.trim() : "",
+    };
+    const authorName = typeof body.author === "string" ? body.author : undefined;
+    const ci = getCI(res);
+    const onWrite = (abs: string) => markFileAsModified(abs, authorName, undefined, getContentRoot(res));
+    let result: DraftRedirectResult;
+    if (action === "add") {
+      const allowedHosts = [req.get("host") ?? ""];
+      try {
+        if (process.env.SITE_URL) allowedHosts.push(new URL(process.env.SITE_URL).host);
+      } catch {}
+      result = addDraftRedirect({
+        ci,
+        target,
+        from: body.from,
+        statusCode: body.status === 302 ? 302 : 301,
+        allowedHosts,
+        onWrite,
+      });
+    } else {
+      result = removeDraftRedirect({ ci, target, from: body.from, onWrite });
+    }
+    if (!result.ok) {
+      res.status(result.status).json({ code: result.code, error: result.error, ...(result.details ?? {}) });
+      return;
+    }
+    res.json({
+      success: true,
+      draft: true,
+      from: result.from,
+      file: result.file,
+      ...(result.alreadyAbsent ? { alreadyAbsent: true } : {}),
+      message:
+        action === "add"
+          ? `Old address ${result.from} added to the draft (${result.file}). It takes effect when the draft is published.`
+          : result.alreadyAbsent
+            ? `Old address ${result.from} was not on the draft (${result.file}).`
+            : `Old address ${result.from} removed from the draft (${result.file}). Live is unchanged until publish.`,
+    });
+  } catch (err) {
+    log.error({ err }, "[Debug] Failed to change draft redirect:");
+    res.status(500).json({ error: "Failed to change draft redirect" });
+  }
 }
 
 function afterRedirectWrite(res: Response, filePath?: string): void {
@@ -774,10 +847,26 @@ export function registerAdminRoutes(app: Express): void {
     const { ENTRY_ACTIVITY_WINDOW_DAYS } = await import("@shared/event-log-filters");
     const { countEntryActivityWrites } = await import("../seo-cluster-metrics");
     const counts = countEntryActivityWrites({ site });
+    let openProposals: import("../content-proposals").PendingProposalForPage[] = [];
+    const slash = entry.indexOf("/");
+    if (slash > 0 && slash < entry.length - 1) {
+      try {
+        const { listPendingProposalsForPage } = await import("../content-proposals");
+        openProposals = listPendingProposalsForPage(
+          site,
+          entry.slice(0, slash),
+          entry.slice(slash + 1),
+          getContentRoot(res),
+        );
+      } catch {
+        /* proposals DB unavailable: the button falls back to the write count */
+      }
+    }
     res.json({
       entryKey: entry,
       writeCount: counts.get(entry) ?? 0,
       windowDays: ENTRY_ACTIVITY_WINDOW_DAYS,
+      openProposals,
     });
   });
 
@@ -1058,9 +1147,7 @@ export function registerAdminRoutes(app: Express): void {
       const model = String(modelRaw).trim();
       const actorWithModel = resolveEventActor(req, { model });
 
-      const agent_session_id =
-        (typeof req.body?.agent_session_id === "string" && req.body.agent_session_id.trim()) ||
-        randomUUID();
+      const { agent_session_id, warnings } = issueAgentSessionId(req.body?.agent_session_id, randomUUID);
       const label =
         typeof req.body?.label === "string" && req.body.label.trim()
           ? req.body.label.trim().slice(0, 200)
@@ -1080,6 +1167,7 @@ export function registerAdminRoutes(app: Express): void {
         model,
         event_id: event.id,
         abandoned_session_id: open && forceNew ? open.agent_session_id : null,
+        warnings,
       });
     }
 
@@ -1675,7 +1763,7 @@ export function registerAdminRoutes(app: Express): void {
   });
 
   app.get("/api/debug/redirects/locale-urls", async (req, res) => {
-    const auth = await requireCapability(req, res, "read_redirects");
+    const auth = await requireRedirectReadAccess(req, res);
     if (!auth.authorized) return;
     try {
       const url = req.query.url as string;
@@ -1702,9 +1790,32 @@ export function registerAdminRoutes(app: Express): void {
 
   // Add a new redirect (for debug tools)
   app.post("/api/debug/redirects", async (req, res) => {
-    const auth = await requireCapability(req, res, "edit_redirects");
+    if (typeof req.body?.variant === "string" && req.body.variant.trim()) {
+      await handleDraftRedirect(req, res, "add");
+      return;
+    }
+    const auth = await requireRedirectWriteAccess(req, res);
     if (!auth.authorized) return;
     try {
+      const scopeHosts = [req.get("host") ?? ""];
+      try {
+        if (process.env.SITE_URL) scopeHosts.push(new URL(process.env.SITE_URL).host);
+      } catch {}
+      const pageScope = authorizeLiveRedirectWrite({
+        ci: getCI(res),
+        action: "add",
+        hasGlobal: auth.hasGlobal,
+        canEditPage: auth.canEditPage,
+        body: req.body ?? {},
+        allowedHosts: scopeHosts,
+      });
+      if (!pageScope.ok) {
+        const { ok: _ok, status, ...body } = pageScope;
+        res.status(status).json(body);
+        return;
+      }
+      const pageOnly = pageScope.mode === "page";
+
       const {
         from,
         to,
@@ -1737,6 +1848,47 @@ export function registerAdminRoutes(app: Express): void {
       }
 
       const destUrl = to as string;
+      const localeHint =
+        typeof req.body.locale === "string" && req.body.locale.trim() ? req.body.locale.trim().toLowerCase() : null;
+
+      if (pageOnly && pageScope.normalizedFrom) {
+        normalizedFrom = pageScope.normalizedFrom;
+      } else if (req.body.simple === true) {
+        if (isCustomDestination || req.body.before_from || req.body.removed_entry) {
+          res.status(400).json({
+            code: "simple_redirect_options",
+            error: "Simple redirects only take from, to and allLanguages.",
+          });
+          return;
+        }
+        const ciSimple = getCI(res);
+        const allowedHosts = [req.get("host") ?? ""];
+        try {
+          if (process.env.SITE_URL) allowedHosts.push(new URL(process.env.SITE_URL).host);
+        } catch {}
+        const parsedSimpleDest = ciSimple.parseContentUrl(destUrl);
+        const check = checkSimpleRedirectFrom({
+          from: from as string,
+          destUrl,
+          locale: parsedSimpleDest
+            ? resolveDestinationLocale(ciSimple, parsedSimpleDest, destUrl, localeHint)
+            : getDefaultLocale(),
+          ci: ciSimple,
+          allowedHosts,
+        });
+        if (!check.ok) {
+          res.status(409).json({
+            error: check.message,
+            code: check.code,
+            ...(check.conflict_source ? { conflict_source: check.conflict_source } : {}),
+            ...(check.conflict_from ? { conflict_from: check.conflict_from } : {}),
+            ...(check.conflict_to ? { conflict_to: check.conflict_to } : {}),
+            redirects_page_url: redirectsPageUrl(check.normalizedFrom ?? String(from)),
+          });
+          return;
+        }
+        normalizedFrom = check.normalizedFrom;
+      }
 
       const beforeFrom =
         typeof req.body.before_from === "string" && req.body.before_from.trim()
@@ -1787,6 +1939,7 @@ export function registerAdminRoutes(app: Express): void {
           from: fromPath,
           statusCode: code,
           allLanguages: allLangs,
+          locale: localeHint,
           onWrite: (abs) => markFileAsModified(abs, authorName, undefined, getContentRoot(res)),
         });
         if (onPage.kind === "error") {
@@ -1794,6 +1947,9 @@ export function registerAdminRoutes(app: Express): void {
         }
         if (onPage.kind === "page") {
           return { ok: true, file: onPage.files[0], created: onPage.created, skippedLocales: onPage.skippedLocales };
+        }
+        if (pageOnly) {
+          return { ok: false, status: 403, body: { code: "page_scope_refused", reason: "not_a_page", error: "The destination is not a page on this site." } };
         }
         // Not a page on this site (listing without an entry, other known URL): site-wide list.
         if (!ci.isKnownUrl(destUrl)) {
@@ -1858,6 +2014,7 @@ export function registerAdminRoutes(app: Express): void {
       res.json({
         success: true,
         message: `Redirect added: ${normalizedFrom} -> ${destUrl}`,
+        from: normalizedFrom,
         file: main.file,
         ...(created.length > 0 ? { created } : {}),
         ...(removed ? { moved_inbound: moved, ...(notMoved.length > 0 ? { not_moved: notMoved } : {}) } : {}),
@@ -1871,7 +2028,11 @@ export function registerAdminRoutes(app: Express): void {
 
   // Delete a redirect (for debug tools)
   app.delete("/api/debug/redirects", async (req, res) => {
-    const auth = await requireCapability(req, res, "edit_redirects");
+    if (typeof req.body?.variant === "string" && req.body.variant.trim()) {
+      await handleDraftRedirect(req, res, "delete");
+      return;
+    }
+    const auth = await requireRedirectWriteAccess(req, res);
     if (!auth.authorized) return;
     try {
       const { from, source, author } = req.body;
@@ -1952,6 +2113,19 @@ export function registerAdminRoutes(app: Express): void {
       }
       if (!sourceFile.endsWith(".yml") && !sourceFile.endsWith(".yaml")) {
         res.status(400).json({ error: "Invalid source file type" });
+        return;
+      }
+
+      const pageScope = authorizeLiveRedirectWrite({
+        ci: getCI(res),
+        action: "delete",
+        hasGlobal: auth.hasGlobal,
+        canEditPage: auth.canEditPage,
+        sourceRelToContentRoot: relToContentRoot(marketingDir, resolvedSource),
+      });
+      if (!pageScope.ok) {
+        const { ok: _ok, status, ...body } = pageScope;
+        res.status(status).json(body);
         return;
       }
 
@@ -2204,7 +2378,7 @@ export function registerAdminRoutes(app: Express): void {
   });
 
   app.get("/api/debug/redirects/test", async (req, res) => {
-    const auth = await requireCapability(req, res, "read_redirects");
+    const auth = await requireRedirectReadAccess(req, res);
     if (!auth.authorized) return;
     const url = req.query.url as string;
     if (!url) {
@@ -2410,19 +2584,23 @@ export function registerAdminRoutes(app: Express): void {
     }
   });
 
-  // Clear redirect cache (for debug tools) — cheap custom refresh + async slow rescan
+  // Clear redirect cache (for debug tools) — cheap custom refresh, full index on Sidequest
   app.post("/api/debug/clear-redirect-cache", async (req, res) => {
     const auth = await requireCapability(req, res, "edit_redirects");
     if (!auth.authorized) return;
     try {
       const ci = getCI(res);
       ci.refreshCustomRedirects();
-      ci.startSlowScanAsync(0);
+      ci.enqueueIndexRefresh();
     } catch (err) {
       log.warn({ err }, "[Debug] ContentIndex rescan failed during clear-redirect-cache");
     }
     clearRedirectCache();
-    res.json({ success: true, message: "Redirect cache cleared and content index rescanned" });
+    res.json({
+      success: true,
+      message:
+        "Redirect cache cleared. A full content-index rebuild was queued and will apply in a few seconds. This request does not wait for it.",
+    });
   });
 
   app.get("/api/admin/brand-settings", async (req, res) => {
@@ -2731,33 +2909,56 @@ export function registerAdminRoutes(app: Express): void {
       const auth = await requireAdminAuth(req, res);
       if (!auth.authorized) return;
 
-      const { getStatus } = await import("../vector-search");
-      const { getAllJobStates } = await import("../db-job-state");
+      const { getStatus, siteCollectionName, legacyCollectionName } = await import("../vector-search");
+      const { getAllJobStates, displayIndexStatus } = await import("../db-job-state");
       const status = await getStatus();
       const pointsByCollection = new Map(
         status.collections.map((c) => [c.name, c.points_count]),
       );
-      const jobStates = getAllJobStates(getContentRoot(res));
+      const contentRoot = getContentRoot(res);
+      const jobStates = getAllJobStates(contentRoot);
       const dbm = getDB(res);
+      const workerRunning = (await getEngineStatus()).status === "running";
+      const inUse = new Set<string>();
+      const knownSiteCollections = new Set<string>();
 
       const databases = dbm.list().map(({ name, config }) => {
         const vs = config.vector_search;
         const fields = Array.isArray(vs?.fields) ? vs.fields : [];
         const semanticEnabled = Boolean(vs?.enabled && fields.length > 0);
-        const index = jobStates[name]?.index ?? { status: "idle" as const };
+        const rawIndex = jobStates[name]?.index ?? { status: "idle" as const };
+        const index = { ...rawIndex, status: displayIndexStatus(rawIndex, workerRunning) };
+        const collection = siteCollectionName(contentRoot, name);
+        const legacy = legacyCollectionName(name);
+        knownSiteCollections.add(collection);
+        const ready = rawIndex.ready === true && rawIndex.collection === collection;
+        const served = ready ? collection : pointsByCollection.has(legacy) ? legacy : null;
+        if (semanticEnabled) {
+          inUse.add(collection);
+          if (!ready && served) inUse.add(served);
+        }
         return {
           name,
           label: config.name || name,
           semantic_enabled: semanticEnabled,
           fields,
-          collection_points: pointsByCollection.has(name)
-            ? (pointsByCollection.get(name) as number)
+          collection,
+          ready,
+          served_collection: served,
+          collection_points: pointsByCollection.has(collection)
+            ? (pointsByCollection.get(collection) as number)
             : null,
           index,
         };
       });
+      // Collections of this site's databases that nothing searches (vector search turned off).
+      const unusedCollections = status.collections
+        .map((c) => c.name)
+        .filter((n) => knownSiteCollections.has(n) && !inUse.has(n));
 
       res.json({
+        worker_running: workerRunning,
+        unused_collections: unusedCollections,
         available: status.available,
         url: status.url,
         host: status.host,
@@ -2801,6 +3002,32 @@ export function registerAdminRoutes(app: Express): void {
         ok: false,
         error: err instanceof Error ? err.message : "Failed to test Qdrant connection",
       });
+    }
+  });
+
+  api.post(app, "/api/admin/qdrant/rebuild/:name", { rate: "staffWrite" }, async (req, res) => {
+    try {
+      const auth = await requireAdminAuth(req, res);
+      if (!auth.authorized) return;
+
+      const name = req.params.name;
+      const dbm = getDB(res);
+      if (!dbm.exists(name)) {
+        return res.status(404).json({ error: `Database "${name}" not found` });
+      }
+      const vs = dbm.get(name).vector_search;
+      if (!vs?.enabled || !vs.fields?.length) {
+        return res.status(400).json({ error: "Semantic search is not enabled for this database" });
+      }
+      const result = await dbm.queueVectorIndex(name, "rebuild", { rebuild: true });
+      res.json({
+        success: true,
+        queued: result.queued || result.deduped === true,
+        ...(result.deduped ? { already_queued: true } : {}),
+      });
+    } catch (err) {
+      log.error({ err }, "[Qdrant Rebuild POST] Error:");
+      res.status(500).json({ error: err instanceof Error ? err.message : "Failed to queue rebuild" });
     }
   });
 
@@ -4295,13 +4522,10 @@ export function registerAdminRoutes(app: Express): void {
       process.env.MCP_SERVER_SECRET ||
       process.env.MCP_API_KEY
     );
-    const replitDevDomain = process.env.REPLIT_DEV_DOMAIN || null;
     const readiness = {
       siteUrlConfigured: !!siteUrl,
       mcpServerSecretConfigured,
       mcpReachable: false,
-      /** Fallback OAuth base when SITE_URL is unset (Replit only). */
-      replitDevDomain,
     };
 
     /** Role → tools/list visibility (same map as production MCP catalog filter). */

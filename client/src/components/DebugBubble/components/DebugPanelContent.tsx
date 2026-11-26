@@ -99,6 +99,8 @@ export interface DebugPanelContentProps {
   pathname: string;
   navigate: (path: string) => void;
   setSeoModalOpen: (v: boolean) => void;
+  /** Opens the page stats drawer (closes the bubble), or a dialog explaining why it can't. */
+  openPageStats?: () => void;
   fetchSeoPreview: () => void;
 
   menuView: MenuView;
@@ -1485,6 +1487,7 @@ export function DebugPanelContent(props: DebugPanelContentProps) {
           pageDiagnosticsUrl={props.pageDiagnosticsUrl}
           pageDiagnosticsEntryKey={props.pageDiagnosticsEntryKey}
           onOpenPageErrors={props.onOpenPageErrors}
+          onOpenPageStats={props.openPageStats}
         />
       ) : props.menuView === "menus" ? (
         <>

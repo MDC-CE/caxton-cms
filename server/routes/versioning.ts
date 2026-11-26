@@ -32,6 +32,7 @@ import {
 import { markFileAsModified } from "../sync-state";
 import { emitEntryLocalePromoted, emitEntryLocaleUnpublished } from "../content-events";
 import { deepMerge } from "../utils/deepMerge";
+import { assertLocaleUrlAvailable, localeUrlSlugsFromBody } from "../locale-url-slug";
 import { regenerateSectionIds } from "../utils/regenerateSectionIds";
 import { databaseManager } from "../database";
 import {
@@ -40,6 +41,9 @@ import {
   clearRedirectCache,
   testRedirect,
 } from "../redirects";
+import { hasRedirectChanges } from "../redirect-items";
+import { variantRedirectChanges } from "../versioning/draft-base";
+import { parseRobotsOnPublish, ROBOTS_CHANGE_ON_PUBLISH_CODE } from "../versioning/robots-on-publish";
 import {
   getSchema,
   getMergedSchemas,
@@ -82,10 +86,9 @@ import { validateYamlIdentity } from "../validate-content-identity";
 import { bindingManager } from "../bindings";
 import {
   escapeTemplateVars,
-  escapeObjectVars,
   unescapeObjectVars,
-  unescapeYamlDump,
 } from "@shared/templateVars";
+import { dumpContentYaml } from "../content-yaml";
 import {
   getVersioningManager,
   readUserId,
@@ -147,6 +150,7 @@ import {
   findSourceDraftVariant,
   usesDraftFirstCreate,
   liveLocaleFileName,
+  listUnregisteredVariantFiles,
 } from "../draft-entry";
 import {
   resolveTemplateLocalePath,
@@ -162,6 +166,10 @@ import {
   variantTrafficErrorMessage,
 } from "../versioning/delete-variant.js";
 import { ensurePublishedAtOnce, readPublishedAt } from "../published-at";
+import { isReservedExperimentSlug } from "../versioning/assignment";
+import { abCheckPageLock, isAbTestingSetUp, isLatestCheckOk } from "../ab-testing/state";
+import { getSplitHealth } from "../versioning/split-health";
+import { api } from "../rate-limit/api.js";
 import { normalizeFlexibleDate } from "@shared/normalizeFlexibleDate";
 import { resolveFieldValue, applyTransformIfNeeded } from "../transform";
 import { resolveSingleVars } from "../single-resolver";
@@ -289,6 +297,8 @@ export type VariantProposalBadge = {
   status?: string;
   proposer_username?: string;
   proposer_kind?: "agent" | "staff";
+  /** Epoch ms of the proposal's last change. */
+  updated_at?: number;
 };
 
 /** `{locale: {variant: badge}}` — `_draft.proposal` first, then the local proposals DB. */
@@ -327,6 +337,7 @@ async function proposalsByVariantFor(opts: {
               status: hit.status,
               proposer_username: hit.proposer_username,
               proposer_kind: hit.proposer_kind,
+              updated_at: hit.updated_at,
             }
           : {}),
       };
@@ -345,6 +356,17 @@ function resolveWritableVersioningSlug(
 }
 
 export function registerVersioningRoutes(app: Express): void {
+  // The hidden A/B check page is a locked system page: no variant or traffic writes.
+  app.use("/api/versioning/:contentType/:contentSlug", (req, res, next) => {
+    if (req.method === "GET") return next();
+    const lock = abCheckPageLock(req.params.contentType, req.params.contentSlug, getContentRoot(res));
+    if (lock) {
+      res.status(403).json({ code: lock.code, error: lock.error });
+      return;
+    }
+    next();
+  });
+
   app.get("/api/debug/versioning", (req, res) => {
     const versioningManager = (res.locals.site as any)?.versioningManager ?? getVersioningManager();
     const stats = versioningManager.getStats();
@@ -437,10 +459,23 @@ export function registerVersioningRoutes(app: Express): void {
 
     const attached = shared && !templateMode && !detached;
     const isDraft = !hasLiveDefault && !templateMode;
+    const unregisteredVariants = listUnregisteredVariantFiles(
+      contentDir,
+      versioning,
+      templateMode,
+      availableLocales,
+    );
+
+    const abSite = { contentRoot: root, contentRootName: getContentRootName(res) };
+    const ab_testing = {
+      set_up: isAbTestingSetUp(abSite),
+      latest_check_ok: isLatestCheckOk(abSite.contentRootName),
+    };
 
     if (!versioning) {
       res.json({
         versioning: null,
+        ab_testing,
         hasVersioningFile: false,
         filePath,
         availableLocales,
@@ -454,6 +489,7 @@ export function registerVersioningRoutes(app: Express): void {
         title,
         updatedAt,
         publishedAt,
+        unregisteredVariants,
         proposalsByVariant: {},
       });
       return;
@@ -461,6 +497,16 @@ export function registerVersioningRoutes(app: Express): void {
 
     res.json({
       versioning,
+      ab_testing,
+      split_health: getSplitHealth(
+        {
+          contentRoot: root,
+          contentRootName: getContentRootName(res),
+          versioningManager,
+        },
+        contentType,
+        resolvedSlug,
+      ),
       hasVersioningFile: true,
       filePath,
       availableLocales,
@@ -474,6 +520,7 @@ export function registerVersioningRoutes(app: Express): void {
       title,
       updatedAt,
       publishedAt,
+      unregisteredVariants,
       proposalsByVariant: templateMode
         ? {}
         : await proposalsByVariantFor({
@@ -561,6 +608,39 @@ export function registerVersioningRoutes(app: Express): void {
           }
         }
 
+        // Old addresses cannot be split between visitors: a variant that changes them only goes live by publishing.
+        if (!resolved.templateMode) {
+          const blocked: Array<{ variant: string; added: string[]; removed: string[]; changed: string[] }> = [];
+          for (const v of parseResult.data.variants) {
+            if (v.allocation <= 0 || v.slug === "default") continue;
+            const changes = variantRedirectChanges({
+              contentType,
+              slug: resolved.slug,
+              locale,
+              variant: v.slug,
+              contentRoot: root,
+            });
+            if (hasRedirectChanges(changes)) {
+              blocked.push({
+                variant: v.slug,
+                added: changes.added.map((i) => i.path),
+                removed: changes.removed.map((i) => i.path),
+                changed: changes.changed.map((i) => i.path),
+              });
+            }
+          }
+          if (blocked.length > 0) {
+            res.status(400).json({
+              code: "variant_has_redirect_changes",
+              error:
+                `${blocked.map((b) => `"${b.variant}"`).join(", ")} changes the page's old addresses. ` +
+                "Redirects can't be split between visitors, so publish it instead of giving it traffic, or remove the redirect changes first. You can still lower traffic to 0%.",
+              variants: blocked,
+            });
+            return;
+          }
+        }
+
         const existing = versioningManager.getVersioningForContent(contentType, resolved.slug) || {};
         const prevVariants = existing[locale]?.variants ?? [];
         const prevBySlug = new Map(
@@ -568,6 +648,33 @@ export function registerVersioningRoutes(app: Express): void {
         );
         const newVariants = parseResult.data.variants;
         const newSlugSet = new Set(newVariants.map((v) => v.slug));
+
+        // Starting a test or raising a split needs A/B testing set up and a passing check.
+        // Lowering (including to 0%) is always allowed.
+        const raised = newVariants.filter((v) => v.allocation > (prevBySlug.get(v.slug) ?? 0));
+        if (raised.length > 0) {
+          const abSite = { contentRoot: root, contentRootName: getContentRootName(res) };
+          if (!isAbTestingSetUp(abSite)) {
+            res.status(400).json({
+              code: "ab_testing_not_setup",
+              error:
+                "A/B testing has not been set up yet, so visitors only see the live page. " +
+                "A Platform Steward sets it up once in Settings → Tracking → A/B testing; until then no version can get traffic. You can still lower or stop traffic.",
+              setup_url: "/private/tracking/ab-testing#ab-setup",
+            });
+            return;
+          }
+          if (!isLatestCheckOk(abSite.contentRootName)) {
+            res.status(400).json({
+              code: "ab_check_failing",
+              error:
+                "The last A/B check failed. Running tests continue, but you can't start a test or raise traffic until a check passes. " +
+                "You can still lower or stop traffic.",
+              health_url: "/private/tracking/ab-testing#ab-health",
+            });
+            return;
+          }
+        }
 
         const newlyPublished = newVariants.filter((v) => {
           const prev = prevBySlug.get(v.slug) ?? 0;
@@ -715,8 +822,19 @@ export function registerVersioningRoutes(app: Express): void {
           }
         }
 
-        const updated = { ...existing, [locale]: { variants: newVariants } };
-        versioningManager.updateVersioning(contentType, resolved.slug, updated);
+        const hadTraffic = prevVariants.some((v) => v.allocation > 0);
+        const hasTraffic = newVariants.some((v) => v.allocation > 0);
+        const prevStartedAt = existing[locale]?.started_at;
+        const startedAt =
+          !hadTraffic && hasTraffic ? new Date().toISOString().slice(0, 10) : prevStartedAt;
+        const updated = {
+          ...existing,
+          [locale]: { variants: newVariants, ...(startedAt ? { started_at: startedAt } : {}) },
+        };
+        versioningManager.updateVersioning(contentType, resolved.slug, updated, {
+          author: auth.author,
+          contentRoot: root,
+        });
         invalidateContentCaches(contentType, ci);
 
         for (const slug of unpublishedSlugs) {
@@ -797,6 +915,13 @@ export function registerVersioningRoutes(app: Express): void {
       });
       return;
     }
+    if (isReservedExperimentSlug(variantSlug)) {
+      res.status(400).json({
+        code: "reserved_variant",
+        error: 'Variant slug "default" is reserved: it labels visitors who see the live page during a test',
+      });
+      return;
+    }
 
     const versioningManager = (res.locals.site as any)?.versioningManager ?? getVersioningManager();
     const contentDir = versioningManager.getVersioningContentDir(contentType, resolved.slug);
@@ -849,9 +974,24 @@ export function registerVersioningRoutes(app: Express): void {
 
     try {
       const { stripDraftMetaFromRaw } = await import("../versioning/draft-meta");
-      const { recordDraftBase } = await import("../versioning/draft-base");
+      const { draftSeedFromLive, funnelCarriedWarning, recordDraftBase, scopeOptionsOf } = await import(
+        "../versioning/draft-base"
+      );
       // Never copy another file's `_draft` (base / proposal link / translation source).
-      const sourceContent = stripDraftMetaFromRaw(fs.readFileSync(sourceFilePath, "utf-8"));
+      // From live, page-level keys stay in `_common.yml`; another draft's staged ones are kept.
+      const sourceRaw = fs.readFileSync(sourceFilePath, "utf-8");
+      const commonPath = path.join(contentDir, "_common.yml");
+      const seeded =
+        sourceFilePath === liveSourcePath
+          ? draftSeedFromLive(sourceRaw, {
+              ...scopeOptionsOf({ contentType, contentRoot: root }),
+              ...(resolved.templateMode
+                ? {}
+                : { commonRaw: fs.existsSync(commonPath) ? fs.readFileSync(commonPath, "utf-8") : null }),
+            })
+          : { content: stripDraftMetaFromRaw(sourceRaw), carried: [] as string[] };
+      const sourceContent = seeded.content;
+      const seedWarnings = seeded.carried.includes("funnel") ? [funnelCarriedWarning(locale)] : [];
       const attachedEntry =
         !resolved.templateMode &&
         isSharedLayoutType(contentType, root) &&
@@ -895,10 +1035,7 @@ export function registerVersioningRoutes(app: Express): void {
             const siblingLive = getCI(res).safeYamlLoad(fs.readFileSync(sibling.filePath, "utf-8")) as Record<string, unknown> | null;
             if (siblingLive?.layout) mirrored.layout = siblingLive.layout;
           } catch { /* ignore */ }
-          const { escapeObjectVars, unescapeYamlDump } = await import("@shared/templateVars");
-          const { escaped, map } = escapeObjectVars(mirrored);
-          const dumped = yaml.dump(escaped, { lineWidth: -1, noRefs: true, quotingType: '"', forceQuotes: false });
-          fs.writeFileSync(siblingVariantPath, unescapeYamlDump(dumped, map), "utf-8");
+          fs.writeFileSync(siblingVariantPath, dumpContentYaml(mirrored, { lineWidth: -1, noRefs: true, quotingType: '"', forceQuotes: false }, siblingVariantPath), "utf-8");
           markFileAsModified(`${folder}/${variantTemplateBasename(variantSlug, sibling.locale)}`, auth.author || "api", undefined, root);
           createdSiblings.push(sibling.locale);
         }
@@ -906,14 +1043,19 @@ export function registerVersioningRoutes(app: Express): void {
 
       const existing = versioningManager.getVersioningForContent(contentType, resolved.slug) || {};
       const localeData = existing[locale]
-        ? { variants: [...(existing[locale].variants || [])] }
-        : { variants: [] };
+        ? { ...existing[locale], variants: [...(existing[locale].variants || [])] }
+        : { variants: [] as Array<{ slug: string; allocation: number }> };
 
       if (!localeData.variants.some((v) => v.slug === variantSlug)) {
         localeData.variants.push({ slug: variantSlug, allocation: 0 });
       }
 
-      versioningManager.updateVersioning(contentType, resolved.slug, { ...existing, [locale]: localeData });
+      versioningManager.updateVersioning(
+        contentType,
+        resolved.slug,
+        { ...existing, [locale]: localeData },
+        { author: auth.author, contentRoot: root },
+      );
 
       res.json({
         success: true,
@@ -923,10 +1065,92 @@ export function registerVersioningRoutes(app: Express): void {
         siblingLocales: createdSiblings,
         filePath: `${getContentRootName(res)}/${relPrimary}`,
         seededFromDraft: !fs.existsSync(liveSourcePath),
+        ...(seedWarnings.length ? { warnings: seedWarnings } : {}),
       });
     } catch (error) {
       res.status(500).json({ error: String(error) });
     }
+  });
+
+  // Register an existing variant file that versioning.yml does not list (at 0% traffic)
+  api.post(app, "/api/versioning/:contentType/:contentSlug/register", { rate: "staffWrite" }, async (req, res) => {
+    const { contentType, contentSlug } = req.params;
+
+    if (!isValidType(contentType)) {
+      res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+      return;
+    }
+
+    const auth = await requireCapability(req, res, "content_create_variant", contentType);
+    if (!auth.authorized) return;
+
+    const root = getContentRoot(res);
+    const resolved = resolveWritableVersioningSlug(contentType, contentSlug, root);
+    if (!resolved.ok) {
+      res.status(resolved.status).json({ error: resolved.error });
+      return;
+    }
+
+    const { variantSlug, locale } = (req.body ?? {}) as { variantSlug?: string; locale?: string };
+    if (!variantSlug || !locale) {
+      res.status(400).json({ error: "variantSlug and locale are required" });
+      return;
+    }
+    if (
+      !/^[a-z0-9-]+$/.test(variantSlug) ||
+      isReservedTemplateVariantSlug(variantSlug) ||
+      isReservedExperimentSlug(variantSlug)
+    ) {
+      res.status(400).json({ error: "Invalid variantSlug" });
+      return;
+    }
+    if (!/^[a-z]{2}(-[A-Z]{2})?$/.test(locale)) {
+      res.status(400).json({ error: "locale must be a valid language code (e.g. en, es, pt-BR)" });
+      return;
+    }
+
+    const versioningManager = (res.locals.site as any)?.versioningManager ?? getVersioningManager();
+    const contentDir = path.resolve(versioningManager.getVersioningContentDir(contentType, resolved.slug));
+    const variantFilePath = path.resolve(
+      versioningManager.getVariantFilePath(contentType, resolved.slug, variantSlug, locale),
+    );
+    if (!variantFilePath.startsWith(contentDir + path.sep)) {
+      res.status(400).json({ error: "Invalid file path" });
+      return;
+    }
+    if (!fs.existsSync(variantFilePath)) {
+      res.status(404).json({ error: `Variant file ${path.basename(variantFilePath)} not found` });
+      return;
+    }
+
+    const existing = versioningManager.getVersioningForContent(contentType, resolved.slug) || {};
+    if (isVariantRegisteredInVersioning(existing, locale, variantSlug)) {
+      res.status(409).json({
+        code: "already_registered",
+        error: `${variantSlug} is already listed for ${locale} in versioning.yml`,
+      });
+      return;
+    }
+
+    const localeVariants = [...(existing[locale]?.variants || []), { slug: variantSlug, allocation: 0 }];
+    versioningManager.updateVersioning(
+      contentType,
+      resolved.slug,
+      { ...existing, [locale]: { ...existing[locale], variants: localeVariants } },
+      { author: auth.author || "api", contentRoot: root },
+    );
+
+    const versioning = versioningManager.getVersioningForContent(contentType, resolved.slug) || {};
+    const availableLocales = getLocaleEntries().map((l: { code: string }) => l.code);
+    res.json({
+      success: true,
+      variantSlug,
+      locale,
+      allocation: 0,
+      versioning,
+      unregisteredVariants: listUnregisteredVariantFiles(contentDir, versioning, resolved.templateMode, availableLocales),
+      versioningFilePath: versioningManager.getVersioningFilePath(contentType, resolved.slug),
+    });
   });
 
   // Publish all draft locales (all-or-nothing): promote variantSlug for every unpublished locale that has it
@@ -1033,16 +1257,25 @@ export function registerVersioningRoutes(app: Express): void {
         callerIsSwarm: isSwarmCaller(req),
         callerIsMcp: typeof req.headers["x-mcp-author"] === "string",
         confirmTextLimits: req.body?.confirm_text_limits === true,
+        confirmDisplayChange: req.body?.confirm_display_change === true,
         findOpenProposalForDraft: (ref) => findOpenProposalLinkForDraft(siteName, ref),
         dryRun,
         seoStandaloneReason:
           typeof req.body?.seo_standalone_reason === "string" ? req.body.seo_standalone_reason : null,
+        localeUrlSlugs: localeUrlSlugsFromBody(req.body),
+        robotsOnPublish: parseRobotsOnPublish(req.body?.robots_on_publish),
       });
 
     try {
       // All-or-nothing: every locale must pass every check before any file is written.
+      // Robots changes are collected across locales so one choice can answer them all.
+      const robotsChanges: Array<Record<string, unknown>> = [];
       for (const locale of draftLocales) {
         const check = await promoteLocale(locale, true);
+        if (!check.ok && check.code === ROBOTS_CHANGE_ON_PUBLISH_CODE) {
+          robotsChanges.push(check.details ?? { locale });
+          continue;
+        }
         if (!check.ok) {
           res.status(check.status ?? 400).json({
             error: `Cannot publish: ${check.error} (locale ${locale})`,
@@ -1052,6 +1285,15 @@ export function registerVersioningRoutes(app: Express): void {
           });
           return;
         }
+      }
+      if (robotsChanges.length > 0) {
+        const langs = robotsChanges.map((c) => String(c.locale)).join(", ");
+        res.status(409).json({
+          error: `Publishing changes whether search engines can see this page in ${langs}. Choose to keep the live values or use the draft's (one choice applies to every listed language).`,
+          code: ROBOTS_CHANGE_ON_PUBLISH_CODE,
+          details: { locales: robotsChanges },
+        });
+        return;
       }
 
       const publishedLocales: string[] = [];
@@ -1159,10 +1401,13 @@ export function registerVersioningRoutes(app: Express): void {
       callerIsSwarm: isSwarmCaller(req),
       callerIsMcp: typeof req.headers["x-mcp-author"] === "string",
       confirmTextLimits: req.body?.confirm_text_limits === true,
+      confirmDisplayChange: req.body?.confirm_display_change === true,
       findOpenProposalForDraft: (ref) => findOpenProposalLinkForDraft(siteName, ref),
       dryRun: req.body?.dry_run === true,
       seoStandaloneReason:
         typeof req.body?.seo_standalone_reason === "string" ? req.body.seo_standalone_reason : null,
+      localeUrlSlugs: localeUrlSlugsFromBody(req.body),
+      robotsOnPublish: parseRobotsOnPublish(req.body?.robots_on_publish),
     });
     if (!result.ok) {
       res.status(result.status ?? 400).json({
@@ -1513,7 +1758,10 @@ export function registerVersioningRoutes(app: Express): void {
             root,
           );
         } else {
-          versioningManager.updateVersioning(contentType, resolved.slug, pruned);
+          versioningManager.updateVersioning(contentType, resolved.slug, pruned, {
+            author: auth.author || "api",
+            contentRoot: root,
+          });
         }
       }
 

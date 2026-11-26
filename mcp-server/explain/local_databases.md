@@ -2,7 +2,7 @@
 
 Private databases may be **local** (`source.type: local` → YAML under `db/{name}/`), **api**, or **remote**.
 
-- **Reads** (`list_database_items`, `get_database_item`): all source types (CMS cache). Anyone with `databases_edit_data` (any scope) or `databases_manage` may list/get **any** bank.
+- **Reads** (`list_database_items`, `get_database_item`): all source types (CMS cache). Anyone with `databases_view`, `databases_edit_data` (any scope), or `databases_manage` may list/get **any** bank. `refresh: true` needs `databases_edit_data` for that slug or `databases_manage`; otherwise it is ignored (cache read + warning `refresh_requires_edit_or_manage`).
 - **Writes** (add/update/delete items): **local only**, and require `databases_edit_data` **for that slug** (`databases_manage` alone does **not** authorize row writes).
 - **Definition** (`create_or_update_database`): create/patch bank settings — `databases_manage` only. No MCP delete.
 
@@ -10,16 +10,16 @@ Private databases may be **local** (`source.type: local` → YAML under `db/{nam
 
 | Tool | Cap | Notes |
 |---|---|---|
-| `list_databases` | `databases_edit_data` **or** `databases_manage` | Prefer `local_only: true` for CRUD targets. Settings vs rows: see description. |
-| `list_database_items` | same | All sources; **summary** rows + global `index`; optional `refresh` |
-| `get_database_item` | same | All sources; **full** row by global index; optional `refresh` |
+| `list_databases` | `databases_view`, `databases_edit_data`, **or** `databases_manage` | Prefer `local_only: true` for CRUD targets. Settings vs rows: see description. |
+| `list_database_items` | same | All sources; **summary** rows + global `index`; optional `refresh` (edit/manage only) |
+| `get_database_item` | same | All sources; **full** row by global index; optional `refresh` (edit/manage only) |
 | `add_database_item` | `databases_edit_data` (write scoped to slug) | Local only; FAQ defaults + dedupe |
 | `add_database_items` | same | Local only; bulk add (max 40), best-effort |
 | `update_database_item` | same | Local only; prefer `expect_question` |
 | `update_database_items` | same | Local only; bulk update (max 40) |
 | `delete_database_item` | same | Local only; requires `confirm: true` |
 | `create_or_update_database` | **`databases_manage` only** | Create = config + empty local items YAML; update = deep patch + `confirm:true` |
-| `reindex_database` | **`databases_manage` only** | After item writes **or** definition patches that enable/change `vector_search` |
+| `reindex_database` | **`databases_manage` only** | After item writes; queues an incremental Sidequest sync (definition patches that enable/change `vector_search` auto-queue it) |
 
 Call `explain_site` topic `local_databases` before bulk FAQ database edits or when reading api/remote banks.
 
@@ -112,13 +112,34 @@ Warns if `related_features.length > 2`.
 
 `type: faq` is a listing component (`behaviors.listing` → `dynamic_entries`). Author filters under `dynamic_entries.permanent_filters` (e.g. topics / locations). On location pages use `value: "{{ entry.slug }}"` for the `locations` filter. **Do not** author section-level `related_features` (save rejects). FAQPage JSON-LD uses the same post-`resolveDynamicEntries` `items` as the accordion (plus `item_overrides.hideOnLocations`).
 
+## Evidence databases (proof for named claims)
+
+A bank with `config.evidence` proves **named third-party claims** in proposal review: someone chose, selected, partnered with, covered, endorsed, ranked or awarded us (e.g. press mentions). Numbers and stats still go to `list_variables`.
+
+```yaml
+evidence:
+  enabled: true
+  proves: [press_coverage, partnership, government_contract]   # fixed list: + endorsement, award, ranking, graduate_quote
+  proof_field: link_url                                        # row counts as sourced only when this is filled
+  match_fields: [organization, tags, title]                    # values matched against names in proposal text
+  ignore_values: []                                            # optional; brand names and values < 4 chars are always ignored
+```
+
+- `list_databases` returns `evidence: { proves, proof_field, match_fields, also_used_by_sites } | null`. Sites whose `fallback_content_folder` is this site use these rows too.
+- **Row stamp:** on evidence banks the server writes `_changed_by: { type: staff|agent, author, at }` into the row when a write adds the row or changes `proof_field`, a `match_fields` value, `title` or `excerpt`. Other edits (image, logo, priority…) keep the stamp. A client-sent `_changed_by` is always dropped. Rows with no stamp predate tracking and count as trusted. The stamp never reaches pages, listings or MCP item reads.
+- **Agent writes** to proof fields → row is **unverified** (warning `evidence_row_unverified`); it does not prove claims until staff press **Mark verified** on the Databases page. Agents cannot verify.
+- **Review statuses** (`review_context.evidence.claims[].status`): `sourced` · `unsourced` (no link — warning only) · `unverified` (add_blocker asking staff to verify) · `no_evidence` (apply refused: `evidence_missing`) · `already_live` (claim already on the live page — warning only) · `dismissed` (staff marked "not a claim about us"; agents cannot dismiss).
+- **Archive copy:** the server also writes `_archive: { source_url, status: pending|archived|failed|manual, url, captured_at, error, set_by, updated_at, original: { status: ok|gone, checked_at } }` — an Internet Archive (archive.org) copy of the row's `proof_field` link. Same rules as the stamp: client values dropped, never in pages / listings / MCP item reads. A record whose `source_url` differs from the current link is stale (ignored). A link that already is a saved copy counts as archived (`archive_url` = the link; nothing is saved again): a Wayback snapshot `web.archive.org/web/<timestamp>/…` (calendar pages like `/web/2024*/…` do not count) or an archive.today snapshot (`archive.ph` / `.today` / `.is` / `.li` / `.vn` / `.fo` / `.md`, short id or dated form). Only the live server archives: after a row save (new or changed link) and in a weekly sweep that retries failures older than a week and flags originals returning 404 / 410. Staff-only on the Databases page: Archive now / Retry, paste a backup link (`manual`, never replaced by a job). Agents cannot trigger archiving.
+- **Review archive fields:** `claims[].row.archive_status` (`none` no link · `not_archived` · `pending` · `archived` · `failed`) and `archive_url`. A `sourced` claim that is not archived adds warning `evidence_not_archived` — warning only, never a blocker.
+- **Does not:** change page rendering; push content GitHub; verify rows; dismiss names; archive links (server-side only).
+
 ## Side effects and non-effects
 
 **Does (item writes):** write YAML; `clearCache`; `markFileAsModified` (content sync dirty).
 
 **Does not:** push content GitHub; edit page sections / `hardcoded_entries` / `dynamic_entries`; auto-reindex (unless `reindex: true` and caller has `databases_manage`); edit upstream api/remote source rows; authorize row writes via `databases_manage` alone.
 
-When vector search is enabled, mutate responses `next_actions` → `reindex_database` until reindexed. Definition patches that flip/change `vector_search` also recommend `reindex_database`.
+When vector search is enabled, mutate responses `next_actions` → `reindex_database` until reindexed. Definition patches that flip/change `vector_search` queue the sync automatically (warning `vector_index_auto_queued`); do not call `reindex_database` for them. Reindex is incremental and runs in the Sidequest worker (see `semantic_search`).
 
 ## Delete safety
 

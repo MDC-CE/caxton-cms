@@ -40,6 +40,7 @@ import { listingSortValidator } from "./listing-sort";
 import { componentBehaviorsValidator } from "./component-behaviors";
 import { ctaTrackingValidator } from "./cta-tracking";
 import { internalLinkUtmValidator } from "./internal-link-utm";
+import { externalLinksValidator } from "./external-links";
 import { requiredFieldsValidator } from "./required-fields";
 import { schemaOrgCompanionsValidator } from "./schema-org-companions";
 import { staticFieldOverridesValidator } from "./static-field-overrides";
@@ -51,12 +52,14 @@ import { updatedAtValidator } from "./updated-at";
 import { urlParamLocaleValidator } from "./url-param-locale";
 import { nonlocalizedCommonLocaleValidator } from "./nonlocalized-common-locale";
 import { localeSlugUniquenessValidator } from "./locale-slug-uniqueness";
+import { slugIdentityValidator } from "./slug-identity";
 import { siteLinkIndexValidator } from "./site-link-index";
 import { siteRelationIndexValidator } from "./site-relation-index";
 import { unassignedVariablesValidator } from "./unassigned-variables";
 import { variablesMetadataValidator } from "./variables-metadata";
 import { funnelCompletenessValidator } from "./funnel-completeness";
 import { draftIntegrityValidator } from "./draft-integrity";
+import { corruptedTemplateValuesValidator } from "./corrupted-template-values";
 import { textLimitsValidator } from "./text-limits";
 
 export const validators: Validator[] = [
@@ -98,6 +101,7 @@ export const validators: Validator[] = [
   urlParamLocaleValidator,
   nonlocalizedCommonLocaleValidator,
   localeSlugUniquenessValidator,
+  slugIdentityValidator,
   orphanedFilesValidator,
   formsValidator,
   consentLegacyKeysValidator,
@@ -106,12 +110,14 @@ export const validators: Validator[] = [
   componentBehaviorsValidator,
   ctaTrackingValidator,
   internalLinkUtmValidator,
+  externalLinksValidator,
   updatedAtValidator,
   siteLinkIndexValidator,
   siteRelationIndexValidator,
   unassignedVariablesValidator,
   variablesMetadataValidator,
   draftIntegrityValidator,
+  corruptedTemplateValuesValidator,
 ];
 
 /** @deprecated Lighthouse removed from platform diagnostics — use external tools. */

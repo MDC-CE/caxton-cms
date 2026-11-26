@@ -1,11 +1,13 @@
 /**
- * Proposals 1.0 draft integrity: attached draft structure, orphan versioning.yml,
+ * Proposals 1.0 draft integrity: attached draft structure, orphan versioning.yml, variant files
+ * missing from versioning.yml,
  * `_draft` left in published files, stale / source-changed free drafts, unverified
  * proposal links, and field-scope mismatches between `_common.yml` and locale files.
  */
 
 import fs from "fs";
-import { LOCALE_TOP_LEVEL_KEYS, splitByFieldScope } from "@shared/field-scope";
+import path from "path";
+import { LOCALE_META_KEYS, LOCALE_TOP_LEVEL_KEYS, splitByFieldScope } from "@shared/field-scope";
 import type { Validator, ValidatorResult, ValidationContext, ValidationIssue } from "../shared/types";
 import { nullFieldPaths, resolveScanRoot, scanEntries, type ScannedEntry } from "../shared/draft-scan";
 import { isEntryDetached, isSharedLayoutType } from "../../../server/shared-layout-entry";
@@ -15,6 +17,18 @@ import { checkDraftBase, checkTranslationSource } from "../../../server/versioni
 import { DRAFT_INTEGRITY_ISSUE_CODES, DRAFT_INTEGRITY_VALIDATOR_NAME } from "./draft-integrity.issueCodes";
 
 export const STALE_DRAFT_DAYS = 30;
+
+/** Data migration that moves every field to its scope's file; once it ran on a site, mismatches are errors. */
+export const FIELD_SCOPE_MIGRATION_FILE = "006_reconcile_field_scope.ts";
+
+async function fieldScopeMigrationCompleted(site: string): Promise<boolean> {
+  try {
+    const { isCompleted, ledgerDb } = await import("../../../server/data-migrations/ledger");
+    return isCompleted(ledgerDb(site), FIELD_SCOPE_MIGRATION_FILE);
+  } catch {
+    return false;
+  }
+}
 
 function load(filePath: string): Record<string, unknown> | null {
   try {
@@ -43,13 +57,24 @@ export function isOrphanVersioning(entry: ScannedEntry): boolean {
   return listed.every((l) => !entry.variants.some((v) => v.variant === l.slug && v.locale === l.locale));
 }
 
-/** Locale-scoped keys (explicitly listed) sitting in `_common.yml`. Unlisted keys stay page-wide. */
+/** Variant files that versioning.yml does not list (no traffic; hidden from the Versions panel). */
+export function unregisteredVariants(entry: ScannedEntry): ScannedEntry["variants"] {
+  const listed = versioningVariants(entry.versioningPath ? load(entry.versioningPath) : null);
+  return entry.variants.filter((v) => !listed.some((l) => l.slug === v.variant && l.locale === v.locale));
+}
+
+/** Locale-scoped keys (explicitly listed, incl. `meta.robots`) sitting in `_common.yml`. Unlisted keys stay page-wide. */
 export function localeKeysInCommon(common: Record<string, unknown> | null): string[] {
   if (!common) return [];
   const { locale } = splitByFieldScope(common);
   const out: string[] = [];
   for (const [k, v] of Object.entries(locale)) {
-    if (k === "meta" && v && typeof v === "object") continue;
+    if (k === "meta" && v && typeof v === "object" && !Array.isArray(v)) {
+      for (const mk of Object.keys(v as Record<string, unknown>)) {
+        if (LOCALE_META_KEYS.has(mk)) out.push(`meta.${mk}`);
+      }
+      continue;
+    }
     if (LOCALE_TOP_LEVEL_KEYS.has(k)) out.push(k);
   }
   return out;
@@ -83,6 +108,7 @@ export const draftIntegrityValidator: Validator = {
     const warnings: ValidationIssue[] = [];
     const root = resolveScanRoot(context.contentRoot);
     const entries = scanEntries(root);
+    const scopeStrict = await fieldScopeMigrationCompleted(path.basename(path.resolve(root)));
     const staleCutoff = Date.now() - STALE_DRAFT_DAYS * 24 * 60 * 60 * 1000;
     const sharedTypes = new Map<string, boolean>();
 
@@ -98,6 +124,16 @@ export const draftIntegrityValidator: Validator = {
           message: `${contentType}/${slug}: versioning.yml lists no existing variant files.`,
           file: entry.versioningPath!,
           fix: { type: "api", label: "Delete orphan versioning.yml", fixerName: "orphan-entry-versioning" },
+        });
+      }
+
+      for (const v of unregisteredVariants(entry)) {
+        warnings.push({
+          type: "warning",
+          code: "UNREGISTERED_VARIANT_FILE",
+          message: `${contentType}/${slug}: variant '${v.variant}' (${v.locale}) is not listed in versioning.yml, so it gets no traffic and is hidden from the Versions panel.`,
+          file: v.filePath,
+          fix: { type: "api", label: "Register at 0% traffic", fixerName: "register-unlisted-variants" },
         });
       }
 
@@ -175,8 +211,8 @@ export const draftIntegrityValidator: Validator = {
         }
         const misplaced = p.isCommon ? localeKeysInCommon(data) : commonKeysInLocale(data);
         if (misplaced.length) {
-          warnings.push({
-            type: "warning",
+          (scopeStrict ? errors : warnings).push({
+            type: scopeStrict ? "error" : "warning",
             code: "FIELD_SCOPE_MISMATCH",
             message: p.isCommon
               ? `${contentType}/${slug}: per-language field(s) ${misplaced.join(", ")} in _common.yml.`

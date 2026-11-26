@@ -6,6 +6,7 @@ import { getTokenUsername, getTokenClientName } from "./oauth.js";
 import { getActiveRoleId, getActiveMcpToken } from "./auth.js";
 import {
   isExactAgentModel,
+  isServerAgentSessionId,
   missingExactModelPayload,
   sessionRequiredPayload,
   sessionUnknownPayload,
@@ -30,6 +31,8 @@ export type LoopbackHeaderOpts = {
   omitJsonContentType?: boolean;
   /** Exact versioned model (provider/model), e.g. claude/sonnet-4.5. */
   model?: string;
+  /** Canonical site domain from sites.yml (e.g. fl.4geeksacademy.com). */
+  site?: string;
 };
 
 /** Model for headers: explicit opts, else RAM session registry. Env MCP_AGENT_MODEL is not used. */
@@ -72,6 +75,8 @@ export function buildLoopbackHeaders(
   if (model) headers["x-mcp-model"] = model;
   const roleId = getActiveRoleId()?.trim();
   if (roleId) headers["x-mcp-role"] = roleId;
+  const site = typeof opts?.site === "string" ? opts.site.trim() : "";
+  if (site) headers["x-mcp-site"] = site;
   return headers;
 }
 
@@ -133,6 +138,24 @@ export async function assertMutatingAgentIdentity(
         args_hint: { action: "start", model: "provider/model" },
       },
     ]);
+  }
+  const sidPreview = sid.slice(0, 64);
+  if (!isServerAgentSessionId(sid)) {
+    return actionRequired(
+      sessionUnknownPayload(
+        toolName,
+        `agent_session_id "${sidPreview}" was not issued by agent_session start. ` +
+          `Call agent_session start (without an id) and pass the agent_session_id it returns.`,
+      ),
+      [
+        {
+          tool: "agent_session",
+          priority: "required",
+          reason: "Session ids come only from start; invented ids are shared across agents.",
+          args_hint: { action: "start", model: "provider/model" },
+        },
+      ],
+    );
   }
 
   const mcpToken = getActiveMcpToken();

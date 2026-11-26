@@ -6,6 +6,7 @@ import { geoGet, geoSet } from "../geo-cache";
 import { getQueueStats, enqueueOptimization, getPendingOptimizations, getFailedEntries, retryFailedImages, resetOptimizeSession, getOptimizeSession, enqueueExternalImage } from "../image-registry";
 import { getAllQueueState } from "../image-queue-state";
 import { getPackageRoot } from "@shared/paths";
+import { isSlug } from "@shared/slug";
 
 
 import * as fs from "fs";
@@ -30,6 +31,7 @@ import {
   refreshSitemapEntriesForContentKey,
 } from "../sitemap";
 import { markFileAsModified } from "../sync-state";
+import { emitMenuChanged, emitTagManagerChanged, emitThemeChanged } from "../content-events";
 import { checkThemeWrite, createOwnSiteTheme, loadSiteTheme, resolveSiteTheme, sitesInheritingThemeFrom } from "../theme-config";
 import { scanThemeBackgroundUsage, replaceSectionBackgroundEverywhere } from "../design/theme-usage";
 import { sharedTypesUsingBackground } from "../design/shared-base-palette";
@@ -253,6 +255,28 @@ import { applyLogoStructureFromMaster } from "../menu-logo-structure";
 import { child } from "../logger";
 const log = child({ module: "routes/settings" });
 
+const stageTargetInputSchema = z
+  .object({
+    rate: z.number().gt(0).max(1).optional(),
+    cost: z.record(z.string().regex(/^[A-Z]{3}$/), z.number().positive()).optional(),
+  })
+  .strict();
+
+const funnelSettingsInputSchema = z
+  .object({
+    enforcement: z.boolean().optional(),
+    targets: z
+      .object({
+        awareness: stageTargetInputSchema.optional(),
+        consideration: stageTargetInputSchema.optional(),
+        decision: stageTargetInputSchema.optional(),
+        "post-enrollment": stageTargetInputSchema.optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .passthrough();
+
 /** Returns the per-site ContentIndex for this request, falling back to the global singleton in single-site mode. */
 function getCI(res: Response): typeof contentIndex {
   return (res.locals.site as any)?.contentIndex ?? contentIndex;
@@ -265,21 +289,13 @@ function getContentRootName(res: Response): string {
   return path.isAbsolute(cr) ? path.relative(process.cwd(), cr) : cr;
 }
 
-function scheduleHotPublicHtml(contentRoot: string, reason: string): void {
-  void import("../html-rebuild")
-    .then(({ scheduleHotHtmlRebuild }) => scheduleHotHtmlRebuild(reason, contentRoot))
-    .catch(() => {});
-}
-
-/** Theme saves also repaint sites that inherit this theme, each with its own content root. */
-function scheduleThemeHtmlRebuild(contentRoot: string, reason: string): void {
-  if (sitesInheritingThemeFrom(contentRoot).length === 0) {
-    scheduleHotPublicHtml(contentRoot, reason);
-    return;
-  }
-  void import("../html-rebuild")
-    .then(({ scheduleHotHtmlRebuild }) => scheduleHotHtmlRebuild(reason))
-    .catch(() => {});
+/** Theme, menu, and Tag Manager saves emit an event. The dispatcher rebuilds HTML. */
+function emitThemeHtmlEvent(res: Response): void {
+  const contentRoot = getContentRoot(res);
+  emitThemeChanged(
+    getContentRootName(res),
+    sitesInheritingThemeFrom(contentRoot).length > 0,
+  );
 }
 
 /** Path of the site's own theme.json for a write, or null after responding (inheriting sites are refused). */
@@ -348,7 +364,7 @@ export function registerSettingsRoutes(app: Express): void {
       theme.colors = { light: light || {}, dark: dark || {} };
       fs.writeFileSync(themePath, JSON.stringify(theme, null, 2));
       markFileAsModified('theme.json', undefined, undefined, getContentRoot(res));
-      scheduleThemeHtmlRebuild(getContentRoot(res), "theme-colors");
+      emitThemeHtmlEvent(res);
       res.json({ success: true });
     } catch (error) {
       log.error({ err: error }, "Error saving theme colors:");
@@ -440,7 +456,7 @@ export function registerSettingsRoutes(app: Express): void {
       fs.writeFileSync(tmpPath, JSON.stringify(theme, null, 2));
       fs.renameSync(tmpPath, themePath);
       markFileAsModified('theme.json', undefined, undefined, getContentRoot(res));
-      scheduleThemeHtmlRebuild(getContentRoot(res), "theme-palettes");
+      emitThemeHtmlEvent(res);
 
       if (unknownVarWarnings.length > 0) {
         res.json({ ok: true, warnings: unknownVarWarnings });
@@ -464,7 +480,7 @@ export function registerSettingsRoutes(app: Express): void {
         return;
       }
       markFileAsModified("theme.json", auth.author || undefined, undefined, contentRoot);
-      scheduleHotPublicHtml(contentRoot, "theme-own-copy");
+      emitThemeChanged(getContentRootName(res), false);
       res.json({ ok: true, copied_from: result.copiedFrom });
     } catch (error) {
       log.error({ err: error }, "Error creating site theme:");
@@ -823,7 +839,6 @@ export function registerSettingsRoutes(app: Express): void {
       getVM(res).renameVariable(oldName, sanitized);
 
       getCI(res).refresh();
-      invalidateContentCaches();
 
       res.json({
         success: true,
@@ -879,6 +894,17 @@ export function registerSettingsRoutes(app: Express): void {
       });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || "Failed to load consent settings" });
+    }
+  });
+
+  api.get(app, "/api/settings/consent/fallback-impact", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "consent_settings");
+    if (!auth.authorized) return;
+    try {
+      const { countFormsRelyingOnDefault } = await import("../consent-gate");
+      res.json(countFormsRelyingOnDefault(getContentRoot(res)));
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to count forms" });
     }
   });
 
@@ -1322,6 +1348,28 @@ export function registerSettingsRoutes(app: Express): void {
     }
   });
 
+  // Intentionally PUBLIC (no auth). Lead forms need every event's non-secret defaults so a
+  // form_override can switch conversion_name without a second request, plus signup/login names.
+  // Every sibling route under /api/settings/tracking (GET/PUT, PATCH/DELETE :name,
+  // :name/merge|usage|reassign) is admin-only.
+  // NEVER add webhook (url/headers), intent copy, or any other secret/internal field.
+  api.get(app, "/api/settings/tracking/conversion-events", { rate: "publicRead" }, (_req, res) => {
+    const contentRoot = getContentRoot(res);
+    const events = (getTrackingSettings(contentRoot).conversion_events || [])
+      .filter((ev) => ev?.name)
+      .map((ev) => ({
+        name: ev.name,
+        tags: ev.tags,
+        automations: ev.automations,
+        consent: ev.consent,
+        success: ev.success,
+      }));
+    res.json({
+      events,
+      auth: getAuthConversionEventConfig(contentRoot),
+    });
+  });
+
   app.patch("/api/settings/tracking/conversion-events/:name", async (req, res) => {
     const auth = await requireMutatingStaff(req, res);
     if (!auth.authorized) return;
@@ -1664,6 +1712,7 @@ export function registerSettingsRoutes(app: Express): void {
         });
       }
       const contentRoot = getContentRoot(res);
+      const previousWebContainerId = getOptimizationSettings(contentRoot).tagmanager.web_container_id;
       // Never accept secret from the client — IPN_SECRET is env-only.
       const ipnPatch =
         hasIpn
@@ -1682,10 +1731,9 @@ export function registerSettingsRoutes(app: Express): void {
         contentRoot,
       );
       markFileAsModified("settings.yml", undefined, undefined, contentRoot);
-      if (hasTm) {
-        void import("../html-rebuild")
-          .then(({ invalidateHotHtmlAndRebuild }) => invalidateHotHtmlAndRebuild("gtm"))
-          .catch(() => {});
+      const nextWebContainerId = getOptimizationSettings(contentRoot).tagmanager.web_container_id;
+      if (hasTm && (previousWebContainerId ?? "") !== (nextWebContainerId ?? "")) {
+        emitTagManagerChanged(getContentRootName(res));
       }
       const opt = getOptimizationSettings(contentRoot);
       const secret = resolveIpnSecret();
@@ -2106,22 +2154,30 @@ export function registerSettingsRoutes(app: Express): void {
   });
 
   app.get("/api/settings/funnel", async (req, res) => {
-    const auth = await requireCapability(req, res, "seo_settings");
+    const auth = await requireAnyCapability(req, res, ["seo_settings", "ads_settings"]);
     if (!auth.authorized) return;
     const settings = getFunnelSettings(getContentRoot(res));
     res.json({ settings });
   });
 
   app.put("/api/settings/funnel", async (req, res) => {
-    const auth = await requireCapability(req, res, "seo_settings");
+    const body = req.body?.funnel ?? req.body;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return res.status(400).json({ error: "Request body must be a funnel object" });
+    }
+    const parsed = funnelSettingsInputSchema.safeParse(body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid funnel settings", details: parsed.error.flatten() });
+    }
+    // Enforcement stays an SEO setting; stage targets are also editable from Settings → Ads.
+    const auth =
+      parsed.data.enforcement !== undefined
+        ? await requireCapability(req, res, "seo_settings")
+        : await requireAnyCapability(req, res, ["seo_settings", "ads_settings"]);
     if (!auth.authorized) return;
     try {
-      const body = req.body?.funnel ?? req.body;
-      if (!body || typeof body !== "object" || Array.isArray(body)) {
-        return res.status(400).json({ error: "Request body must be a funnel object" });
-      }
       const contentRoot = getContentRoot(res);
-      const settings = updateFunnelSettings(body, contentRoot);
+      const settings = updateFunnelSettings(parsed.data, contentRoot);
       markFileAsModified("settings.yml", undefined, undefined, contentRoot);
       res.json({ success: true, settings });
     } catch (err: any) {
@@ -2223,7 +2279,6 @@ export function registerSettingsRoutes(app: Express): void {
       const robots = getRobotsSettings(contentRoot);
       function getRobotsBaseUrl(): string {
         if (process.env.SITE_URL) return process.env.SITE_URL.replace(/\/$/, "");
-        if (process.env.REPLIT_DEV_DOMAIN) return `https://${process.env.REPLIT_DEV_DOMAIN}`;
         return "http://localhost:5000";
       }
       res.json({
@@ -2253,7 +2308,6 @@ export function registerSettingsRoutes(app: Express): void {
       clearSitemapCache();
       function getRobotsBaseUrl(): string {
         if (process.env.SITE_URL) return process.env.SITE_URL.replace(/\/$/, "");
-        if (process.env.REPLIT_DEV_DOMAIN) return `https://${process.env.REPLIT_DEV_DOMAIN}`;
         return "http://localhost:5000";
       }
       res.json({
@@ -2376,9 +2430,7 @@ export function registerSettingsRoutes(app: Express): void {
       return;
     }
 
-    // Validate slug: lowercase letters, numbers, hyphens only
-    const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-    if (!slugPattern.test(name)) {
+    if (!isSlug(name)) {
       res.status(400).json({ error: "name must be a valid slug (lowercase letters, numbers, and hyphens only)" });
       return;
     }
@@ -2452,8 +2504,7 @@ export function registerSettingsRoutes(app: Express): void {
       const { name } = req.params;
 
       // Validate name is a safe slug — same rule as POST /api/menus
-      const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-      if (!slugPattern.test(name)) {
+      if (!isSlug(name)) {
         res.status(400).json({ error: "Invalid menu name" });
         return;
       }
@@ -3089,7 +3140,7 @@ export function registerSettingsRoutes(app: Express): void {
         }
       }
 
-      scheduleHotPublicHtml(getContentRoot(res), "menu-structure");
+      emitMenuChanged(getContentRootName(res), name);
       res.json({
         success: true,
         name,
@@ -3176,7 +3227,7 @@ export function registerSettingsRoutes(app: Express): void {
       });
       fs.writeFileSync(filePath, yamlContent, "utf-8");
       markFileAsModified(filePath, authorName, undefined, getContentRoot(res));
-      scheduleHotPublicHtml(getContentRoot(res), "menu-translations");
+      emitMenuChanged(getContentRootName(res), name, locale);
 
       res.json({
         success: true,

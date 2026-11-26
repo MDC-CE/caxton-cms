@@ -13,7 +13,8 @@ import { getSiteSqlite } from "../db";
 import { ensurePipelineDb } from "../pipeline-db/runner";
 import { getAdsSettings } from "../settings";
 import { getDefaultContentRoot } from "../site-config";
-import { getVersioningCookie, hashUserId } from "../versioning/cookie-utils";
+import { getVersioningCookie, getVisitExperimentCookie, hashUserId } from "../versioning/cookie-utils";
+import { experimentId as experimentIdFor } from "../versioning/assignment";
 import { extractToken } from "../routes/_helpers";
 import { resolveOwnedStaffSession } from "../staff-session-resolve";
 import { hasTrackingConsentCookie, readAdContext, type AdContext } from "./ad-context";
@@ -34,6 +35,7 @@ import type { PaidLandingRef } from "@shared/session";
 import { isTrafficChannel, type TrafficChannel } from "@shared/traffic-channel";
 import { resolveVisitorCountry } from "./visitor-country";
 import { findCatalogProduct } from "./lead-product";
+import { expireLeadCopies, pruneLeadOutbox } from "./lead-outbox";
 import { child } from "../logger";
 
 const log = child({ module: "ads/lead-ledger" });
@@ -102,6 +104,12 @@ export type LedgerRow = {
   /** Catalog product the form resolved (paused included); null when unresolved, not in the catalog, or before migration 35. */
   product_id?: string | null;
   product_slug?: string | null;
+  /** Page funnel (or form override) products as full slugs, comma-joined; null before migration 41. */
+  product?: string | null;
+  /** Personas as full ids, comma-joined ("all" / "none" sentinels); null before migration 41. */
+  persona?: string | null;
+  /** product:persona full-id pairs, comma-joined; the only unambiguous persona → product link. Null before migration 42. */
+  product_persona?: string | null;
 };
 
 /** True when the lead had a paid landing within the paid lookback before `now`. */
@@ -170,12 +178,19 @@ function consentStateFrom(req: Request): ConsentState {
   return isGrantedDecision(parsed.decision) ? "granted" : "denied";
 }
 
-function resolvePageVersion(req: Request, body: Record<string, unknown>): { experiment_id: string; variant: string } | null {
-  const experimentId = str(body.page_experiment_id, 300);
+/**
+ * Page test credited for this lead: the first test seen this visit (form body, else the
+ * `4g_visit_exp` cookie). Accepted only when it matches an assignment in the versioning cookie.
+ */
+export function resolvePageVersion(
+  req: Request,
+  body: Record<string, unknown>,
+): { experiment_id: string; variant: string } | null {
+  const experimentId = str(body.page_experiment_id, 300) ?? getVisitExperimentCookie(req)?.experiment_id;
   if (!experimentId) return null;
   const cookie = getVersioningCookie(req);
   const match = cookie?.assignments?.find(
-    (a) => `${a.contentType}:${a.slug}:${a.locale}` === experimentId,
+    (a) => experimentIdFor(a.contentType, a.slug, a.locale, a.run) === experimentId,
   );
   return match ? { experiment_id: experimentId, variant: match.variantSlug } : null;
 }
@@ -191,7 +206,7 @@ async function staffSessionUsername(req: Request): Promise<string | null> {
 }
 
 export type PreparedLead = {
-  /** Scalars merged onto the webhook payload (always includes is_test / is_repeat). */
+  /** Scalars merged onto the webhook payload (always includes is_test / is_staff / is_repeat). */
   wire: Record<string, string | number | boolean>;
   row: LedgerRow;
 };
@@ -337,11 +352,15 @@ export async function prepareLead(req: Request, res: Response, body: Record<stri
     traffic_status: cls.status,
     product_id: product?.product_id ?? null,
     product_slug: product?.product_slug ?? null,
+    product: str(body.product, 1000),
+    persona: str(body.persona, 1000),
+    product_persona: str(body.product_persona, 1000),
   };
 
   const wire: Record<string, string | number | boolean> = {
     submission_id: submissionId,
     is_test: !!testReason,
+    is_staff: testReason === "staff_session",
     is_repeat: !!repeatOf,
     consent_state: consentState,
   };
@@ -370,8 +389,8 @@ export async function prepareLead(req: Request, res: Response, body: Record<stri
   }
   if (cls.status !== "organic" && cls.platform) wire.ad_platform = cls.platform;
   if (version) {
-    wire.page_experiment_id = version.experiment_id;
-    wire.page_variant = version.variant;
+    wire.experiment_id = version.experiment_id;
+    wire.variant = version.variant;
   }
 
   return { wire, row };
@@ -389,6 +408,9 @@ export const LEDGER_ONLY_BODY_KEYS = new Set([
     ["platform", "campaign_id", "adset_id", "ad_id"].map((k) => `${p}_paid_landing_${k}`),
   ),
   "page_experiment_id",
+  // Only the server-verified page test may reach the CRM under these names.
+  "experiment_id",
+  "variant",
   "channel",
   "first_channel",
   "channel_landing_path",
@@ -422,6 +444,12 @@ export function pruneLedger(site: string, now: number = Date.now()): number {
   const cutoff = new Date(now);
   cutoff.setUTCMonth(cutoff.getUTCMonth() - LEDGER_RETENTION_MONTHS);
   const info = getSiteSqlite(site).prepare("DELETE FROM lead_submissions WHERE created_at < ?").run(cutoff.getTime());
+  try {
+    expireLeadCopies(site, now);
+    pruneLeadOutbox(site, cutoff.getTime());
+  } catch (err) {
+    log.warn({ err }, "[lead-ledger] outbox prune failed");
+  }
   return Number(info.changes ?? 0);
 }
 
@@ -438,15 +466,23 @@ function maybePruneLedger(site: string): void {
   }
 }
 
+/** Ledger facts the lead outbox copies onto its row (no personal data). */
+export type RecordedLeadMeta = {
+  submission_id: string;
+  browser_hash: string | null;
+  form: string | null;
+  is_test: boolean;
+};
+
 /**
  * Enrich a lead body and record the ledger row before webhook delivery.
- * Ledger failures never block the lead.
+ * Ledger failures never block the lead. `lead` is null when enrichment failed.
  */
-export async function recordLeadSubmission(
+export async function recordLeadSubmissionWithMeta(
   req: Request,
   res: Response,
   body: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
+): Promise<{ body: Record<string, unknown>; lead: RecordedLeadMeta | null }> {
   try {
     const prepared = await prepareLead(req, res, body);
     const site = (res.locals.site as { contentRootName?: string } | undefined)?.contentRootName;
@@ -457,11 +493,27 @@ export async function recordLeadSubmission(
         log.warn({ err }, "[lead-ledger] insert failed");
       }
     }
-    return enrichLeadBody(body, prepared.wire);
+    return {
+      body: enrichLeadBody(body, prepared.wire),
+      lead: {
+        submission_id: prepared.row.submission_id,
+        browser_hash: prepared.row.browser_hash,
+        form: prepared.row.form,
+        is_test: prepared.row.is_test === 1,
+      },
+    };
   } catch (err) {
     log.warn({ err }, "[lead-ledger] enrichment failed; delivering raw lead");
-    return enrichLeadBody(body, {});
+    return { body: enrichLeadBody(body, {}), lead: null };
   }
+}
+
+export async function recordLeadSubmission(
+  req: Request,
+  res: Response,
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return (await recordLeadSubmissionWithMeta(req, res, body)).body;
 }
 
 export type LedgerQueryRow = LedgerRow;
@@ -484,7 +536,7 @@ const LEDGER_COLUMNS: (keyof LedgerRow)[] = [
   "last_paid_platform", "last_paid_campaign_id", "last_paid_adset_id", "last_paid_ad_id",
   "experiment_id", "variant", "is_test", "test_reason", "is_repeat", "repeat_of", "consent_state",
   "channel", "first_channel", "last_organic_channel", "channel_landing_path", "referrer_host", "country", "traffic_status",
-  "product_id", "product_slug",
+  "product_id", "product_slug", "product", "persona", "product_persona",
 ];
 
 /**

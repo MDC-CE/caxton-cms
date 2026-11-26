@@ -2,7 +2,9 @@ import fs from "fs";
 import { getDefaultContentFolder } from "./site-config";
 import path from "path";
 import yaml from "js-yaml";
-import { getContentTypeConfig, getLocaleKey, getFieldMapping, getFullFieldMapping, RESERVED_IMAGE_FIELD, RESERVED_SLUG_FIELD, RESERVED_LOCALE_FIELD, applyImageAliasToEntry, applySlugAliasToEntry, applyLocaleAliasToEntry } from "./content-types";
+import { getAllTypes, getContentTypeConfig, getLocaleKey, getFieldMapping, getFullFieldMapping, getRowsFilterFields, RESERVED_IMAGE_FIELD, RESERVED_SLUG_FIELD, RESERVED_LOCALE_FIELD, applyImageAliasToEntry, applySlugAliasToEntry, applyLocaleAliasToEntry } from "./content-types";
+import { applyRowsFilterFields } from "./database-single-loader";
+import { diffRefreshedDatabaseRows, type RefreshedDatabaseRow } from "./database-refresh-diff";
 import { getValueByPath, resolveFieldValue, isTransformer, compileTransformer, runTransformer } from "./transform";
 import { ExternalImageCacher } from "./external-image-cacher";
 import { resolveBySourceUrl } from "./image-registry";
@@ -12,7 +14,10 @@ import { applyEditorialStampToDbMappedUpdates } from "./editorial-updated-at";
 import { setJobState } from "./db-job-state";
 import type { MediaGallery } from "./media-gallery";
 import { expandEditorFieldTokens } from "@shared/editor-field-values";
+import { slugify } from "@shared/slug";
 import { resolveCacheTtlMinutes, resolveRefreshRetryMinutes, type DbCacheTtlConfig } from "@shared/db-cache-ttl";
+import type { DatabaseEvidenceConfig } from "@shared/evidence-kinds";
+import { stripRowStamp } from "./database-row-stamp";
 import { freezeShared } from "./utils/deepFreeze";
 import { child } from "./logger";
 import { parseJsonItemsFile } from "./local-items-file";
@@ -66,9 +71,41 @@ export interface DatabaseConfig {
   editor?: Record<string, { type?: string; options?: (string | { value: string; label: string })[]; populate_options?: boolean; allow_custom_values?: boolean; split_comma_values?: boolean; cache_images?: boolean; description?: string }>;
   vector_search?: VectorSearchConfig;
   search_fields?: string[];
+  /** Rows prove named third-party claims during proposal review (shared/evidence-kinds.ts). */
+  evidence?: DatabaseEvidenceConfig;
+}
+
+/**
+ * Copy of the config without source connection settings (API endpoint, params, headers,
+ * auth; remote URL). For staff who can browse databases but not manage them.
+ */
+export function redactDatabaseSourceConnection(config: DatabaseConfig): DatabaseConfig {
+  const source: DatabaseConfig["source"] = { type: config.source.type };
+  if (config.source.local) source.local = { ...config.source.local };
+  if (config.source.api) {
+    const { results_path } = config.source.api;
+    source.api = { endpoint: "", ...(results_path ? { results_path } : {}) };
+  }
+  if (config.source.remote) {
+    const { results_path } = config.source.remote;
+    source.remote = { url: "", ...(results_path ? { results_path } : {}) };
+  }
+  return { ...config, source };
 }
 
 const VALID_DB_NAME = /^[a-z0-9_-]+$/;
+
+/** True when the new config has vector search on and it was just enabled or its fields changed. */
+export function vectorSearchNeedsSync(
+  before: VectorSearchConfig | undefined,
+  after: VectorSearchConfig | undefined,
+): boolean {
+  if (!after?.enabled || !Array.isArray(after.fields) || after.fields.length === 0) return false;
+  if (!before?.enabled) return true;
+  const a = before.fields ?? [];
+  const b = after.fields;
+  return a.length !== b.length || a.some((f, i) => f !== b[i]);
+}
 
 function setValueByPath(obj: Record<string, unknown>, dotPath: string, value: unknown): void {
   const parts = dotPath.split(".");
@@ -448,15 +485,6 @@ async function fetchFromApi(
   return allItems;
 }
 
-function slugify(text: string): string {
-  return text
-    .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 200);
-}
-
 function applyContentTypeMapping(
   items: Record<string, unknown>[],
   mapping: Record<string, string>,
@@ -509,7 +537,7 @@ function applyContentTypeMapping(
     }
 
     if (!mapped.slug && mapped.title && typeof mapped.title === "string") {
-      mapped.slug = slugify(mapped.title);
+      mapped.slug = slugify(mapped.title, { maxLength: 200 });
     }
 
     // Category is a plain URL slug string (never `{ slug }`).
@@ -724,8 +752,28 @@ export class DatabaseManager {
     this.configs.set(name, config);
   }
 
+  /** Absolute path of this site's content folder. */
+  getContentRoot(): string {
+    return this.contentRoot;
+  }
+
+  /** Enqueue a background vector index sync (Sidequest `vector_index` queue). Never embeds here. */
+  queueVectorIndex(
+    name: string,
+    reason: import("./vector-index-queue").VectorIndexReason,
+    opts: { rebuild?: boolean } = {},
+  ): Promise<import("./vector-index-queue").EnqueueVectorIndexResult> {
+    return import("./vector-index-queue")
+      .then(({ enqueueVectorIndexSync }) => enqueueVectorIndexSync(this.contentRoot, name, reason, opts))
+      .catch((err) => {
+        log.warn({ err, database: name }, "[DatabaseManager] Vector index enqueue failed");
+        return { queued: false };
+      });
+  }
+
   update(name: string, config: DatabaseConfig, author = "api"): void {
     this.validateName(name);
+    const previousVs = this.configs.get(name)?.vector_search;
     this.writeToDisk(name, config);
     markFileAsModified(`db/${name}/config.yml`, author, undefined, this.contentRoot);
     // If staff/MCP switched to (or fixed) local source, ensure the items file exists.
@@ -738,6 +786,10 @@ export class DatabaseManager {
     this.configs.set(name, config);
     this.memoryCache.delete(name);
     this.clearMappedMemo(name);
+    // Turning vector search off keeps the collection (shown as "Not in use"); re-enabling reuses it.
+    if (vectorSearchNeedsSync(previousVs, config.vector_search)) {
+      void this.queueVectorIndex(name, "config_changed");
+    }
   }
 
   delete(name: string): void {
@@ -750,6 +802,16 @@ export class DatabaseManager {
     this.memoryCache.delete(name);
     this.cache.clear(name);
     this.clearMappedMemo(name);
+    // Unit tests must never touch a developer's local Qdrant.
+    if (process.env.VITEST) return;
+    const contentRoot = this.contentRoot;
+    setJobState(name, "index", { status: "idle", ready: false }, contentRoot);
+    void import("./vector-search")
+      .then(async ({ deleteCollection, siteCollectionName, legacyCollectionName }) => {
+        await deleteCollection(siteCollectionName(contentRoot, name));
+        await deleteCollection(legacyCollectionName(name));
+      })
+      .catch((err) => log.warn({ err, database: name }, "[DatabaseManager] Vector collection cleanup failed"));
   }
 
   private scheduleExternalImages(
@@ -794,9 +856,31 @@ export class DatabaseManager {
     return run;
   }
 
+  /** Drop the in-memory item list. The disk copy stays. */
+  forgetFetchedItems(name: string): void {
+    this.memoryCache.delete(name);
+  }
+
+  /**
+   * Re-read a local database from its file. Returns the rows that changed,
+   * an empty list when something changed but no row has a public slug, or
+   * null when nothing changed or this was the first copy. Does not emit.
+   * A remote source is left alone.
+   */
+  async reloadLocalFromDisk(name: string): Promise<RefreshedDatabaseRow[] | null> {
+    const config = this.configs.get(name);
+    if (!config || config.source.type !== "local") return null;
+    const previous = this.getLastGoodItems(name)?.items ?? null;
+    await this.fetchItems(name, true, { skipRefreshEvent: true });
+    if (!previous) return null;
+    const next = this.getLastGoodItems(name)?.items ?? [];
+    return this.changedRefreshRows(name, previous, next);
+  }
+
   async fetchItems(
     name: string,
-    forceRefresh = false
+    forceRefresh = false,
+    opts?: { skipRefreshEvent?: boolean; skipVectorIndex?: boolean },
   ): Promise<{
     items: Record<string, unknown>[];
     raw_count: number;
@@ -843,6 +927,8 @@ export class DatabaseManager {
       }
     }
 
+    const previousItems = this.getLastGoodItems(name)?.items ?? null;
+
     let rawItems: unknown[];
 
     if (config.source.type === "api") {
@@ -879,7 +965,7 @@ export class DatabaseManager {
             config.field_mapping!
           )
         )
-      : (rawItems as Record<string, unknown>[]);
+      : (rawItems as Record<string, unknown>[]).map(stripRowStamp);
 
     const overridesFile = this.loadOverridesFile(name);
     if (overridesFile && Object.keys(overridesFile.entries).length > 0) {
@@ -921,20 +1007,11 @@ export class DatabaseManager {
     });
 
     this.scheduleExternalImages(name, config, items);
+    if (!opts?.skipRefreshEvent) this.noteRefreshDiff(name, previousItems, items);
 
     const vsConfig = (config as DatabaseConfig).vector_search;
-    if (vsConfig?.enabled && vsConfig.fields?.length > 0) {
-      Promise.all([
-        import("./vector-search"),
-        import("@shared/playground-faqs"),
-      ]).then(([{ indexItems }, { itemsForVectorIndex }]) => {
-        const toIndex = itemsForVectorIndex(name, items);
-        indexItems(name, toIndex, vsConfig.fields).catch((err) => {
-          log.error({ err: err }, `[DatabaseManager] Background vector indexing failed for "${name}":`);
-        });
-      }).catch((err) => {
-        log.error({ err: err }, `[DatabaseManager] Failed to import vector-search module:`);
-      });
+    if (!opts?.skipVectorIndex && vsConfig?.enabled && vsConfig.fields?.length > 0) {
+      this.queueVectorIndex(name, "fetch");
     }
 
     return { ...entry, from_cache: false };
@@ -1101,10 +1178,15 @@ export class DatabaseManager {
 
     const ctMapping = getFieldMapping(contentType, this.contentRoot);
     const fullMapping = getFullFieldMapping(contentType, this.contentRoot);
-    if ((!ctMapping || Object.keys(ctMapping).length === 0) && !fullMapping?.[RESERVED_IMAGE_FIELD] && !fullMapping?.[RESERVED_SLUG_FIELD]) {
+    const withRows = applyRowsFilterFields(
+      rawItems,
+      getRowsFilterFields(contentType, this.contentRoot),
+      { contentType },
+    );
+    if ((!ctMapping || Object.keys(ctMapping).length === 0) && !fullMapping?.[RESERVED_IMAGE_FIELD] && !fullMapping?.[RESERVED_SLUG_FIELD] && withRows === rawItems) {
       return rawItems;
     }
-    return applyContentTypeMapping(rawItems, ctMapping || {}, contentType, fullMapping);
+    return applyContentTypeMapping(withRows, ctMapping || {}, contentType, fullMapping);
   }
 
   /**
@@ -1232,14 +1314,73 @@ export class DatabaseManager {
     const keys = new Set<string>();
     const sample = rawItems.slice(0, 5);
     for (const item of sample) {
-      collectAllPaths(item, "", keys);
+      collectAllPaths(stripRowStamp(item), "", keys);
     }
     return Array.from(keys).sort();
   }
 
   /**
-   * One row changed. The shared flush keeps the page whose URL contains that
-   * slug and rebuilds pages that read this database.
+   * A refresh replaced a copy we already had. The first fill does not emit:
+   * there is nothing older to rebuild.
+   */
+  private changedRefreshRows(
+    name: string,
+    previousItems: Record<string, unknown>[] | null,
+    nextItems: Record<string, unknown>[],
+  ): RefreshedDatabaseRow[] | null {
+    if (!previousItems) return null;
+    try {
+      const overrides = this.loadOverridesFile(name);
+      const paramNames = new Set<string>();
+      for (const type of getAllTypes(this.contentRoot)) {
+        const linked = getContentTypeConfig(type, this.contentRoot);
+        if (linked?.database?.slug !== name || !linked.url_pattern) continue;
+        for (const pattern of Object.values(linked.url_pattern)) {
+          for (const match of pattern.matchAll(/:([A-Za-z_]+)/g)) {
+            if (match[1] && match[1] !== "slug") paramNames.add(match[1]);
+          }
+        }
+      }
+      return diffRefreshedDatabaseRows({
+        lookupKey: overrides?.lookup_key || "slug",
+        paramNames: [...paramNames],
+        previous: previousItems,
+        next: nextItems,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  private noteRefreshDiff(
+    name: string,
+    previousItems: Record<string, unknown>[] | null,
+    nextItems: Record<string, unknown>[],
+  ): void {
+    const rows = this.changedRefreshRows(name, previousItems, nextItems);
+    if (!rows) return;
+    const contentRoot = this.contentRoot;
+    const changed = rows;
+    void import("./site-manager")
+      .then(async ({ getSiteContextMap }) => {
+        const base = path.basename(contentRoot);
+        const site = Array.from(getSiteContextMap().values()).find(
+          (ctx) =>
+            ctx.contentRoot === contentRoot ||
+            ctx.contentRootName === base ||
+            ctx.contentRoot.endsWith(`/${base}`),
+        );
+        if (!site) return;
+        const { emitDatabaseRefreshed } = await import("./content-events");
+        emitDatabaseRefreshed(site.contentRootName || base, name, changed);
+      })
+      .catch(() => {});
+  }
+
+  /**
+
+  * One row changed. The event rebuilds the page whose URL contains that slug
+   * and the pages that read this database.
    */
   private dropHtmlForSlug(dbName: string, slug: string): void {
     const siteId = path.basename(this.contentRoot);
@@ -1255,13 +1396,13 @@ export class DatabaseManager {
             ctx.contentRoot.endsWith(`/${base}`),
         );
         if (!site?.contentIndex) return;
+        const { emitDatabaseRowChanged } = await import("./content-events");
+        emitDatabaseRowChanged(site.contentRootName || siteId, dbName, slug);
         flushAfterContentWrites({
           ci: site.contentIndex,
           contentTypes: [],
           sitemapEntries: [],
           siteId: site.contentRootName || siteId,
-          databaseNames: dbName ? [dbName] : [],
-          htmlSlugs: slug ? [slug] : [],
         });
       })
       .catch(() => {});

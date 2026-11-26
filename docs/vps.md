@@ -15,12 +15,12 @@ Related runbooks (kept separate on purpose):
 |-------|--------|
 | App on droplet | Yes (`/opt/website-v3`, atomic releases) |
 | sGTM Docker on droplet | Yes (`/opt/sgtm`, tagging + preview) |
-| Public marketing | Still **Replit** |
+| Public marketing | **Droplet** (Replit retired) |
 | Public metrics / sGTM | Still **Stape** (`metrics.4geeks.com`) |
 | Lab TLS | Let’s Encrypt on **sslip** hostnames only |
-| Prod DNS cutover | Not done — see [§9 Cutover](#9-cutover-pending) |
+| Prod DNS cutover | App done; metrics / sGTM — see [§9 Cutover](#9-cutover-pending) |
 
-Security model: **origin behind Cloudflare** (orange proxy, SSL Full or Full strict), not a site meant to be browsed only by raw IP.
+Security model: **no CDN or proxy in front**. DNS points straight at the droplet; Nginx terminates TLS (Let’s Encrypt) and sees real visitor IPs. Not a site meant to be browsed only by raw IP.
 
 Verify droplet IP / hostname in DigitalOcean; do not treat IPs in older notes as source of truth.
 
@@ -86,7 +86,7 @@ Leftover `persistent/site_*` trees from the old hybrid layout are unused by new 
 
 Workflow: [`.github/workflows/deploy-vps.yml`](../.github/workflows/deploy-vps.yml)
 
-- Triggers: push to `main`, `workflow_dispatch`
+- Triggers: push to `main`, `workflow_dispatch` (manual runs offer **Skip content check**, input `skip_content_flush`; see 4.2.1)
 - Concurrency group `deploy-vps` with **`cancel-in-progress: true`** — cancels the **Actions observer** (SSH poll), not necessarily the VPS work. `deploy.sh` is started with `setsid`/`nohup`; stdout goes to `.deploy-state/<sha>.log`, exit code to `.deploy-state/<sha>.done`. The job streams that log until `.done` appears.
 - On cancel: a `cancelled()` step touches `.deploy-state/<sha>.abort` (soft abort **before flip** only).
 - `always()` step writes a **Job Summary** from `.done` / abort (polls briefly) so a red “Cancelled” badge is not mistaken for “prod did not change”.
@@ -98,20 +98,44 @@ Actions secrets for SSH: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY
 
 ### 4.2 `scripts/deploy.sh`
 
-1. Acquire deploy lock (`/tmp/website-v3-deploy.lock` with **pid + sha**; stale recovery). Order: `mkdir` → write `pid` → clear this SHA’s `.abort` → write `sha` (avoids same-SHA re-entry wiping another run’s abort, and avoids clearing an abort waiters already set after seeing `sha`). Waiters with a newer SHA `touch` abort for the running SHA. Lock is held by this process (not the Actions SSH poll). After a successful deploy, prune `.deploy-state/*.{log,done,abort}` older than 7 days.
+1. Acquire deploy lock, then refuse unpatched Node (see 4.4) before any release work. Lock (`/tmp/website-v3-deploy.lock` with **pid + sha**; stale recovery). Order: `mkdir` → write `pid` → clear this SHA’s `.abort` → write `sha` (avoids same-SHA re-entry wiping another run’s abort, and avoids clearing an abort waiters already set after seeing `sha`). Waiters with a newer SHA `touch` abort for the running SHA. Lock is held by this process (not the Actions SSH poll). After a successful deploy, prune `.deploy-state/*.{log,done,abort}` older than 7 days.
 2. `git archive` → `releases/<sha>/` (if that path is already `current`, builds into `releases/<sha>.rebuild-<pid>` — **never** `rm -rf` the live tree)
 3. Symlinks for `data` / `.cache` / `sites.yml` / … (not `site_*`); create real empty `site_*` dirs
 4. Write `.env`
 5. Abort checkpoint (if `.deploy-state/<sha>.abort` → discard release, exit 0)
-6. `npm ci` → **`content:pull --required`** → `npm run build` → **`ensure:pipeline-db --dry-run`** (validates pipeline SQLite migrations on DB copies; aborts before flip on failure) → **`node dist/prebuild-html-cache.js`** (writes this release's public HTML into `data/html-page-cache` while the previous process is still serving; boot loads it)
-7. Abort checkpoint again (last chance before cutover)
-8. Clear `.bootstrap-complete` on `site_*` (boot will hash-diff again)
-9. Flip `current`, restart, health-check (**rollback `current`** on failure)
-10. Prune old releases (keeps active + 5 others; never deletes `readlink current`)
+6. **Content check 1** (see 4.2.1): the live site pushes its unpushed content
+7. `npm ci` → (disk check if the live site did not answer) → **`content:pull --required`** → `npm run build` → **`ensure:pipeline-db --dry-run`** (validates pipeline SQLite migrations on DB copies; aborts before flip on failure) → **`node dist/prebuild-html-cache.js`** (writes this release's public HTML into `data/html-page-cache` while the previous process is still serving; boot loads it)
+8. Abort checkpoint again (last chance before cutover)
+9. Clear `.bootstrap-complete` on `site_*` (boot will hash-diff again)
+10. **Content check 2**: pause staff/agent saves, push what is left
+11. Flip `current`, restart, health-check (**rollback `current`** on failure)
+12. Prune old releases (keeps active + 5 others; never deletes `readlink current`)
 
 **Deploy observability:** Staff use GitHub Actions → **Deploy to VPS** (streams `.deploy-state/<sha>.log`). Look for `[deploy] validating pipeline SQLite migrations (dry-run)` and `[pipeline-db] dry-run ok`. There is no in-app deploy-progress UI. After restart, Settings → Server tab shows a new Boot ID. Live apply of pipeline migrations runs once at boot ([`server/pipeline-db/runner.ts`](../server/pipeline-db/runner.ts)).
 
 Post-flip, abort flags are ignored (cutover already committed). Partial dirs from aborted/cancelled pre-flip runs never become `current`.
+
+### 4.2.1 Content check (unpushed content)
+
+Each release gets a fresh content pull, so anything saved on the live server but not yet on GitHub would be left behind in the old release. Before that can happen, `deploy.sh` asks the live site to push it:
+
+- **Check 1** (before `npm ci`) and **check 2** (right before the flip) call `POST /api/internal/content/flush` on `127.0.0.1` with `Bearer $SESSION_SECRET` from the live `.env`. The server lists local edits from each site's `.sync-state.json`, requeues them for auto-sync and pushes them. Edits whose author has no GitHub connection are pushed with the service account; the commit message still names the author and ends with `(pushed by deploy check: no GitHub connection)`.
+- **Check 2 pauses saves**: staff and agent writes (`POST/PUT/PATCH/DELETE` on `/api/*` with a staff or MCP token) answer `503 site_updating` with `Retry-After` until the new release runs (the new process starts unpaused; the pause also expires after 3 minutes). Public visitors (lead forms, events) and reads are never paused. Saves already in progress finish before the push.
+- **Live site not answering**: `scripts/content-pending.ts` reads the live tree's sync state from disk. Nothing pending → continue; something pending → stop.
+
+**Reading a stop.** The log lists `CONTENT_UNPUSHED site=… file=… author=… reason=…` and what to do:
+
+| reason | Fix |
+|---|---|
+| `conflict` | GitHub also changed that file. Resolve it in Sync, then redeploy. |
+| author `migration:*` | Re-run that migration from Settings → General → Migrations; it pushes its own leftovers. |
+| `push_failed` | Read `error=`; fix it or push from Sync, then redeploy. |
+| `auto_commit_disabled` | Auto-sync is off on the server (`GITHUB_AUTO_COMMIT_ENABLED`). |
+| `live_server_down` | The site did not answer; start it and redeploy, or push from Sync. |
+
+**Emergency.** Actions → Deploy to VPS → Run workflow → tick **Skip content check** (or `gh workflow run deploy-vps.yml -f skip_content_flush=true`). The deploy copies the unpushed files to `persistent/unpushed-content/<release>/` (with `manifest.json`) and continues. Restore them by hand afterwards; until the old release is pruned, the originals also stay in `releases/<old-sha>/`.
+
+Code: [`server/content-flush.ts`](../server/content-flush.ts), [`server/content-write-pause.ts`](../server/content-write-pause.ts), [`server/routes/internal-content.ts`](../server/routes/internal-content.ts), [`scripts/content-pending.ts`](../scripts/content-pending.ts).
 
 ### 4.3 Manual rollback
 
@@ -121,6 +145,23 @@ sudo systemctl restart website
 ```
 
 Prefer a normal Actions deploy to an older SHA if you also need a fresh `.env` from secrets.
+
+### 4.4 Node runtime
+
+The droplet runs the system Node (`/usr/bin/node`). `deploy.sh` checks it first and stops (before touching the live release) when it is older than the last Node security release: **24.22.1** (or 22.23.4 / 26.12.1). The failed Actions run says `Node <version> on this server is unpatched`. The live site keeps serving the previous release.
+
+To upgrade (as root, Node 24 from NodeSource):
+
+```bash
+node -v && apt-cache policy nodejs        # confirm current version and source
+curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+apt-get install -y nodejs
+node -v                                    # expect v24.22.1 or newer
+```
+
+Then run **Deploy to VPS** again (Actions → Run workflow). Do not just `systemctl restart website`: when the major version changes, the live release's native modules (`better-sqlite3`, `sharp`) were compiled for the old Node and will not load. A fresh deploy runs `npm ci` on the new Node. Also `systemctl restart cpu-capture` (it runs `/usr/bin/node` directly).
+
+When Node ships the next security release, raise the floors in `require_patched_node` in [`scripts/deploy.sh`](../scripts/deploy.sh). CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) uses `node-version: "24"`, which already picks up the latest 24.x.
 
 ---
 
@@ -206,8 +247,7 @@ Until the web service flip, `deploy.sh` still builds releases and updates `curre
 
 ```text
 Internet
-  → Cloudflare (WAF, TLS to visitor)
-  → Droplet Nginx :443
+  → Droplet Nginx :443 (TLS, Let’s Encrypt)
        → 127.0.0.1:5000  Express (pages, API, /ipn/, /mcp proxy, …)
        → sGTM Docker     (metrics host; /gtm/ → preview)
             → 127.0.0.1:8080 tagging
@@ -272,15 +312,15 @@ No secret values in this doc.
 - Never commit tokens or paste them into chat/logs.
 - Do not leave permanent `127.0.0.1 metrics.4geeks.com` in `/etc/hosts`.
 
-**TLS / Cloudflare**
+**TLS**
 
 - Certbot per hostname only when that DNS already points at the droplet.
-- Cloudflare SSL: Full or Full (strict) once origin has a real cert. Avoid Flexible.
+- Nginx serves the certificate directly to visitors (no proxy in between), so renewals must keep working: `certbot renew --dry-run` after changes.
 
 ### 7.2 Controls already applied (summary)
 
 - Fail2ban jail `sshd` (journal backend on Ubuntu 24.04).
-- Node / MCP / Qdrant listen on loopback on the VPS (`LISTEN_HOST=127.0.0.1` on droplet; Replit may still need `0.0.0.0`).
+- Node / MCP / Qdrant listen on loopback on the VPS (`LISTEN_HOST=127.0.0.1` on droplet).
 - Turnstile required in production start.
 - Staff `/private` and edit APIs are not anonymous.
 - MCP: `MCP_SERVER_SECRET` is a **loopback** credential (MCP → capability check), not a public API key for browsers.
@@ -310,19 +350,29 @@ Runtime secrets can come from **GitHub Actions** (`_WEBSITE_*` → pack → merg
 1. Never commit `.env`.
 2. Deploy materializes env with restrictive umask (`640`); rotate by changing the secret and redeploying.
 3. Workflow must not print secret values.
-4. Code/runtime secrets vs content-repo token stay out of git; Replit secrets stay on Replit if a parallel env still exists.
+4. Code/runtime secrets vs content-repo token stay out of git.
 5. `sites.yml` is not an app secret but is gitignored in the code repo.
 
-Typical names (not values): `DATABASE_URL`, `SESSION_SECRET`, `SITE_URL`, `PORT`, `LISTEN_HOST`, `TURNSTILE_*`, `MCP_*`, `MCP_TOKEN_ENCRYPTION_KEY`, `GITHUB_*` (content + App Connect), `GCS_*`, `OPENROUTER_API_KEY`, `VITE_BREATHECODE_HOST`, `QDRANT_URL`, `IPN_SECRET`, …
+Typical names (not values): `DATABASE_URL`, `SESSION_SECRET`, `SITE_URL`, `PORT`, `LISTEN_HOST`, `TURNSTILE_*`, `MCP_*`, `MCP_TOKEN_ENCRYPTION_KEY`, `EVENT_WEBHOOK_ENCRYPTION_KEY`, `LEAD_OUTBOX_ENCRYPTION_KEY`, `GITHUB_*` (content + App Connect), `GCS_*`, `OPENROUTER_API_KEY`, `VITE_BREATHECODE_HOST`, `QDRANT_URL`, `IPN_SECRET`, …
+
+**Lead recovery key.** `LEAD_OUTBOX_ENCRYPTION_KEY` (64 hex, `openssl rand -hex 32`) encrypts the saved copy of each lead and the CRM's replies (pipeline tables `lead_outbox`, `lead_delivery_attempts`). Without it, leads still go to the CRM, but failed deliveries cannot be retried and the Leads page shows "Recovery is off". Only the web process needs it; automatic retries run only on the live server. Rotation:
+
+1. Copy the current value into `LEAD_OUTBOX_ENCRYPTION_KEY_PREVIOUS` (only used to read leads saved before the change).
+2. Set a new `LEAD_OUTBOX_ENCRYPTION_KEY` and redeploy.
+3. After 30 days (saved copies expire by then), remove `LEAD_OUTBOX_ENCRYPTION_KEY_PREVIOUS`.
+
+Losing both keys makes waiting leads unreadable: they move to Needs attention ("Saved copy unreadable") and their copy is erased.
 
 
 MCP OAuth persistence across redeploys: see [`docs/runbooks/mcp-oauth-persistence.md`](runbooks/mcp-oauth-persistence.md).
 
 ### 7.5 Headers, rate limit, fail2ban nginx
 
-Priority: **(1)** Cloudflare WAF + headers + API rate limits, **(2)** Cloudflare real IP on Nginx, **(3)** optional fail2ban nginx jail only after real IP is correct (otherwise you ban Cloudflare edges).
+Priority: **(1)** Nginx headers + API rate limits, **(2)** optional fail2ban nginx jail. With nothing in front of Nginx, the connecting IP is the visitor’s, so the jail bans real clients (no proxy edges to protect).
 
-Suggested headers at origin and/or CF: `X-Content-Type-Options`, strict `Referrer-Policy`, frame policy / CSP as needed, HSTS only when visitors use prod HTTPS hostnames (not long HSTS on lab sslip).
+Suggested headers at origin (Nginx): `X-Content-Type-Options`, strict `Referrer-Policy`, frame policy / CSP as needed, HSTS only when visitors use prod HTTPS hostnames (not long HSTS on lab sslip).
+
+There is no CDN country header: code that needs the visitor’s country uses the IP lookup in `server/ads/visitor-country.ts` (cached per IP).
 
 Rate limit APIs/forms/`/mcp`, not a blunt global RPS on all static assets.
 
@@ -349,13 +399,14 @@ Rate limit APIs/forms/`/mcp`, not a blunt global RPS on all static assets.
 | Item | Expected |
 |------|----------|
 | OS | Ubuntu 24.04 |
+| Node | 24.22.1+ system install (`/usr/bin/node`); deploy refuses older, see 4.4 |
 | App root | `/opt/website-v3` |
 | Process | `website.service` → `start-production.sh` → pm2-runtime (`web`, `mcp`, `sidequest`, `qdrant`) |
 | Reverse proxy | Nginx 80/443 |
 | Health | web `:5000/health`; MCP `:3001/health`; Sidequest liveness `data/sidequest.pid` |
 | sGTM | `/opt/sgtm` Docker compose |
 
-IP, hostname, and which DNS records already point here: check DigitalOcean + Cloudflare, not this file.
+IP, hostname, and which DNS records already point here: check DigitalOcean and the domain’s DNS provider, not this file.
 
 ---
 
@@ -363,33 +414,28 @@ IP, hostname, and which DNS records already point here: check DigitalOcean + Clo
 
 **Done in lab:** app on droplet, sGTM Docker, Nginx metrics `/gtm/` → 8081, Preview on sslip.
 
-**Public today:** Replit + Stape. Detail: [`sgtm-prod-cutover.md`](sgtm-prod-cutover.md).
+**Public today:** app on the droplet; metrics on Stape until step A is done. Detail: [`sgtm-prod-cutover.md`](sgtm-prod-cutover.md).
 
 ### A — sGTM first (metrics only)
 
-1. Cloudflare: `metrics.4geeks.com` → droplet A record (leave Stape until flip).
-2. Cloudflare SSL: Full or Full (strict).
-3. VPS: `certbot --nginx -d metrics.4geeks.com`.
-4. Confirm 443 still has `location ^~ /gtm/` → 8081.
-5. Tagging `.env`: `PREVIEW_SERVER_URL=https://metrics.4geeks.com`.
-6. Tagging: `extra_hosts: metrics.4geeks.com:host-gateway`.
-7. `cd /opt/sgtm && docker compose down && docker compose up -d`.
-8. GTM: Server container URL `https://4geeks.com/sgtm` (no sslip). New preview session.
-9. Check `https://metrics.4geeks.com/healthy` → `ok` (not Stape).
-10. Check `https://4geeks.com/sgtm/healthy`. `/ipn/` must not 502.
-11. Turn off Stape.
+1. DNS: `metrics.4geeks.com` → droplet A record (leave Stape until flip).
+2. VPS: `certbot --nginx -d metrics.4geeks.com`.
+3. Confirm 443 still has `location ^~ /gtm/` → 8081.
+4. Tagging `.env`: `PREVIEW_SERVER_URL=https://metrics.4geeks.com`.
+5. Tagging: `extra_hosts: metrics.4geeks.com:host-gateway`.
+6. `cd /opt/sgtm && docker compose down && docker compose up -d`.
+7. GTM: Server container URL `https://4geeks.com/sgtm` (no sslip). New preview session.
+8. Check `https://metrics.4geeks.com/healthy` → `ok` (not Stape).
+9. Check `https://4geeks.com/sgtm/healthy`. `/ipn/` must not 502.
+10. Turn off Stape.
 
 Do **not** advance `PREVIEW_SERVER_URL` while metrics still points at Stape.
 
-### B — App after (4geeks + Florida)
+### B — App (4geeks + Florida) — done
 
-1. Cloudflare: `4geeks.com`, `www`, `fl.4geeksacademy.com` (and anything still on Replit) → same droplet IP.
-2. Certbot for those hostnames (not the sslip cert).
-3. Nginx HTTPS `server_name` for those hosts.
-4. Smoke: sites, `/sgtm`, `/ipn`, GitHub Actions deploy.
-5. Turn off Replit.
+The public sites run on the droplet and Replit is retired. For a new hostname: DNS A record → droplet IP, Certbot for that hostname, add it to the Nginx HTTPS `server_name`, then smoke-test the site, `/sgtm`, `/ipn` and a GitHub Actions deploy.
 
-**Order:** A first (easy rollback: metrics CNAME back to Stape). B after metrics is healthy. Same day is fine; two DNS flips.
+Rollback for A: point the metrics CNAME back to Stape.
 
 ---
 

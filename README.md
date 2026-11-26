@@ -1,4 +1,4 @@
-# Weblify
+# Caxton
 
 **The agentic CMS — own your website in the AI era.**
 
@@ -13,21 +13,21 @@ Staff edit in the admin UI. Agents edit through MCP. Both land as commits.
 
 [Quick start](#quick-start) · [Install](INSTALL.md) · [Architecture](#how-it-works) · [MCP for agents](#agent-native-let-ai-run-your-website) · [Deploy](#deploy) · [Roadmap](#roadmap) · [Contributing](CONTRIBUTING.md)
 
-![Weblify visual editor — edit a section, publish to Git](docs/assets/demo.gif)
+![Caxton visual editor — edit a section, publish to Git](docs/assets/demo.gif)
 *Demo GIF coming soon — add `docs/assets/demo.gif` before going public.*
 
 ---
 
 ## Status: early access
 
-Weblify is under active development. The core CMS is production-tested; some items below are still in progress.
+Caxton is under active development. The core CMS is production-tested; some items below are still in progress.
 
 | Area | Status |
 |---|---|
 | YAML content model, Git sync, component registry | Shipped |
 | Visual admin UI, SEO, media gallery, multi-site | Shipped |
 | MCP server for AI agents | Shipped |
-| VPS / Replit / generic Node deploy | Shipped |
+| VPS / generic Node deploy | Shipped |
 | Clerk authentication (replacing legacy auth) | In progress |
 | Full decoupling from upstream branding and APIs | In progress |
 | `npx weblify` runtime + create-in-empty-folder | Shipped |
@@ -35,17 +35,17 @@ Weblify is under active development. The core CMS is production-tested; some ite
 
 ---
 
-## What is Weblify
+## What is Caxton
 
-Weblify is **the agentic CMS** — a self-hosted platform where your website lives in a Git repo you control, and both humans and AI agents edit it through the same schema-validated pipeline.
+Caxton is **the agentic CMS** — a self-hosted platform where your website lives in a Git repo you control, and both humans and AI agents edit it through the same schema-validated pipeline.
 
 Your content is **YAML in Git**. Pages compose from **versioned React components** in `shared/component-registry/` and `site_*/component-registry/`. Staff use the visual admin UI. Agents use **MCP**. Everything deploys as one Node process on a $15 VPS — no database server, no platform subscription.
 
 > **Dual write path:** The admin UI and MCP hit the **same validation** and both produce **Git commits**. There is no separate content database behind the editor.
 
-## Why Weblify
+## Why Caxton
 
-Weblify is built around one idea: **own the means of publishing**. Your pages live in Git. Your components are yours. Your agents edit the same YAML your team does — validated, committed, reviewable. Yesterday it was a printing shop; today it is a repo and a VPS.
+Caxton is built around one idea: **own the means of publishing**. Your pages live in Git. Your components are yours. Your agents edit the same YAML your team does — validated, committed, reviewable. Yesterday it was a printing shop; today it is a repo and a VPS.
 
 ## Why this exists
 
@@ -56,7 +56,7 @@ Weblify is built around one idea: **own the means of publishing**. Your pages li
 | **Contentful / Sanity** | Great API, but content lives in someone else's cloud and pricing scales with your success. |
 | **Next.js + MDX from scratch** | Total freedom, zero editor. Your marketing team files GitHub issues to fix a typo. |
 
-Weblify is the fifth option: **own the press, own the repo, keep the editor.**
+Caxton is the fifth option: **own the press, own the repo, keep the editor.**
 
 ## Who this is for
 
@@ -73,19 +73,19 @@ Weblify is the fifth option: **own the press, own the repo, keep the editor.**
 ```bash
 # New site (empty folder)
 mkdir my-site && cd my-site
-npx weblify --name "My Site" --slug my-site --yes
+npx caxton --name "My Site" --slug my-site --yes
 
 # Existing checkout (contributors / VPS release tree)
 npm install
 npm run dev
-# or: npm run weblify
+# or: npm run caxton
 ```
 
 Open **http://localhost:5000**. You have a running site.
 
-Logs are quiet by default. For full engine output: `DEBUG=true npm run dev` or `npx weblify --debug`.
+Logs are quiet by default. For full engine output: `DEBUG=true npm run dev` or `npx caxton --debug`.
 
-**Production:** pin the engine and start with `npx weblify@<version> --production` (requires `SITE_URL`). See **[Migrating from npm run build](docs/migrate-to-npx-weblify.md)**.
+**Production:** pin the engine and start with `npx caxton@<version> --production` (requires `SITE_URL`). See **[Migrating from npm run build](docs/migrate-to-npx-caxton.md)**.
 
 **Agentic (dev):** the CLI can mint a localhost MCP connection token (Cursor / Claude Code) or open a Cloudflare tunnel for cloud connectors. Use `--agentic-installation` / `--agent local|cloud`.
 
@@ -93,9 +93,9 @@ Full setup, every environment variable, and production notes: **[INSTALL.md](INS
 
 ## The cost argument
 
-Weblify runs the entire stack in **one Node process**. No Postgres, no Redis, no container orchestration. Persistence is embedded SQLite on disk ([`server/db.ts`](server/db.ts)); public content is flat YAML.
+Caxton runs the entire stack in **one Node process**. No Postgres, no Redis, no container orchestration. Persistence is embedded SQLite on disk ([`server/db.ts`](server/db.ts)); public content is flat YAML.
 
-| | Weblify | Wix Business | WordPress (managed) | Contentful |
+| | Caxton | Wix Business | WordPress (managed) | Contentful |
 |---|---|---|---|---|
 | **Monthly cost** | ~$15 VPS | $36+ | $25–100+ | $300+ at scale |
 | **Pages** | Unlimited | Tier-limited | Unlimited | Entry-limited |
@@ -111,7 +111,7 @@ You are trading a subscription for a droplet and a `git push`.
 
 ```mermaid
 flowchart LR
-    contentRepo[ContentRepo_YAML] -->|pullOnBoot| server[WeblifyServer_Express]
+    contentRepo[ContentRepo_YAML] -->|pullOnBoot| server[CaxtonServer_Express]
     server --> ssr[SSRReact_Vite]
     server --> sqlite[(SQLite_sessionsJobs)]
     staffUI[StaffAdminUI] -->|validatedWrites| server
@@ -166,7 +166,7 @@ sections:
 
 ## Agent-native: let AI run your website
 
-Weblify ships an **MCP server** so Claude, Cursor, or any MCP client can operate your site as a first-class user:
+Caxton ships an **MCP server** so Claude, Cursor, or any MCP client can operate your site as a first-class user:
 
 ```bash
 npm run mcp
@@ -182,7 +182,7 @@ Full tool reference: **[mcp-server/README.md](mcp-server/README.md)**
 
 ## Authentication
 
-Auth is **pluggable**. The target default is **[Clerk](https://clerk.com)** for staff sign-in and MCP OAuth — you bring your own Clerk project; Weblify does not tie you to any specific identity provider.
+Auth is **pluggable**. The target default is **[Clerk](https://clerk.com)** for staff sign-in and MCP OAuth — you bring your own Clerk project; Caxton does not tie you to any specific identity provider.
 
 | | |
 |---|---|
@@ -202,7 +202,6 @@ NODE_ENV=production npm start
 | Target | Notes |
 |---|---|
 | **VPS** | Reference deployment — [docs/vps.md](docs/vps.md) |
-| **Replit** | Works out of the box; Replit Vite plugins load only when `REPL_ID` is set ([`vite.config.ts`](vite.config.ts)) |
 | **Docker** | Bring your own image; same `build` + `start` |
 | **Any Node host** | Railway, Fly.io, a laptop — one process, one port |
 
@@ -214,12 +213,10 @@ NODE_ENV=production npm start
 | Understand multi-site setup | [docs/multi-site.md](docs/multi-site.md) |
 | Deploy to a VPS | [docs/vps.md](docs/vps.md) |
 | Put media in Google Cloud Storage | [docs/media-storage.md](docs/media-storage.md) |
-| Put the site behind a CDN | [docs/cloudflare-cdn-setup.md](docs/cloudflare-cdn-setup.md) |
+| Put the site behind a CDN (optional; not in use today) | [docs/cloudflare-cdn-setup.md](docs/cloudflare-cdn-setup.md) |
 | Wire up analytics | [docs/gtm-analytics-setup.md](docs/gtm-analytics-setup.md) |
 | Add a new section component | [shared/component-registry/README.md](shared/component-registry/README.md) |
 | Connect an AI agent | [mcp-server/README.md](mcp-server/README.md) |
-| Run on Replit | [replit.md](replit.md) |
-
 ## Roadmap
 
 - [x] YAML content model with Git sync
@@ -228,7 +225,7 @@ NODE_ENV=production npm start
 - [x] Multi-site from a single deployment
 - [ ] Clerk authentication
 - [ ] Full decoupling from legacy upstream integrations
-- [x] `npx weblify` create / resume / `--production`
+- [x] `npx caxton` create / resume / `--production`
 - [ ] Starter templates (blog, docs, SaaS landing, portfolio)
 - [ ] Drag-and-drop section reordering in the visual editor
 - [ ] Plugin API for third-party components
@@ -248,7 +245,7 @@ Create a folder in the component registry with a `schema.ts`, an example YAML, a
 **Is this production-ready?**
 The core CMS has been exercised on real traffic. The public API surface is still moving — pin your version and read the changelog before upgrading.
 
-**Why Weblify?**
+**Why Caxton?**
 Own the means of publishing: your pages live in Git, your components are yours, and agents edit the same YAML your team does — validated, committed, reviewable.
 
 ## Contributing

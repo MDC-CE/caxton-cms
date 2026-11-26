@@ -12,11 +12,19 @@ import { DraftLinkCheckJob, ProposalStaleSweepJob } from "./definitions/proposal
 import { MetaAdsSyncJob } from "./definitions/meta-ads-sync";
 import { AdsSyncJob } from "./definitions/ads-sync";
 import { AdsRecheckJob } from "./definitions/ads-recheck";
+import { AdsDailySyncJob } from "./definitions/ads-daily-sync";
 import { HtmlPageRebuildJob } from "./definitions/html-page-rebuild";
 import { HtmlDbReaderRebuildJob } from "./definitions/html-db-reader-rebuild";
 import { HtmlContentTypeListingRebuildJob } from "./definitions/html-content-type-listing-rebuild";
 import { PlaygroundCatalogPollJob } from "./definitions/playground-catalog-poll";
 import { PlaygroundFaqSyncJob } from "./definitions/playground-faq-sync";
+import { HtmlContentTypeRebuildJob } from "./definitions/html-content-type-rebuild";
+import { LocalDatabaseRefreshJob } from "./definitions/local-database-refresh";
+import { VectorIndexSyncJob } from "./definitions/vector-index-sync";
+import { EvidenceArchiveJob } from "./definitions/evidence-archive";
+import { EvidenceArchiveSweepJob } from "./definitions/evidence-archive-sweep";
+import { PublicUrlChangesScanJob } from "./definitions/public-url-changes-scan";
+import { IndexNowSubmitJob } from "./definitions/indexnow-submit";
 
 export function registerAllJobs(): void {
   registerJobClass("index_refresh", IndexRefreshJob);
@@ -32,10 +40,18 @@ export function registerAllJobs(): void {
   registerJobClass("draft_link_check", DraftLinkCheckJob);
   registerJobClass("ads_sync", AdsSyncJob);
   registerJobClass("ads_recheck", AdsRecheckJob);
+  registerJobClass("ads_daily_sync", AdsDailySyncJob);
   registerJobClass("meta_ads_sync", MetaAdsSyncJob);
   registerJobClass("html_page_rebuild", HtmlPageRebuildJob);
   registerJobClass("html_db_reader_rebuild", HtmlDbReaderRebuildJob);
   registerJobClass("html_content_type_listing_rebuild", HtmlContentTypeListingRebuildJob);
   registerJobClass("playground_catalog_poll", PlaygroundCatalogPollJob);
   registerJobClass("playground_faq_sync", PlaygroundFaqSyncJob);
+  registerJobClass("html_content_type_rebuild", HtmlContentTypeRebuildJob);
+  registerJobClass("local_database_refresh", LocalDatabaseRefreshJob);
+  registerJobClass("vector_index_sync", VectorIndexSyncJob);
+  registerJobClass("evidence_archive", EvidenceArchiveJob);
+  registerJobClass("evidence_archive_sweep", EvidenceArchiveSweepJob);
+  registerJobClass("public_url_changes_scan", PublicUrlChangesScanJob);
+  registerJobClass("indexnow_submit", IndexNowSubmitJob);
 }

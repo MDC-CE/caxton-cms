@@ -207,6 +207,18 @@ describe("allowedToolNames", () => {
     expect(names.has("reindex_database")).toBe(false);
   });
 
+  it("databases_view reveals read tools only", () => {
+    const names = new Set(allowedToolNames([{ name: "databases_view" }]));
+    expect(names.has("list_databases")).toBe(true);
+    expect(names.has("list_database_items")).toBe(true);
+    expect(names.has("get_database_item")).toBe(true);
+    expect(names.has("add_database_item")).toBe(false);
+    expect(names.has("update_database_items")).toBe(false);
+    expect(names.has("delete_database_item")).toBe(false);
+    expect(names.has("create_or_update_database")).toBe(false);
+    expect(names.has("reindex_database")).toBe(false);
+  });
+
   it("content_edit_text alone does not reveal database tools", () => {
     const names = new Set(
       allowedToolNames([{ name: "content_edit_text", contentTypes: "*" }]),
@@ -225,7 +237,7 @@ describe("allowedToolNames", () => {
     expect(names.has("ensure_content_type_schema_org")).toBe(false);
   });
 
-  it("seo_edit-only sees SEO inspect and SEO writes, not YAML body reads or redirects", () => {
+  it("seo_edit-only sees SEO inspect and SEO writes (incl. draft-mode update_redirect), not YAML body reads or test_redirect", () => {
     const names = new Set(allowedToolNames(seoOnly));
     expect(names.has("get_entry_seo")).toBe(true);
     expect(names.has("list_entry_seo")).toBe(true);
@@ -240,7 +252,7 @@ describe("allowedToolNames", () => {
     expect(names.has("update_meta_fields")).toBe(false);
     expect(names.has("update_fields")).toBe(true);
     expect(names.has("test_redirect")).toBe(false);
-    expect(names.has("update_redirect")).toBe(false);
+    expect(names.has("update_redirect")).toBe(true);
     expect(names.has("ensure_content_type_schema_org")).toBe(false);
     expect(names.has("get_entry_content")).toBe(false);
     expect(names.has("list_entries")).toBe(false);
@@ -256,6 +268,17 @@ describe("allowedToolNames", () => {
     const names = new Set(allowedToolNames(redirectReader));
     expect(names.has("test_redirect")).toBe(true);
     expect(names.has("update_redirect")).toBe(false);
+  });
+
+  it("edit_page_redirects (scoped) reveals test_redirect and update_redirect", () => {
+    const names = new Set(
+      allowedToolNames([
+        { name: "content_view", contentTypes: ["landing"] },
+        { name: "edit_page_redirects", contentTypes: ["landing"] },
+      ]),
+    );
+    expect(names.has("test_redirect")).toBe(true);
+    expect(names.has("update_redirect")).toBe(true);
   });
 
   it("seo_settings reveals ensure_content_type_schema_org", () => {

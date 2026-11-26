@@ -25,7 +25,7 @@ The server already knows the rules. Every response says what happened, what did 
 2. Know who you are: read `primary_blocker`, `role_description`, and `allowed_tools` (`bootstrap_agent` / `get_current_user`). Many hosts drop the server's role instructions — do not assume you saw them.
    - `role_connector_required` → no writes on this connection. Give the human `connector_guide.role_connectors`; stay read-only.
    - `mcp_write_disabled` → propose-only. Follow `mcp_write_guide.course_of_action`.
-3. `agent_session` `start` with your exact `provider/model` (e.g. `claude/sonnet-4.5`). Pass `agent_session_id` on every write. `session_conflict` → `resume: true` if it is your run, else `force_new: true` + report.
+3. `agent_session` `start` with your exact `provider/model` (e.g. `claude/sonnet-4.5`). Do not pass an id on start; pass the `agent_session_id` it returns on every write. To name a batch of work, pass `label` on start. `session_conflict` → `resume: true` if it is your run, else `force_new: true` + report.
 4. Several sites → pass `site` (the domain the human named) on **every** call. Never assume the first site.
 5. A tool you need is not in your list → do not imitate it with other tools. Tell the human: your role lacks it, or the connector must be refreshed/reconnected (tool lists never update mid-chat).
 
@@ -57,6 +57,7 @@ A gate is the server asking for a decision. Passing a `confirm_*` flag is you an
 - **Ask the human (or your orchestrator / reviewer) first**, showing the payload facts:
   - new taxonomy values — categories, URL params, tags (`confirm_new_values`; show `observed_values`)
   - overwriting newer work (`confirm_overwrite_newer_live`, `confirm_source_changed`, `confirm_base_unknown`; show `conflicting_fields` / `live_changes_since_base`)
+  - whether search engines see a page after publish (`robots_on_publish` / `robots_on_publish_by_entry`: `keep_live` | `use_draft`; show `live_robots` vs `draft_robots`)
   - deleting, or changing many pages at once (`confirm_delete`, `confirm_affected_entries`, `confirm_template_*`; show the count)
   - ending an experiment (`confirm_end_experiment`), rejecting a proposal (`confirm_reject`), spending research budget past a warning (`confirm_seo_research_budget`)
 - **Never confirm a gate you do not understand.** Open the `explain_site` topic from `next_actions` first.
@@ -137,7 +138,7 @@ A proposal is how work passes between roles: one role proposes, a **different** 
 2. **One risk per proposal.** Do not mix outcome figures, new pages, and other edits (`mixed_risk_bundle`). Keep SERP title/description separate from body edits (`mixed_serp_and_body`).
 3. **Declare `review_situations`** so reviewers get the right checklist: `internal_links`, `serp_title_description`, `funnel_classification`, `body_copy_edit`, `selling_figures`, `new_public_content`, `promote_draft`, `locale_translation`. `situation_ops_mismatch` → retag with `set_review_situations`. Catalog: `explain_site` `topic: "proposals"` `subtopic: "situations"`.
 4. **Summary** (min 80) = intent + why. Never paste values — ops carry them. Go-live with no updates: why this draft should go live. Optional `rationale` = deeper reasoning; `situation_note` = what live looks like now.
-5. **After filing:** read `side_effects.drafts_written`; give the human the draft preview link (§5a). Page-level fields (`funnel.*`, `meta.robots`, `authors`, …) change every language — say so.
+5. **After filing:** read `side_effects.drafts_written`; give the human the draft preview link (§5a). Page-level fields (`funnel.*`, `authors`, `published_at`) change every language — say so. `meta.robots` is per language.
 6. **Follow your attention bucket** (`list_proposals` with `proposer_username` / `agent_session_id`):
    - `blocked` → fix with `revise_entries` (idle or self-claimed only), then the active claimant `resolve_blocker`s. Revise does not clear blockers; never resolve to win a disagreement.
    - `needs_author` / `context_stale` → live moved under your draft; `revise_entries`.

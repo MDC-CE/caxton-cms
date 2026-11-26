@@ -573,6 +573,12 @@ function CapabilityFields({
                       <code className="font-mono text-[11px]">delete_database_item</code>). Reads
                       may cover any bank; writes require the bank in scope.
                     </p>
+                    <p>
+                      Read-only browsing without row edits is{" "}
+                      <code className="font-mono text-[11px]">databases_view</code> (View
+                      databases): list and read any bank, no forced refresh from external
+                      sources, and connection settings stay hidden.
+                    </p>
                   </div>
                 </details>
               </div>
@@ -1457,8 +1463,9 @@ function RolesTab() {
                     {roleId === "platform_steward" && (
                       <>
                         <p className="text-xs text-muted-foreground mb-2">
-                          Site health: diagnostics, runtime issues, redirects, SEO settings, content type schema, and
-                          private database definitions (not row edits — those need Edit database data).
+                          Site health: diagnostics, runtime issues, redirects, SEO settings, A/B testing setup, content
+                          type schema, and private database definitions. Can edit rows only in the press mentions
+                          database; other databases need Edit database data.
                         </p>
                         <details className="mb-2 group">
                           <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground list-none flex items-center gap-1">
@@ -1467,12 +1474,15 @@ function RolesTab() {
                           </summary>
                           <div className="mt-2 text-xs text-muted-foreground space-y-1.5 pl-4 border-l border-border">
                             <p>
-                              Private surfaces include Diagnostics, Runtime issues, Redirects, SEO settings tabs, Component
-                              insights, Content Type manage, and Databases settings. MCP connector:{" "}
+                              Private surfaces include Diagnostics, Runtime issues, Redirects, SEO settings tabs, Settings →
+                              A/B testing (<code className="font-mono">ab_testing_settings</code>), Component insights,
+                              Content Type manage, and Databases settings. MCP connector:{" "}
                               <code className="font-mono">/mcp/role/platform_steward</code> (
                               <code className="font-mono">update_content_type</code>,{" "}
                               <code className="font-mono">create_or_update_database</code>,{" "}
-                              <code className="font-mono">reindex_database</code> — not item CRUD tools).
+                              <code className="font-mono">reindex_database</code>, and item CRUD tools scoped to{" "}
+                              <code className="font-mono">press_mentions</code> via{" "}
+                              <code className="font-mono">databases_edit_data</code>).
                             </p>
                           </div>
                         </details>
@@ -2685,7 +2695,7 @@ function CaptchaTab() {
               </li>
               <li className="flex gap-2">
                 <span className="shrink-0 font-medium text-foreground">5.</span>
-                <span>Add both values as Replit secrets named <code className="font-mono bg-muted rounded px-1 py-0.5 text-xs">TURNSTILE_SITE_KEY</code> and <code className="font-mono bg-muted rounded px-1 py-0.5 text-xs">TURNSTILE_SECRET_KEY</code>.</span>
+                <span>Add both values as environment variables (GitHub deploy secrets or <code className="font-mono bg-muted rounded px-1 py-0.5 text-xs">.env</code>) named <code className="font-mono bg-muted rounded px-1 py-0.5 text-xs">TURNSTILE_SITE_KEY</code> and <code className="font-mono bg-muted rounded px-1 py-0.5 text-xs">TURNSTILE_SECRET_KEY</code>.</span>
               </li>
             </ol>
           </div>

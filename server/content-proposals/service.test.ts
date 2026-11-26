@@ -10,6 +10,7 @@ import { fingerprintEdits, fingerprintNotes } from "./fingerprint";
 import { discardSeededAttachedEntry, seedAttachedLocaleFiles } from "./seed-attached-entry";
 import {
   createProposalService,
+  listOpenProposalsForEntry,
   listOpenProposalsForVariant,
   parseProposalSort,
   parseProposerActorType,
@@ -20,6 +21,9 @@ import {
 } from "./service";
 
 const SITE = `site_proposal-test-${Date.now()}`;
+
+const STAFF_SUMMARY =
+  "The button at the top of the Spanish post still names the old bootcamp, so readers land on the wrong program. The author needs to rename it before this is approved.";
 
 function rmSite(): void {
   const dir = path.join("data", SITE.replace(/\//g, "-"));
@@ -167,6 +171,210 @@ describe("content proposals", () => {
     if (!closeSelf.ok) return;
     expect(closeSelf.proposal.status).toBe("finished");
     expect(closeSelf.proposal.close_reason).toBe("wont_fix");
+  });
+
+  it("returns funnel_persona_alternatives on create when a funnel binding names a persona", async () => {
+    const svc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async () => ({ ok: true }),
+      productPersonas: (slug) =>
+        slug === "ai-engineering"
+          ? [
+              { id: "the-career-changer", label: "The Career Changer", role: "No technical background" },
+              { id: "the-frustrated-graduate", label: "The Frustrated Graduate", role: "Basic coding skills" },
+            ]
+          : null,
+    });
+    const created = await svc.create(
+      {
+        title: "Funnel: developer landing",
+        summary: "Classify the developer landing funnel to the right AI Engineering persona and stage. ".repeat(2),
+        entries: [
+          sampleEntry({
+            contentType: "landing",
+            slug: "from-developer",
+            locale: "en",
+            updates: [
+              {
+                field_path: "funnel.products",
+                value: [{ product: "ai-engineering", persona: "the-career-changer" }],
+              },
+            ],
+          }),
+        ],
+      },
+      { username: "alice", actor: { type: "mcp", role: "layout_editor", model: "claude/sonnet-5" } },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const hint = created.warnings?.find((w) => w.code === "funnel_persona_alternatives");
+    expect(hint).toBeDefined();
+    expect(JSON.stringify(hint?.details)).toContain("the-frustrated-graduate");
+  });
+
+  describe("four-eyes self-approval across roles", () => {
+    const SESSION_A = "3f2b8c1e-0a4d-4c6b-9e7f-1a2b3c4d5e6f";
+    const SESSION_B = "7c9d0e1f-2a3b-4c5d-8e6f-0a1b2c3d4e5f";
+    const summary =
+      "Set the funnel persona on this landing so the page joins the right buyer journey. ".repeat(2);
+    const author = {
+      username: "alesanchezr",
+      actor: { type: "mcp" as const, client: "Claude", model: "claude/sonnet-5", role: "layout_editor" },
+    };
+
+    function serviceWith(sameModelBlocked: boolean, fourEyesEnabled = true, staffUiExempt = false) {
+      const live: Record<string, unknown> = { "call_to_action.title": "Old title" };
+      return createProposalService({
+        site: SITE,
+        issueExists: () => true,
+        captureBaseline: (entry) => {
+          const values: Record<string, unknown> = {};
+          for (const u of entry.updates) values[u.field_path] = live[u.field_path];
+          return { values };
+        },
+        applyUpdates: async (entry) => {
+          for (const u of entry.ops) live[u.field_path] = u.reset ? undefined : u.value;
+          return { ok: true };
+        },
+        getProposalSettings: () => ({
+          withdraw: { mcp: "proposer_only", staff: "any_editor" },
+          four_eyes: {
+            enabled: fourEyesEnabled,
+            staff_ui_exempt: staffUiExempt,
+            same_model_blocked: sameModelBlocked,
+          },
+          hold: { stewards_only: true },
+          claim: { staff_ui_takeover: true },
+        }),
+      });
+    }
+
+    async function fileEdit(svc: ReturnType<typeof serviceWith>, slug: string) {
+      const created = await svc.create(
+        { title: `Funnel ${slug}`, summary, agent_session_id: SESSION_A, entries: [sampleEntry({ slug })] },
+        author,
+      );
+      expect(created.ok).toBe(true);
+      if (!created.ok) throw new Error(created.error);
+      return created.proposal.id;
+    }
+
+    it("blocks apply from the creating session under another role, even with the model rule off", async () => {
+      const svc = serviceWith(false);
+      const id = await fileEdit(svc, "same-session");
+      const res = await svc.update(id, "apply", {
+        username: "alesanchezr",
+        agent_session_id: SESSION_A,
+        actor: { type: "mcp", client: "Claude", model: "claude/sonnet-5", role: "publisher" },
+      });
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.code).toBe("four_eyes_same_session");
+    });
+
+    it("blocks the same user on the same exact model from another session when the rule is on", async () => {
+      const svc = serviceWith(true);
+      const id = await fileEdit(svc, "same-model-on");
+      const res = await svc.update(id, "apply", {
+        username: "AleSanchezR",
+        agent_session_id: SESSION_B,
+        actor: { type: "mcp", client: "Claude", model: " Claude/Sonnet-5 ", role: "publisher" },
+      });
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe("four_eyes_same_model");
+        expect(res.error).toContain("Agents → Rules");
+      }
+    });
+
+    it("allows the same model from another session when the rule is off", async () => {
+      const svc = serviceWith(false);
+      const id = await fileEdit(svc, "same-model-off");
+      const res = await svc.update(id, "apply", {
+        username: "alesanchezr",
+        agent_session_id: SESSION_B,
+        actor: { type: "mcp", client: "Claude", model: "claude/sonnet-5", role: "publisher" },
+      });
+      expect(res.ok).toBe(true);
+    });
+
+    it("allows a different exact model, and a caller with no recorded model", async () => {
+      const svc = serviceWith(true);
+      const otherModel = await fileEdit(svc, "other-model");
+      const a = await svc.update(otherModel, "apply", {
+        username: "alesanchezr",
+        agent_session_id: SESSION_B,
+        actor: { type: "mcp", client: "Grok", model: "grokbot/proposal_reviewer/grok-4", role: "proposal_reviewer" },
+      });
+      expect(a.ok).toBe(true);
+
+      const noModel = await fileEdit(svc, "no-model");
+      const b = await svc.update(noModel, "apply", {
+        username: "alesanchezr",
+        agent_session_id: SESSION_B,
+        actor: { type: "mcp", client: "Claude", role: "publisher" },
+      });
+      expect(b.ok).toBe(true);
+    });
+
+    it("leaves reject on the role-only rule (creating session may reject under another role)", async () => {
+      const svc = serviceWith(true);
+      const id = await fileEdit(svc, "reject-same-session");
+      const res = await svc.update(id, "reject", {
+        username: "alesanchezr",
+        agent_session_id: SESSION_A,
+        actor: { type: "mcp", client: "Claude", model: "claude/sonnet-5", role: "publisher" },
+        confirm_reject: true,
+        reject_kind: "bad_idea",
+        close_note:
+          "Rejecting from the same chat is allowed under another role because nothing goes live on reject.",
+      });
+      expect(res.ok).toBe(true);
+    });
+
+    it("blocks accept on an idea from the creating session", async () => {
+      const svc = serviceWith(true);
+      const idea = await svc.create(
+        {
+          kind: "idea",
+          title: "Developer AI landing idea",
+          summary: "A landing for developers moving into AI engineering with clear routing. ".repeat(2),
+          agent_session_id: SESSION_A,
+        },
+        author,
+      );
+      expect(idea.ok).toBe(true);
+      if (!idea.ok) return;
+      const res = await svc.update(idea.proposal.id, "accept", {
+        username: "alesanchezr",
+        agent_session_id: SESSION_A,
+        actor: { type: "mcp", client: "Claude", model: "claude/opus-5.5", role: "publisher" },
+        next_step: "Open an edits proposal for the developer landing after research.",
+      });
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.code).toBe("four_eyes_same_session");
+    });
+
+    it("does not apply the new rules to staff UI, or when four-eyes is off", async () => {
+      const exempt = serviceWith(true, true, true);
+      const id = await fileEdit(exempt, "staff-ui");
+      const ui = await exempt.update(id, "apply", {
+        username: "alesanchezr",
+        asStaff: true,
+        actor: { type: "ui" },
+      });
+      expect(ui.ok).toBe(true);
+
+      const off = serviceWith(true, false);
+      const id2 = await fileEdit(off, "four-eyes-off");
+      const mcp = await off.update(id2, "apply", {
+        username: "alesanchezr",
+        agent_session_id: SESSION_A,
+        actor: { type: "mcp", client: "Claude", model: "claude/sonnet-5", role: "publisher" },
+      });
+      expect(mcp.ok).toBe(true);
+    });
   });
 
   it("applies remaining entries, skips done, marks stale, and rolls up partial then finished", async () => {
@@ -954,6 +1162,10 @@ describe("content proposals", () => {
     expect(applyBlocked.ok).toBe(false);
     if (!applyBlocked.ok) expect(applyBlocked.code).toBe("proposal_blocked");
 
+    const legacyPreview = await svc.update(created.proposal.id, "apply", { username: "casey", dry_run: true });
+    expect(legacyPreview.ok).toBe(false);
+    if (!legacyPreview.ok) expect(legacyPreview.code).toBe("proposal_blocked");
+
     const rejected = await svc.update(created.proposal.id, "reject", {
       username: "casey",
       confirm_reject: true,
@@ -967,6 +1179,136 @@ describe("content proposals", () => {
       expect(rejected.proposal.close_reason).toBe("bad_idea");
       expect(rejected.proposal.close_note).toContain("fundamentally wrong");
     }
+  });
+
+  it("staff override approves past open blockers with a reason and resolves them once live", async () => {
+    let promoteOk = false;
+    const svc = createProposalService({
+      site: SITE,
+      issueExists: () => true,
+      captureBaseline: () => ({ values: {} }),
+      applyUpdates: async () => ({ ok: true }),
+      readVariantFingerprint: () => ({ fingerprint: "abc123" }),
+      promoteEntry: async () => (promoteOk ? { ok: true } : { ok: false, error: "promote failed" }),
+    });
+    const created = await svc.create(
+      {
+        title: "Go live with override",
+        summary:
+          "Ship the prepared agent-fix draft for the Spanish blog after review and four-eyes approve. ".repeat(2),
+        promote_on_apply: true,
+        agent_session_id: "sess-1",
+        entries: [{ contentType: "blog", slug: "hello", locale: "es", variant: "agent-fix", updates: [] }],
+      },
+      { username: "alice" },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const blocked = await svc.update(created.proposal.id, "add_blocker", {
+      username: "blake",
+      body: "On draft agent-fix (es), hero CTA still goes to Coding Bootcamp. Must use AI Flex because leads go to the wrong funnel.",
+    });
+    expect(blocked.ok).toBe(true);
+    const id = created.proposal.id;
+    const reason = "Funnel owner confirmed the Coding Bootcamp CTA is intended this week.";
+
+    const noReason = await svc.update(id, "apply", { username: "casey", override_blockers: true });
+    expect(noReason.ok).toBe(false);
+    if (!noReason.ok) expect(noReason.code).toBe("override_reason_required");
+
+    const mcp = await svc.update(id, "apply", {
+      username: "casey",
+      override_blockers: true,
+      override_reason: reason,
+      actor: { type: "mcp", role: "seo_specialist", model: "m", client: "c" },
+    });
+    expect(mcp.ok).toBe(false);
+    if (!mcp.ok) expect(mcp.code).toBe("proposal_blocked");
+
+    const mcpHeader = await svc.update(id, "apply", {
+      username: "casey",
+      override_blockers: true,
+      override_reason: reason,
+      caller_is_mcp: true,
+    });
+    expect(mcpHeader.ok).toBe(false);
+    if (!mcpHeader.ok) expect(mcpHeader.code).toBe("proposal_blocked");
+
+    const nothingLive = await svc.update(id, "apply", {
+      username: "casey",
+      override_blockers: true,
+      override_reason: reason,
+    });
+    expect(nothingLive.ok).toBe(true);
+    expect(svc.get(id)!.open_blocker_count).toBe(1);
+    if (nothingLive.ok) {
+      expect(nothingLive.warnings?.map((w) => w.code) ?? []).not.toContain("blockers_overridden");
+    }
+
+    promoteOk = true;
+    const applied = await svc.update(id, "apply", {
+      username: "casey",
+      override_blockers: true,
+      override_reason: reason,
+    });
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    expect(applied.proposal.status).toBe("finished");
+    expect(applied.proposal.open_blocker_count).toBe(0);
+    const resolved = applied.proposal.blockers[0]!;
+    expect(resolved.status).toBe("resolved");
+    expect(resolved.resolved_by).toBe("casey");
+    expect(resolved.resolve_note).toBe(`Overridden on approve by casey: ${reason}`);
+    expect(resolved.resolved_by_actor.override).toBe(true);
+    const warning = applied.warnings?.find((w) => w.code === "blockers_overridden");
+    expect(warning?.details).toEqual({ resolved_blocker_ids: [resolved.id] });
+    const ev = listEvents({ site: SITE, limit: 200 }).find(
+      (e) =>
+        e.type === "proposal_blocker_resolved" &&
+        (e.payload as { proposal_id?: string }).proposal_id === id,
+    );
+    expect(ev?.payload).toMatchObject({ blocker_id: resolved.id, override: true, open_blocker_count: 0 });
+  });
+
+  it("staff override accepts an idea past open blockers", async () => {
+    const svc = makeService();
+    const created = await svc.create(
+      {
+        kind: "idea",
+        title: "Override accept brief",
+        summary:
+          "Pitch a new Miami spoke landing for the AI bootcamp with a short brief for later edits work. ".repeat(2),
+        related_entries: [{ contentType: "landing", slug: "miami-ai-override-new" }],
+      },
+      { username: "alice" },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const blocked = await svc.update(created.proposal.id, "add_blocker", {
+      username: "blake",
+      body:
+        "Needs clearer acceptance criteria for which locales ship first and why ES is out of scope. ".repeat(2),
+    });
+    expect(blocked.ok).toBe(true);
+    const acceptArgs = {
+      username: "casey",
+      next_step: "Open an edits proposal for landing/miami-ai-override-new after research.",
+      accepted_entry: { contentType: "landing", slug: "miami-ai-override-new", locale: "en" },
+    };
+    const refused = await svc.update(created.proposal.id, "accept", acceptArgs);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.code).toBe("proposal_blocked");
+
+    const accepted = await svc.update(created.proposal.id, "accept", {
+      ...acceptArgs,
+      override_blockers: true,
+      override_reason: "Locale scope is settled in the follow-up edit; accept now.",
+    });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) return;
+    expect(accepted.proposal.open_blocker_count).toBe(0);
+    expect(accepted.proposal.blockers[0]!.resolve_note).toContain("Overridden on approve by casey");
+    expect(accepted.warnings?.map((w) => w.code)).toContain("blockers_overridden");
   });
 
   it("claimant-only resolve; expired claim hints claim first; soft apply into variant", async () => {
@@ -1134,6 +1476,28 @@ describe("content proposals", () => {
     const listed = listOpenProposalsForVariant(SITE, "blog", "hello", "es", "agent-fix");
     expect(listed.some((p) => p.id === created.proposal.id)).toBe(true);
     expect(listOpenProposalsForVariant(SITE, "blog", "hello", "es", "other").length).toBe(0);
+  });
+
+  it("listOpenProposalsForEntry reports open blockers per proposal", async () => {
+    const svc = makeService();
+    const created = await svc.create(
+      {
+        title: "Entry list with blocker",
+        summary: "Entry list helper should carry the open blocker count for the robot button. ".repeat(2),
+        entries: [sampleEntry()],
+      },
+      { username: "alice" },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(listOpenProposalsForEntry(SITE, "blog", "hello")[0]?.open_blocker_count).toBe(0);
+    const blocked = await svc.update(created.proposal.id, "add_blocker", {
+      username: "blake",
+      body: "Hero CTA still points at the old bootcamp page; it must point at AI Flex so leads reach the right funnel.",
+    });
+    expect(blocked.ok).toBe(true);
+    const rows = listOpenProposalsForEntry(SITE, "blog", "hello");
+    expect(rows.find((r) => r.id === created.proposal.id)?.open_blocker_count).toBe(1);
   });
 
   it("promote apply requires confirm_end_experiment when siblings have traffic", async () => {
@@ -1448,6 +1812,7 @@ describe("content proposals", () => {
         "Needs clearer acceptance criteria for which locales ship first and why ES is out of scope. ".repeat(
           2,
         ),
+      staff_summary: STAFF_SUMMARY,
     });
     expect(blocked.ok).toBe(true);
 
@@ -1770,7 +2135,7 @@ describe("content proposals", () => {
       applyUpdates: async () => ({ ok: true }),
       getProposalSettings: () => ({
         withdraw: { mcp: "disabled", staff: "any_editor" },
-        four_eyes: { enabled: true, staff_ui_exempt: false },
+        four_eyes: { enabled: true, staff_ui_exempt: false, same_model_blocked: true },
         hold: { stewards_only: true },
         claim: { staff_ui_takeover: true },
       }),
@@ -1800,7 +2165,7 @@ describe("content proposals", () => {
       applyUpdates: async () => ({ ok: true }),
       getProposalSettings: () => ({
         withdraw: { mcp: "any_create_author", staff: "any_editor" },
-        four_eyes: { enabled: true, staff_ui_exempt: false },
+        four_eyes: { enabled: true, staff_ui_exempt: false, same_model_blocked: true },
         hold: { stewards_only: true },
         claim: { staff_ui_takeover: true },
       }),
@@ -1833,7 +2198,7 @@ describe("content proposals", () => {
       applyUpdates: async () => ({ ok: true }),
       getProposalSettings: () => ({
         withdraw: { mcp: "proposer_only", staff: "any_editor" },
-        four_eyes: { enabled: false, staff_ui_exempt: false },
+        four_eyes: { enabled: false, staff_ui_exempt: false, same_model_blocked: true },
         hold: { stewards_only: true },
         claim: { staff_ui_takeover: true },
       }),
@@ -2459,6 +2824,211 @@ describe("content proposals", () => {
     });
   });
 
+  describe("retire accepted ideas", () => {
+    const alice = {
+      username: "alice",
+      actor: { type: "mcp" as const, role: "copy_editor", model: "claude/sonnet", client: "Cursor" },
+    };
+    const bob = {
+      username: "bob",
+      actor: { type: "mcp" as const, role: "seo_specialist", model: "claude/sonnet", client: "Cursor" },
+    };
+    const PAGE = { contentType: "blog", slug: "redirect-old-bootcamp", locale: "en" };
+    const NEXT_STEP = "Add the redirect from the old bootcamp URL in a follow-up edit.";
+    const RETIRE_NOTE = "The redirect already exists in _redirects.yml since the October cleanup.";
+    type Svc = ReturnType<typeof makeService>;
+
+    const fileIdea = async (svc: Svc, title: string) => {
+      const res = await svc.create(
+        {
+          kind: "idea",
+          title,
+          summary: `${title}: send the retired bootcamp URL to the current program page so old links keep working. `.repeat(2),
+          related_entries: [PAGE],
+          confirm_distinct: true,
+        },
+        alice,
+      );
+      if (!res.ok) throw new Error(`${res.code}: ${res.error}`);
+      return res.proposal.id;
+    };
+    const accept = (svc: Svc, id: string) =>
+      svc.update(id, "accept", { ...bob, next_step: NEXT_STEP, accepted_entry: PAGE });
+    const fileEdits = (svc: Svc, title: string, implementsId: string) =>
+      svc.create(
+        {
+          title,
+          summary: `${title}: implement the accepted redirect idea on the old bootcamp page. `.repeat(2),
+          implements_proposal_id: implementsId,
+          confirm_distinct: true,
+          entries: [sampleEntry({ ...PAGE, updates: [{ field_path: "meta.title", value: title }] })],
+        },
+        alice,
+      );
+    const retire = (svc: Svc, id: string, extra: Record<string, unknown> = {}) =>
+      svc.update(id, "retire", { ...bob, retire_reason: "already_done", close_note: RETIRE_NOTE, ...extra });
+
+    it("takes a stalled idea off the list, frees its page, and stays out of outcome review", async () => {
+      const svc = makeService({ liveValues: { "meta.title": "Old" } });
+      const idea = await fileIdea(svc, "Redirect old bootcamp URL");
+      expect((await accept(svc, idea)).ok).toBe(true);
+      const acceptedAt = svc.get(idea)!.closed_at;
+      expect(svc.stats().stalled_ideas).toBe(1);
+      expect(svc.list({ outcome_review: "none" }).proposals.map((p) => p.id)).toContain(idea);
+
+      const waiting = await fileIdea(svc, "Point the old bootcamp URL at the new syllabus");
+      expect((await accept(svc, waiting)).ok).toBe(false);
+
+      const res = await retire(svc, idea);
+      expect(res.ok ? "ok" : `${res.code}: ${res.error}`).toBe("ok");
+      if (!res.ok) return;
+      expect(res.proposal.status).toBe("finished");
+      expect(res.proposal.close_reason).toBe("already_done");
+      expect(res.proposal.close_note).toBe(RETIRE_NOTE);
+      expect(res.proposal.accepted_entry).toEqual(PAGE);
+      const released = res.warnings?.find((w) => w.code === "idea_page_released_waiting_ideas") as
+        | { details?: { waiting_ideas?: Array<{ id: string }> } }
+        | undefined;
+      expect(released?.details?.waiting_ideas?.map((w) => w.id)).toEqual([waiting]);
+
+      expect(svc.stats().stalled_ideas).toBe(0);
+      expect(svc.list({ stalled: true }).total).toBe(0);
+      expect(svc.list({ outcome_review: "none" }).proposals.map((p) => p.id)).not.toContain(idea);
+      const event = listEvents({ site: SITE, type: "proposal_retired", limit: 10 }).find(
+        (e) => e.payload?.proposal_id === idea,
+      );
+      expect(event?.payload?.retire_reason).toBe("already_done");
+
+      expect((await accept(svc, waiting)).ok).toBe(true);
+
+      const restore = await svc.update(idea, "unretire", { ...bob });
+      expect(restore.ok).toBe(false);
+      if (!restore.ok) expect(restore.code).toBe("accepted_entry_taken");
+
+      const implementRetired = await fileEdits(svc, "Late redirect edit", idea);
+      expect(implementRetired.ok).toBe(false);
+      if (!implementRetired.ok) expect(implementRetired.code).toBe("implements_idea_retired");
+      expect(acceptedAt).not.toBeNull();
+    });
+
+    it("unretire restores the original accept note, author and date", async () => {
+      const svc = makeService();
+      const idea = await fileIdea(svc, "Redirect old bootcamp URL");
+      expect((await accept(svc, idea)).ok).toBe(true);
+      const before = svc.get(idea)!;
+      expect((await retire(svc, idea, { retire_reason: "no_longer_relevant" })).ok).toBe(true);
+
+      const restored = await svc.update(idea, "unretire", { ...bob });
+      expect(restored.ok ? "ok" : `${restored.code}: ${restored.error}`).toBe("ok");
+      if (!restored.ok) return;
+      expect(restored.proposal.close_reason).toBe("accepted");
+      expect(restored.proposal.close_note).toBe(before.close_note);
+      expect(restored.proposal.closed_by).toBe(before.closed_by);
+      expect(restored.proposal.closed_at).toBe(before.closed_at);
+      expect(svc.stats().stalled_ideas).toBe(1);
+
+      const again = await svc.update(idea, "unretire", { ...bob });
+      expect(again.ok).toBe(false);
+      if (!again.ok) expect(again.code).toBe("not_retired");
+    });
+
+    it("refuses with an open edit, after an applied edit, for the proposer role, and with bad input", async () => {
+      const svc = makeService({ liveValues: { "meta.title": "Old" } });
+      const idea = await fileIdea(svc, "Redirect old bootcamp URL");
+
+      const notAccepted = await retire(svc, idea);
+      expect(notAccepted.ok).toBe(false);
+      if (!notAccepted.ok) expect(notAccepted.code).toBe("not_accepted_idea");
+
+      expect((await accept(svc, idea)).ok).toBe(true);
+
+      const sameRole = await svc.update(idea, "retire", {
+        ...alice,
+        retire_reason: "already_done",
+        close_note: RETIRE_NOTE,
+      });
+      expect(sameRole.ok).toBe(false);
+      if (!sameRole.ok) expect(sameRole.code).toBe("four_eyes");
+
+      const noReason = await retire(svc, idea, { retire_reason: undefined });
+      expect(noReason.ok).toBe(false);
+      if (!noReason.ok) expect(noReason.code).toBe("retire_reason_required");
+
+      const shortNote = await retire(svc, idea, { close_note: "already there" });
+      expect(shortNote.ok).toBe(false);
+      if (!shortNote.ok) expect(shortNote.code).toBe("retire_note_required");
+
+      const edit = await fileEdits(svc, "Redirect edit", idea);
+      expect(edit.ok).toBe(true);
+      if (!edit.ok) return;
+      const whileOpen = await retire(svc, idea);
+      expect(whileOpen.ok).toBe(false);
+      if (!whileOpen.ok) {
+        expect(whileOpen.code).toBe("implements_edit_open");
+        expect((whileOpen.details as { open_edit_id?: string }).open_edit_id).toBe(edit.proposal.id);
+      }
+
+      const applied = await svc.update(edit.proposal.id, "apply", { ...bob });
+      expect(applied.ok).toBe(true);
+      const afterApply = await retire(svc, idea);
+      expect(afterApply.ok).toBe(false);
+      if (!afterApply.ok) expect(afterApply.code).toBe("idea_already_implemented");
+      expect(svc.get(idea)!.close_reason).toBe("accepted");
+    });
+
+    it("retires once the only implementing edit was withdrawn", async () => {
+      const svc = makeService({ liveValues: { "meta.title": "Old" } });
+      const idea = await fileIdea(svc, "Redirect old bootcamp URL");
+      expect((await accept(svc, idea)).ok).toBe(true);
+      const edit = await fileEdits(svc, "Redirect edit", idea);
+      if (!edit.ok) throw new Error(edit.error);
+      const withdrawn = await svc.update(edit.proposal.id, "withdraw", {
+        ...alice,
+        close_note: "The redirect is already live, so this edit is a no-op.",
+      });
+      expect(withdrawn.ok).toBe(true);
+      expect(svc.stats().stalled_ideas).toBe(1);
+      expect((await retire(svc, idea)).ok).toBe(true);
+      expect(svc.stats().stalled_ideas).toBe(0);
+    });
+
+    it("similar-proposal matches say when the match was retired", async () => {
+      const seed = makeService();
+      const idea = await fileIdea(seed, "Redirect old bootcamp URL");
+      expect((await accept(seed, idea)).ok).toBe(true);
+      expect((await retire(seed, idea)).ok).toBe(true);
+
+      const svc = createProposalService({
+        site: SITE,
+        issueExists: () => true,
+        captureBaseline: () => ({ values: {} }),
+        applyUpdates: async () => ({ ok: true }),
+        findSimilar: async () => [{ id: idea, title: idea, score: 0.93 }],
+      });
+      const res = await svc.create(
+        {
+          kind: "idea",
+          title: "Redirect the old bootcamp URL again",
+          summary: "Send the retired bootcamp URL to the current program page so old links keep working. ".repeat(2),
+          related_entries: [PAGE],
+        },
+        alice,
+      );
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.code).toBe("similar_proposals");
+      expect(res.error).toContain("retired as already done");
+      const match = (res as { similar?: Array<Record<string, unknown>> }).similar?.[0];
+      expect(match).toMatchObject({
+        id: idea,
+        title: "Redirect old bootcamp URL",
+        status: "finished",
+        close_reason: "already_done",
+        retired: { reason: "already_done", note: RETIRE_NOTE },
+      });
+    });
+  });
+
   it("stores author and resolver actors on blockers and clears the resolver on reopen", async () => {
     const svc = makeService();
     const summary =
@@ -2477,6 +3047,7 @@ describe("content proposals", () => {
       username: "blake",
       actor: author,
       body,
+      staff_summary: STAFF_SUMMARY,
     });
     expect(added.ok).toBe(true);
     if (!added.ok) return;
@@ -2528,6 +3099,174 @@ describe("content proposals", () => {
     expect(uiBlocker?.author_actor).toEqual({ type: "ui" });
   });
 
+  it("emits blocker added, resolved and reopened events with blocker details", async () => {
+    const svc = makeService();
+    const body =
+      "On live es blog hello, CTA should mention Coding Bootcamp because the form currently misroutes leads to the wrong product funnel.";
+    const created = await svc.create(
+      {
+        title: "Blocker events",
+        summary: "Patch the CTA title on the Spanish blog so the product name is explicit. ".repeat(2),
+        entries: [sampleEntry()],
+      },
+      { username: "alice" },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const id = created.proposal.id;
+    const reviewer = { type: "mcp" as const, role: "proposal_reviewer", model: "xai/grok-4" };
+    const added = await svc.update(id, "add_blocker", {
+      username: "blake",
+      actor: reviewer,
+      body,
+      staff_summary: STAFF_SUMMARY,
+    });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    const bid = added.proposal.blockers[0]!.id;
+
+    const writer = { type: "mcp" as const, role: "copy_editor" };
+    await svc.update(id, "claim", { username: "alice", actor: writer });
+    const resolveNote = "Updated CTA title to name Coding Bootcamp on the Spanish blog.";
+    const resolved = await svc.update(id, "resolve_blocker", {
+      username: "alice",
+      actor: writer,
+      blocker_id: bid,
+      resolve_note: resolveNote,
+    });
+    expect(resolved.ok).toBe(true);
+    const reopened = await svc.update(id, "reopen_blocker", {
+      username: "blake",
+      actor: reviewer,
+      blocker_id: bid,
+    });
+    expect(reopened.ok).toBe(true);
+
+    const events = listEvents({ site: SITE, limit: 200 })
+      .filter((e) => (e.payload as { proposal_id?: string }).proposal_id === id)
+      .filter((e) => e.type.startsWith("proposal_blocker_"));
+    const byType = (t: string) => events.find((e) => e.type === t)!;
+
+    const addedEv = byType("proposal_blocker_added");
+    expect(addedEv.payload).toMatchObject({ blocker_id: bid, staff_summary: STAFF_SUMMARY, body });
+    expect(addedEv.payload.paused).toBeUndefined();
+    expect(addedEv.attribution[0]).toMatchObject({ author: "blake", actor: reviewer });
+
+    const resolvedEv = byType("proposal_blocker_resolved");
+    expect(resolvedEv.payload).toMatchObject({
+      blocker_id: bid,
+      resolve_note: resolveNote,
+      open_blocker_count: 0,
+      blocker_author: "blake",
+      blocker_author_actor_type: "mcp",
+    });
+    expect(resolvedEv.attribution[0]?.author).toBe("alice");
+
+    const reopenedEv = byType("proposal_blocker_reopened");
+    expect(reopenedEv.payload).toMatchObject({
+      blocker_id: bid,
+      open_blocker_count: 1,
+      blocker_author: "blake",
+      blocker_author_actor_type: "mcp",
+    });
+  });
+
+  it("marks blocker events on a paused proposal so webhooks skip them", async () => {
+    const svc = makeService();
+    const created = await svc.create(
+      {
+        title: "Paused blocker",
+        summary: "Patch the CTA title on the Spanish blog so the product name is explicit. ".repeat(2),
+        entries: [sampleEntry()],
+      },
+      { username: "alice" },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const id = created.proposal.id;
+    const escalated = await svc.update(id, "escalate", {
+      username: "steward",
+      actor: { type: "ui" },
+      escalated_note:
+        "Pausing agents on this proposal while staff review the product claim in the CTA copy.",
+    });
+    expect(escalated.ok).toBe(true);
+
+    const staff = await svc.update(id, "add_blocker", {
+      username: "casey",
+      actor: { type: "ui" },
+      body: "On live es blog hello, CTA should mention Coding Bootcamp because the form misroutes leads.",
+    });
+    expect(staff.ok).toBe(true);
+
+    const ev = listEvents({ site: SITE, limit: 200 }).find(
+      (e) =>
+        e.type === "proposal_blocker_added" &&
+        (e.payload as { proposal_id?: string }).proposal_id === id,
+    );
+    expect(ev?.payload.paused).toBe(true);
+  });
+
+  it("requires a plain-English staff_summary from agents and reuses the body for staff notes", async () => {
+    const svc = makeService();
+    const created = await svc.create(
+      {
+        title: "Staff summary blocker",
+        summary: "Patch the CTA title on the Spanish blog so the product name is explicit. ".repeat(2),
+        entries: [sampleEntry()],
+      },
+      { username: "alice" },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const id = created.proposal.id;
+    const agent = { type: "mcp" as const, role: "proposal_reviewer" };
+    const body =
+      "CTA op on `sections[0].data.cta.title` still names the old bootcamp; display_values_change fires on apply, so leads misroute.";
+
+    const missing = await svc.update(id, "add_blocker", { username: "blake", actor: agent, body });
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.code).toBe("blocker_staff_summary_required");
+
+    const codey = await svc.update(id, "add_blocker", {
+      username: "blake",
+      actor: agent,
+      body,
+      staff_summary: "The op on cta.title still names the old bootcamp, see display_values_change.",
+    });
+    expect(codey.ok).toBe(false);
+    if (!codey.ok) {
+      expect(codey.code).toBe("blocker_staff_summary_not_plain");
+      const problems = (codey.details as { problems: string[] }).problems.join(" ");
+      expect(problems).toContain('"cta.title"');
+      expect(problems).toContain('"display_values_change"');
+      expect(problems).toContain('"op"');
+    }
+
+    const ok = await svc.update(id, "add_blocker", {
+      username: "blake",
+      actor: agent,
+      body,
+      staff_summary: STAFF_SUMMARY,
+    });
+    expect(ok.ok).toBe(true);
+    if (!ok.ok) return;
+    expect(ok.proposal.blockers[0]!.body).toBe(body);
+    expect(ok.proposal.blockers[0]!.staff_summary).toBe(STAFF_SUMMARY);
+
+    const staffNote =
+      "The button at the top still sends people to the old bootcamp page. Point it at AI Flex before approving.";
+    const staff = await svc.update(id, "add_blocker", {
+      username: "casey",
+      actor: { type: "ui" },
+      body: staffNote,
+    });
+    expect(staff.ok).toBe(true);
+    if (!staff.ok) return;
+    const uiBlocker = staff.proposal.blockers.find((b) => b.author === "casey");
+    expect(uiBlocker?.staff_summary).toBe(staffNote);
+  });
+
   it("stamps reviewer_action_by on non-author add/resolve/reopen and never for the author", async () => {
     const svc = makeService();
     const summary =
@@ -2544,7 +3283,12 @@ describe("content proposals", () => {
     if (!created.ok) return;
     const id = created.proposal.id;
 
-    const selfAdd = await svc.update(id, "add_blocker", { username: "alice", actor: authorActor, body });
+    const selfAdd = await svc.update(id, "add_blocker", {
+      username: "alice",
+      actor: authorActor,
+      body,
+      staff_summary: STAFF_SUMMARY,
+    });
     expect(selfAdd.ok).toBe(true);
     if (!selfAdd.ok) return;
     expect(selfAdd.proposal.reviewer_action_at).toBeNull();
@@ -3923,5 +4667,71 @@ describe("blocked inactivity sweep", () => {
     backdate(id, 31);
     await svc.blockedSweep();
     expect(svc.list({ outcome_review: "none" }).proposals.map((p) => p.id)).not.toContain(id);
+  });
+});
+
+describe("attach_variant and agent-invented session ids", () => {
+  beforeEach(() => {
+    resetPipelineDbCache();
+    clearSiteSqliteCacheForTests();
+    rmSite();
+    ensurePipelineDb(SITE, { skipBackup: true });
+  });
+
+  afterEach(() => {
+    resetPipelineDbCache();
+    clearSiteSqliteCacheForTests();
+    rmSite();
+  });
+
+  const seo = { type: "mcp" as const, client: "Cursor", role: "seo_specialist", model: "cursor/auto" };
+  const summary = "Patch the CTA title on the Spanish blog before the agent attaches its prepared draft. ".repeat(2);
+
+  async function createWithSession(svc: ReturnType<typeof makeService>, agentSessionId: string, slug: string) {
+    const created = await svc.create(
+      { title: "Attach later", summary, agent_session_id: agentSessionId, entries: [sampleEntry({ slug })] },
+      { username: "alice", actor: seo },
+    );
+    if (!created.ok) throw new Error(created.error);
+    return created.proposal.id;
+  }
+
+  it("legacy invented id: same proposer can attach from a new server-issued session", async () => {
+    const svc = makeService();
+    const id = await createWithSession(svc, "new", "legacy-same");
+    const res = await svc.update(id, "attach_variant", {
+      username: "alice",
+      actor: seo,
+      agent_session_id: "d2b2f51c-9fc3-4f86-93bd-03951f678da2",
+      variant: "agent-fix",
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.proposal.entries[0]!.variant).toBe("agent-fix");
+  });
+
+  it("legacy invented id: another role cannot attach", async () => {
+    const svc = makeService();
+    const id = await createWithSession(svc, "new", "legacy-other");
+    const res = await svc.update(id, "attach_variant", {
+      username: "alice",
+      actor: { ...seo, role: "copy_editor" },
+      agent_session_id: "new",
+      variant: "agent-fix",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe("session_mismatch");
+  });
+
+  it("server-issued id: a different session of the same proposer still cannot attach", async () => {
+    const svc = makeService();
+    const id = await createWithSession(svc, "11111111-2222-4333-8444-555555555555", "uuid-strict");
+    const res = await svc.update(id, "attach_variant", {
+      username: "alice",
+      actor: seo,
+      agent_session_id: "d2b2f51c-9fc3-4f86-93bd-03951f678da2",
+      variant: "agent-fix",
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe("session_mismatch");
   });
 });

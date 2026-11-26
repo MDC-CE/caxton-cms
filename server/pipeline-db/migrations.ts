@@ -9,7 +9,7 @@ import {
 } from "../events/types";
 import { sameAgentIdentity, type AgentActorLike } from "../../shared/agent-identity";
 
-export const PIPELINE_SCHEMA_VERSION = 36;
+export const PIPELINE_SCHEMA_VERSION = 46;
 
 export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
   {
@@ -730,6 +730,207 @@ export const PIPELINE_MIGRATIONS: PipelineMigration[] = [
       db.exec(`
         CREATE INDEX IF NOT EXISTS idx_lead_submissions_product_id ON lead_submissions (product_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_lead_submissions_product_slug ON lead_submissions (product_slug, created_at);
+      `);
+    },
+  },
+  {
+    version: 37,
+    name: "content_proposals_applies_after",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      for (const name of ["applies_after_proposal_id", "dependent_overdue_flagged_at"]) {
+        if (!tableHasColumn(db, "content_proposals", name)) {
+          db.exec(`ALTER TABLE content_proposals ADD COLUMN ${name} TEXT`);
+        }
+      }
+    },
+  },
+  {
+    version: 38,
+    name: "content_proposals_applies_after_index",
+    up(db) {
+      if (!tableHasColumn(db, "content_proposals", "applies_after_proposal_id")) return;
+      db.exec(
+        "CREATE INDEX IF NOT EXISTS idx_content_proposals_applies_after ON content_proposals (applies_after_proposal_id)",
+      );
+    },
+  },
+  {
+    version: 39,
+    name: "content_proposals_url_slug_override",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "url_slug_override_json")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN url_slug_override_json TEXT");
+      }
+    },
+  },
+  {
+    version: 40,
+    name: "content_proposal_blockers_staff_summary",
+    up(db) {
+      if (!tableExists(db, "content_proposal_blockers")) return;
+      if (!tableHasColumn(db, "content_proposal_blockers", "staff_summary")) {
+        db.exec("ALTER TABLE content_proposal_blockers ADD COLUMN staff_summary TEXT");
+      }
+    },
+  },
+  {
+    version: 41,
+    name: "lead_submissions_product_persona",
+    up(db) {
+      if (!tableExists(db, "lead_submissions")) return;
+      for (const name of ["product", "persona"]) {
+        if (!tableHasColumn(db, "lead_submissions", name)) {
+          db.exec(`ALTER TABLE lead_submissions ADD COLUMN ${name} TEXT`);
+        }
+      }
+    },
+  },
+  {
+    version: 42,
+    name: "lead_submissions_product_persona_pairs",
+    up(db) {
+      if (!tableExists(db, "lead_submissions")) return;
+      if (!tableHasColumn(db, "lead_submissions", "product_persona")) {
+        db.exec("ALTER TABLE lead_submissions ADD COLUMN product_persona TEXT");
+      }
+    },
+  },
+  {
+    version: 43,
+    name: "content_proposals_evidence",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "evidence_dismissals_json")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN evidence_dismissals_json TEXT NOT NULL DEFAULT '[]'");
+      }
+      if (!tableHasColumn(db, "content_proposals", "evidence_check_json")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN evidence_check_json TEXT");
+      }
+    },
+  },
+  {
+    version: 44,
+    name: "content_proposals_accept_snapshot",
+    up(db) {
+      if (!tableExists(db, "content_proposals")) return;
+      if (!tableHasColumn(db, "content_proposals", "accept_snapshot_json")) {
+        db.exec("ALTER TABLE content_proposals ADD COLUMN accept_snapshot_json TEXT");
+      }
+    },
+  },
+  {
+    version: 45,
+    name: "lead_outbox_and_delivery_attempts",
+    up(db) {
+      // payload_enc / response_body_enc hold personal data, AES-256-GCM encrypted; wiped after delivery or 30 days.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS lead_outbox (
+          submission_id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          payload_enc TEXT,
+          webhook_source TEXT,
+          url_host TEXT NOT NULL DEFAULT '',
+          method TEXT NOT NULL DEFAULT 'POST',
+          attempts INTEGER NOT NULL DEFAULT 0,
+          cycle_attempts INTEGER NOT NULL DEFAULT 0,
+          next_attempt_at INTEGER,
+          lease_until INTEGER,
+          last_http_status INTEGER,
+          last_error_kind TEXT,
+          last_error_message TEXT,
+          browser_hash TEXT,
+          form TEXT,
+          is_test INTEGER NOT NULL DEFAULT 0,
+          pulled_from_production INTEGER NOT NULL DEFAULT 0,
+          alerted_at INTEGER,
+          requeued_at INTEGER,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          delivered_at INTEGER,
+          payload_wiped_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_lead_outbox_due ON lead_outbox (status, next_attempt_at);
+        CREATE INDEX IF NOT EXISTS idx_lead_outbox_browser_form ON lead_outbox (browser_hash, form, created_at);
+        CREATE INDEX IF NOT EXISTS idx_lead_outbox_created ON lead_outbox (created_at);
+        CREATE TABLE IF NOT EXISTS lead_delivery_attempts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          submission_id TEXT NOT NULL,
+          attempt INTEGER NOT NULL,
+          started_at INTEGER NOT NULL,
+          duration_ms INTEGER,
+          url_host TEXT,
+          http_status INTEGER,
+          error_kind TEXT,
+          error_message TEXT,
+          response_body_enc TEXT,
+          response_headers_json TEXT,
+          trigger TEXT NOT NULL DEFAULT 'submit'
+        );
+        CREATE INDEX IF NOT EXISTS idx_lead_delivery_attempts_submission
+          ON lead_delivery_attempts (submission_id, attempt);
+        CREATE INDEX IF NOT EXISTS idx_lead_delivery_attempts_started ON lead_delivery_attempts (started_at);
+      `);
+    },
+  },
+  {
+    version: 46,
+    name: "public_url_change_log",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS public_url_state (
+          url TEXT PRIMARY KEY,
+          entry_key TEXT,
+          content_type TEXT,
+          slug TEXT,
+          locale TEXT,
+          updated_at TEXT,
+          first_seen_at INTEGER NOT NULL,
+          last_seen_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS public_url_changes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          url TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          previous_url TEXT,
+          entry_key TEXT,
+          content_type TEXT,
+          slug TEXT,
+          locale TEXT,
+          updated_at TEXT,
+          cause_event_id INTEGER,
+          detected_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_public_url_changes_detected ON public_url_changes (detected_at);
+        CREATE INDEX IF NOT EXISTS idx_public_url_changes_url ON public_url_changes (url);
+        CREATE TABLE IF NOT EXISTS public_url_consumers (
+          consumer TEXT PRIMARY KEY,
+          last_change_id INTEGER NOT NULL DEFAULT 0,
+          last_run_at INTEGER,
+          last_status TEXT,
+          last_error TEXT,
+          last_submitted_count INTEGER NOT NULL DEFAULT 0,
+          verified_at INTEGER,
+          rejected_since INTEGER,
+          next_attempt_at INTEGER,
+          stopped_at INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS public_url_scan_state (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          last_scan_at INTEGER,
+          paused_reason TEXT,
+          held_reason TEXT,
+          held_removed_count INTEGER NOT NULL DEFAULT 0,
+          held_at INTEGER,
+          release_next_drop INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS public_url_pending_updates (
+          url TEXT PRIMARY KEY,
+          entry_key TEXT,
+          cause_event_id INTEGER,
+          queued_at INTEGER NOT NULL
+        );
       `);
     },
   },

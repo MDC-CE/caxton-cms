@@ -22,6 +22,7 @@ import {
   EXISTING_DEMAND_STAFF_NOTE,
   FAST_DECAY_NEWS_STAFF_NOTE,
   BROKEN_URL_STAFF_NOTE,
+  EVIDENCE_MISSING_STAFF_NOTE,
   worseDamageClass,
   hasTitleDescriptionOps,
   isTitleDescriptionOnlyOps,
@@ -50,9 +51,11 @@ import {
 } from "./idea-funnel";
 import { reviewIdeaContentTypes, type IdeaContentTypeStrategy } from "./idea-content-type";
 import {
+  IDEA_SEO_TARGET_METRICS_MISSING_WARN,
   IDEA_SEO_TARGET_MISSING_WARN,
   describeIdeaSeoTarget,
   ideaSeoTargetComplete,
+  ideaSeoTargetHasMetrics,
   seoTargetDiff,
   type IdeaSeoTarget,
 } from "./idea-seo-target";
@@ -60,8 +63,11 @@ import {
   collectClaimCueTextFromOps,
   evaluateClaimCues,
   hasClaimRelevantPendingOps,
+  hasThirdPartyCue,
+  textFromUnknown,
   type ClaimCueVerdict,
 } from "./claim-cues";
+import type { EvidenceCheck } from "./evidence-match";
 import {
   DECISION_ID_TOUCHES_OUTCOME_FIGURES,
   type TouchesOutcomeFiguresOutcome,
@@ -156,6 +162,12 @@ export type ReviewContext = {
   needs_site_facts_check?: boolean;
   /** Jev site-facts check result (categories the proposal touches). */
   site_facts?: SiteFactsCheck;
+  /** Third-party cue hit and no evidence check was passed — caller matches evidence and re-classifies. */
+  needs_evidence_check?: boolean;
+  /** Named third-party claims vs evidence databases (own site + fallback site). */
+  evidence?: EvidenceCheck;
+  /** New named claims with no evidence row and no staff dismissal — apply refuses with evidence_missing. */
+  evidence_block?: boolean;
   /** Persisted when Jev enrichment ran. */
   jev?: {
     called: true;
@@ -230,6 +242,7 @@ export type ClassifyProposalReviewOpts = {
     idea_funnel?: ProposalRecord["idea_funnel"];
     idea_seo_target?: ProposalRecord["idea_seo_target"];
     seo_target_override?: ProposalRecord["seo_target_override"];
+    url_slug_override?: ProposalRecord["url_slug_override"];
     affected_entries?: ProposalRecord["affected_entries"];
     created_at?: ProposalRecord["created_at"];
   };
@@ -239,6 +252,8 @@ export type ClassifyProposalReviewOpts = {
   ideaSeoTargetMonitored?: (contentType: string) => boolean;
   /** Edits implementing an idea: that idea's locked keyword + cluster. */
   implementedIdeaSeoTarget?: IdeaSeoTarget | null;
+  /** Edits implementing an idea: the language address it locked ({ locale, url_slug }). */
+  implementedIdeaUrlSlug?: { contentType: string; slug: string; locale: string; url_slug: string } | null;
   relatedOpen?: RelatedOpenProposal[];
   /** Snapshot from DB for change detection. */
   snapshot?: { damage_class?: string } | null;
@@ -262,7 +277,38 @@ export type ClassifyProposalReviewOpts = {
   variableDefinitions?: Record<string, VariableDefinition> | null;
   /** Jev site-facts check result. Omit on first pass — sets needs_site_facts_check instead. */
   siteFactsCheck?: SiteFactsCheck | null;
+  /** Evidence matching result. Omit on first pass — sets needs_evidence_check when the cue hits. */
+  evidenceCheck?: EvidenceCheck | null;
 };
+
+/** Text the evidence check reads: same as site facts (pending op values / promote draft, or the idea brief). */
+export function evidenceInputText(
+  proposal: Pick<ProposalRecord, "kind" | "entries" | "title" | "summary">,
+  promoteDraftText?: string | null,
+): string {
+  return siteFactsInputText(proposal, promoteDraftText);
+}
+
+/** Live text the proposal replaces (baseline before-values of pending edits). Ideas: none. */
+export function evidenceLiveText(proposal: Pick<ProposalRecord, "kind" | "entries">): string {
+  if (proposal.kind !== "edits") return "";
+  const work = proposal.entries.filter((e) => !e.status || e.status === "pending" || e.status === "failed");
+  const parts: string[] = [];
+  for (const e of work.length ? work : proposal.entries) {
+    const values = e.baseline_context?.values;
+    if (values && typeof values === "object") parts.push(textFromUnknown(values));
+  }
+  return parts.filter((s) => s.trim()).join("\n");
+}
+
+/** Proposal kinds whose text can publish a named claim. */
+export function evidenceCheckApplies(
+  proposal: Pick<ProposalRecord, "kind" | "entries" | "title" | "summary">,
+  promoteDraftText?: string | null,
+): boolean {
+  if (proposal.kind !== "edits" && proposal.kind !== "idea") return false;
+  return hasThirdPartyCue(evidenceInputText(proposal, promoteDraftText));
+}
 
 const MAX_THINK = 6;
 
@@ -547,6 +593,30 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
           message: `Implements an idea with locked SEO target ${describeIdeaSeoTarget(locked)}; the new page's draft is seeded with it.`,
         });
       }
+    }
+
+    const lockedSlug = opts.implementedIdeaUrlSlug;
+    if (lockedSlug) {
+      const target = toClassify.find(
+        (e) => e.contentType === lockedSlug.contentType && e.slug === lockedSlug.slug && e.locale === lockedSlug.locale,
+      );
+      const slugOp = target?.ops?.find((o) => o.field_path === "slug" && typeof o.value === "string");
+      const proposed = typeof slugOp?.value === "string" ? slugOp.value : null;
+      warnings.push(
+        proposed && proposed !== lockedSlug.url_slug
+          ? {
+              code: "idea_url_slug_override",
+              message:
+                `Locked ${lockedSlug.locale} address: "${lockedSlug.url_slug}". These edits set slug "${proposed}". ` +
+                `Override reason: ${proposal.url_slug_override?.reason ?? "(none)"}. Reviewer: is the reason credible?`,
+            }
+          : {
+              code: "idea_url_slug_locked",
+              message:
+                `Implements an idea that locked the ${lockedSlug.locale} address "${lockedSlug.url_slug}" (slug: in ${lockedSlug.locale}.yml); ` +
+                `the folder name "${lockedSlug.slug}" stays the page ID and other languages keep their addresses.`,
+            },
+      );
     }
 
     for (const e of toClassify) {
@@ -847,6 +917,13 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
         code: "idea_seo_target",
         message: `SEO target: ${describeIdeaSeoTarget(proposal.idea_seo_target)}. Reviewer: keyword matches the brief, hub fits the topic, members are real posts, standalone reason is credible.`,
       });
+      if (!ideaSeoTargetHasMetrics(proposal.idea_seo_target)) {
+        warnings.push({
+          code: IDEA_SEO_TARGET_METRICS_MISSING_WARN,
+          message:
+            "idea_seo_target has no kw_monthly_volume and/or kw_difficulty. Accept still works. Reviewer: add_blocker asking the author to copy both numbers from their keyword research into set_idea_seo_target (volume claimed only in the brief text is not enough). Metrics stay on the idea and are not written to the page.",
+        });
+      }
     }
 
     const typeReview = reviewIdeaContentTypes({
@@ -908,6 +985,58 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
 
   if (!review_mode_operative) {
     // already added review_mode_inert
+  }
+
+  const evidenceApplies = evidenceCheckApplies(proposal, promoteDraftText);
+  const evidenceCheck = evidenceApplies ? opts.evidenceCheck ?? null : null;
+  const needs_evidence_check = evidenceApplies && !evidenceCheck;
+  if (evidenceApplies) checklists.add("third_party_evidence");
+  const evidenceBlocking = evidenceCheck?.blocking ?? [];
+  if (evidenceCheck) {
+    if (evidenceCheck.outcome === "unavailable") {
+      warnings.push({
+        code: "evidence_check_unavailable",
+        message:
+          "Automated third-party check unavailable; only names already in evidence rows were matched and nothing is blocked. Check every named partner, press outlet or award by hand.",
+      });
+    }
+    const byStatus = (s: string) => evidenceCheck.claims.filter((c) => c.status === s).map((c) => c.name);
+    const unsourced = byStatus("unsourced");
+    const unverified = byStatus("unverified");
+    const alreadyLive = byStatus("already_live");
+    if (evidenceBlocking.length) {
+      warnings.push({
+        code: "evidence_missing",
+        message: `No evidence row for: ${evidenceBlocking.join(", ")}. Apply is refused until a row with a source link exists in an evidence database or staff dismiss the name.`,
+      });
+    }
+    if (unverified.length) {
+      warnings.push({
+        code: "evidence_unverified",
+        message: `Evidence row last changed by an agent (not verified by staff): ${unverified.join(", ")}. Ask staff to verify the row before apply.`,
+      });
+    }
+    if (unsourced.length) {
+      warnings.push({
+        code: "evidence_unsourced",
+        message: `Evidence row has no source link: ${unsourced.join(", ")}. Warning only.`,
+      });
+    }
+    const notArchived = evidenceCheck.claims
+      .filter((c) => c.status === "sourced" && c.row?.archive_status && c.row.archive_status !== "archived" && c.row.archive_status !== "none")
+      .map((c) => c.name);
+    if (notArchived.length) {
+      warnings.push({
+        code: "evidence_not_archived",
+        message: `Evidence row's source link has no Internet Archive copy yet: ${notArchived.join(", ")}. Warning only; the server archives it on the live server.`,
+      });
+    }
+    if (alreadyLive.length) {
+      warnings.push({
+        code: "evidence_already_live",
+        message: `Already on the live page (not new in this proposal): ${alreadyLive.join(", ")}. Warning only.`,
+      });
+    }
   }
 
   const orderedIds = selectThinkTemplates(checklists);
@@ -1050,6 +1179,10 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
   if (liveSituations.length && !block_apply) {
     staffSituation = `${staffSituation} Review situations: ${liveSituations.join(", ")}.`;
   }
+  if (evidenceBlocking.length && !block_apply) {
+    staffSituation = `${staffSituation} ${EVIDENCE_MISSING_STAFF_NOTE}`;
+    summaryParts.push(`No evidence for: ${evidenceBlocking.join(", ")}.`);
+  }
 
   return {
     undo_cost,
@@ -1121,6 +1254,9 @@ export function classifyProposalReview(opts: ClassifyProposalReviewOpts): Review
     ...(factHits.length ? { fact_variable_names: factHits.map((h) => h.name) } : {}),
     ...(needs_site_facts_check ? { needs_site_facts_check: true } : {}),
     ...(siteFactsCheck ? { site_facts: siteFactsCheck } : {}),
+    ...(needs_evidence_check ? { needs_evidence_check: true } : {}),
+    ...(evidenceCheck ? { evidence: evidenceCheck } : {}),
+    ...(evidenceBlocking.length ? { evidence_block: true } : {}),
     ...(countsAsLeadForm ? { counts_as_lead_hint: true } : {}),
     ...(claimCueJevOutcome
       ? {

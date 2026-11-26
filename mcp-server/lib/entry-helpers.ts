@@ -248,7 +248,9 @@ export function templateVarsNoteForBodyModel(bodyModel: string): string {
   const common =
     "{{ entry.<field> }} resolves from this type's field_mapping (plus slug/locale/image/updated_at aliases). " +
     "Not the shared shell filename. Legacy {{ single.* }} still resolves on delivery; saves reject single.*. " +
-    "In listing item_template, entry.* means each list row.";
+    "In listing item_template, entry.* means each list row. " +
+    "{{ funnel.products }} is the stored funnel list (array or \"all\"), same lookup as meta; it does not encode and does not add the program slug. " +
+    "{{ entry.funnel_products_encoded_ids }} on program, landing, and page is the URI-encoded {product, persona, product_persona} id string (none / all); only program adds its own slug when missing. Not Fields, not SEO; does not write _common.yml or the dataLayer.";
   if (bodyModel === "locale_fields_plus_shared_single") {
     return (
       common +

@@ -16,6 +16,7 @@ import {
 } from "@shared/playground-catalog";
 import { FAQ_DB_NAME, isFaqIndexable } from "@shared/playground-faqs";
 import { databaseManager, type DatabaseManager } from "./database";
+import { getJobState, setJobState } from "./db-job-state";
 import { gcs } from "./gcs";
 import { child } from "./logger";
 import { getDefaultContentFolder } from "./site-config";
@@ -45,10 +46,16 @@ export interface DatabaseSearchResult {
 
 interface CacheRef {
   slug: string;
+  /** Row key from the site-scoped collection (vectorItemKey). */
+  key?: string;
+  /** Row position; legacy (bare-name) collections only. */
   _idx?: number;
   score: number;
   destiny_code?: string;
 }
+
+type ItemKeyFn = (item: Record<string, unknown>, fields: string[]) => string;
+type ItemKeyMap = Map<string, Record<string, unknown>>;
 
 interface CachePayload {
   writtenAt: string;
@@ -163,36 +170,92 @@ function isExpired(writtenAtMs: number): boolean {
   return Date.now() - writtenAtMs > SEARCH_CACHE_TTL_MS;
 }
 
-function resolveRefs(
-  refs: CacheRef[],
+const keyMapMemo = new Map<string, { sig: string; map: ItemKeyMap }>();
+
+/** Row key → item, rebuilt only when the database copy or the embedded fields change. */
+export function getItemKeyMap(
+  memoKey: string,
+  fetchedAt: string,
+  items: Record<string, unknown>[],
+  fields: string[],
+  keyFn: ItemKeyFn,
+): ItemKeyMap {
+  const sig = `${fetchedAt}|${items.length}|${fields.join(",")}`;
+  const hit = keyMapMemo.get(memoKey);
+  if (hit && hit.sig === sig) return hit.map;
+  const map: ItemKeyMap = new Map();
+  for (const item of items) {
+    const k = keyFn(item, fields);
+    if (!map.has(k)) map.set(k, item);
+  }
+  keyMapMemo.set(memoKey, { sig, map });
+  return map;
+}
+
+function resolveLegacyRef(
+  ref: { slug: string; _idx?: number; destiny_code?: string },
   allItems: Record<string, unknown>[],
-): { items: Record<string, unknown>[]; scores: Record<string, number> } {
-  const items: Record<string, unknown>[] = [];
-  const scores: Record<string, number> = {};
-  for (const ref of refs) {
-    let item: Record<string, unknown> | undefined;
-    if (ref.destiny_code) {
-      item = allItems.find((candidate) => (
-        String(candidate.destiny_code ?? "") === ref.destiny_code
-        && String(candidate.slug ?? candidate.id ?? "") === ref.slug
-      ));
-    }
-    // Prefer stable id/slug before positional _idx (filtered FAQ lists shift indices).
-    if (!item) {
-      item = allItems.find((i) => String(i.slug ?? i.id ?? "") === ref.slug);
-    }
-    if (!item && ref._idx !== undefined && ref._idx >= 0 && ref._idx < allItems.length) {
-      const candidate = allItems[ref._idx];
-      if (String(candidate.slug ?? candidate.id ?? "") === ref.slug || !ref.slug) {
-        item = candidate;
-      }
-    }
-    if (item) {
-      items.push(item);
-      scores[String(item.slug ?? item.id ?? items.length - 1)] = ref.score;
+): Record<string, unknown> | undefined {
+  if (ref.destiny_code) {
+    const byDestiny = allItems.find((candidate) => (
+      String(candidate.destiny_code ?? "") === ref.destiny_code
+      && String(candidate.slug ?? candidate.id ?? "") === ref.slug
+    ));
+    if (byDestiny) return byDestiny;
+  }
+  // Prefer stable id/slug before positional _idx (filtered FAQ lists shift indices).
+  const bySlug = allItems.find((i) => String(i.slug ?? i.id ?? "") === ref.slug);
+  if (bySlug) return bySlug;
+  if (ref._idx !== undefined && ref._idx >= 0 && ref._idx < allItems.length) {
+    const candidate = allItems[ref._idx];
+    const candidateSlug = String(candidate.slug ?? candidate.id ?? "");
+    // Slugless rows were stored with their position as `slug`.
+    if (candidateSlug === ref.slug || !ref.slug || !candidateSlug) {
+      return candidate;
     }
   }
-  return { items, scores };
+  return undefined;
+}
+
+/** Resolve hits/refs to items: by key when present, else legacy `_idx`/slug. Drops duplicates. */
+export function resolveRefs(
+  refs: CacheRef[],
+  allItems: Record<string, unknown>[],
+  getKeyMap?: () => ItemKeyMap | null,
+): { items: Record<string, unknown>[]; scores: Record<string, number>; refs: CacheRef[] } {
+  const items: Record<string, unknown>[] = [];
+  const scores: Record<string, number> = {};
+  const kept: CacheRef[] = [];
+  const seen = new Set<Record<string, unknown>>();
+  let keyMap: ItemKeyMap | null | undefined;
+  for (const ref of refs) {
+    let item: Record<string, unknown> | undefined;
+    if (ref.key) {
+      if (keyMap === undefined) keyMap = getKeyMap?.() ?? null;
+      item = keyMap?.get(ref.key);
+    } else {
+      item = resolveLegacyRef(ref, allItems);
+    }
+    if (!item || seen.has(item)) continue;
+    seen.add(item);
+    items.push(item);
+    kept.push(ref);
+    scores[String(item.slug ?? item.id ?? items.length - 1)] = ref.score;
+  }
+  return { items, scores, refs: kept };
+}
+
+/** Per database: the newest index `changedAt` already applied to L1 in this process. */
+const appliedChangedAt = new Map<string, number>();
+
+/** The worker re-embedded rows: drop L1 entries written before that (other processes cannot reach this cache). */
+function dropStaleMemory(dbName: string, changedAtMs: number): void {
+  if (!Number.isFinite(changedAtMs) || changedAtMs <= 0) return;
+  if ((appliedChangedAt.get(dbName) ?? 0) >= changedAtMs) return;
+  appliedChangedAt.set(dbName, changedAtMs);
+  for (const [key, entry] of memoryCache.entries()) {
+    if (key.startsWith(`${dbName}|`) && entry.writtenAt < changedAtMs) memoryCache.delete(key);
+  }
 }
 
 async function readGcsCache(
@@ -466,9 +529,27 @@ export async function searchDatabaseItems(
       ? rawItems.filter((item) => isFaqIndexable(item))
       : rawItems;
 
+  const contentRoot = typeof dbm.getContentRoot === "function" ? dbm.getContentRoot() : undefined;
+  const indexState = getJobState(dbName, contentRoot).index;
+  const changedAtMs = indexState.changedAt ? Date.parse(indexState.changedAt) : 0;
+  dropStaleMemory(dbName, changedAtMs);
+
+  const vector = vectorEnabled ? await import("./vector-search") : null;
+  const fields = vsConfig?.fields ?? [];
+  const keyMapFor = (): ItemKeyMap | null =>
+    vector && fields.length > 0
+      ? getItemKeyMap(
+          `${contentRoot ?? contentFolder}|${dbName}`,
+          cacheResult.fetched_at,
+          allItems,
+          fields,
+          vector.vectorItemKey,
+        )
+      : null;
+
   const mem = memoryCache.get(memKey);
   if (mem && !isExpired(mem.writtenAt)) {
-    const { items, scores } = resolveRefs(mem.payload.refs, allItems);
+    const { items, scores } = resolveRefs(mem.payload.refs, allItems, keyMapFor);
     const { page: sliced } = pageOf(items, (i) => i, kind, offset, limit);
     return {
       items: sliced,
@@ -479,10 +560,12 @@ export async function searchDatabaseItems(
     };
   }
 
-  const gcsPayload = await readGcsCache(dbName, normalizedQ, locale, contentFolder, identity);
+  const gcsRaw = await readGcsCache(dbName, normalizedQ, locale, contentFolder, identity);
+  const gcsPayload =
+    gcsRaw && !(changedAtMs > 0 && Date.parse(gcsRaw.writtenAt) < changedAtMs) ? gcsRaw : null;
   if (gcsPayload) {
     writeMemory(memKey, gcsPayload);
-    const { items, scores } = resolveRefs(gcsPayload.refs, allItems);
+    const { items, scores } = resolveRefs(gcsPayload.refs, allItems, keyMapFor);
     const { page: sliced } = pageOf(items, (i) => i, kind, offset, limit);
     return {
       items: sliced,
@@ -496,23 +579,43 @@ export async function searchDatabaseItems(
   let fallbackReason: SearchFallbackReason | undefined;
   let fallbackMessage: string | undefined;
 
-  if (vectorEnabled) {
-    const { search: vectorSearch, isAvailable } = await import("./vector-search");
-    const available = await isAvailable();
+  if (vector) {
+    const available = await vector.isAvailable();
+    const queueSync = () => {
+      if (typeof dbm.queueVectorIndex === "function") void dbm.queueVectorIndex(dbName, "missing_collection");
+    };
 
     if (!available) {
       fallbackReason = "vector_store_unavailable";
       fallbackMessage =
         'Vector store (Qdrant) is unreachable. Search fell back to exact keyword matching — related words like "certificate" / "certification" will not match unless the exact substring appears.';
     } else {
+      // A partially built site-scoped collection is never searched: until the
+      // first sync finishes, use the legacy collection or keyword matching.
       const neighborLimit = descriptionsDb ? DESCRIPTION_SEARCH_LIMIT : SEARCH_CACHE_CEILING;
-      const searchResults = await vectorSearch(
-        dbName,
-        normalizedQ,
-        neighborLimit,
-        locale,
-        descriptionsDb ? kind : undefined,
-      );
+      const siteCollection = vector.siteCollectionName(contentRoot ?? contentFolder, dbName);
+      const siteReady = indexState.ready === true && indexState.collection === siteCollection;
+      let collection: string | null = siteReady ? siteCollection : null;
+      if (!siteReady) {
+        queueSync();
+        const legacy = vector.legacyCollectionName(dbName);
+        if (await vector.collectionExists(legacy).catch(() => false)) collection = legacy;
+      }
+
+      const response = collection
+        ? await vector.search(
+            collection,
+            normalizedQ,
+            neighborLimit,
+            locale,
+            descriptionsDb ? kind : undefined,
+          )
+        : { hits: [], missingCollection: true };
+      if (response.missingCollection && siteReady) {
+        setJobState(dbName, "index", { ready: false }, contentRoot);
+        queueSync();
+      }
+      const searchResults = response.hits;
 
       if (searchResults.length > 0) {
         const orderedWithScores: Array<{
@@ -520,43 +623,38 @@ export async function searchDatabaseItems(
           score: number;
           ref: CacheRef;
         }> = [];
-        for (const r of searchResults) {
-          let item: Record<string, unknown> | undefined;
-          if (descriptionsDb) {
-            item = allItems.find((candidate) => (
-              String(candidate.slug ?? candidate.id ?? "") === r.slug
-              && (!r.destiny_code || String(candidate.destiny_code ?? "") === r.destiny_code)
-            ));
-          } else if (dbName === FAQ_DB_NAME) {
-            const key = String(r.slug ?? "");
-            item = rawItems.find(
-              (candidate) =>
-                String(candidate.id ?? "") === key || String(candidate.slug ?? "") === key,
-            );
-            if (item && !isFaqIndexable(item)) item = undefined;
-          } else {
-            if (r._idx !== undefined && r._idx >= 0 && r._idx < allItems.length) {
-              item = allItems[r._idx];
-            }
-            if (!item) {
-              item = allItems.find((i) => String(i.slug ?? i.id ?? "") === r.slug);
-            }
-          }
-          if (!item) continue;
+        const resolved = resolveRefs(
+          searchResults.map((r) => ({
+            slug: r.slug,
+            score: r.score,
+            ...(r.destiny_code ? { destiny_code: r.destiny_code } : {}),
+            ...(collection === siteCollection && r.key
+              ? { key: r.key }
+              : dbName === FAQ_DB_NAME
+                ? {}
+                : { _idx: r._idx }),
+          })),
+          dbName === FAQ_DB_NAME ? rawItems : allItems,
+          keyMapFor,
+        );
+        resolved.items.forEach((item, i) => {
+          if (dbName === FAQ_DB_NAME && !isFaqIndexable(item)) return;
           if (locale) {
             const itemLocale = String(item.locale ?? item.language ?? item.lang ?? "");
-            if (itemLocale.toLowerCase() !== locale.toLowerCase()) continue;
+            if (itemLocale.toLowerCase() !== locale.toLowerCase()) return;
           }
-          orderedWithScores.push({
-            item,
-            score: r.score,
-            ref: descriptionsDb
-              ? { slug: r.slug, score: r.score, destiny_code: String(item.destiny_code ?? r.destiny_code ?? "") }
+          const ref = resolved.refs[i];
+          const scoredRef: CacheRef =
+            descriptionsDb
+              ? {
+                  ...ref,
+                  destiny_code: String(item.destiny_code ?? ref.destiny_code ?? ""),
+                }
               : dbName === FAQ_DB_NAME
-                ? { slug: String(item.id ?? item.slug ?? r.slug), score: r.score }
-                : { slug: r.slug, _idx: r._idx, score: r.score },
-          });
-        }
+                ? { slug: String(item.id ?? item.slug ?? ref.slug), score: ref.score }
+                : ref;
+          orderedWithScores.push({ item, score: scoredRef.score, ref: scoredRef });
+        });
 
         if (orderedWithScores.length > 0) {
           const payload: CachePayload = {
@@ -584,8 +682,9 @@ export async function searchDatabaseItems(
       }
 
       fallbackReason = "semantic_index_empty";
-      fallbackMessage =
-        "Semantic index returned no results (collection may be empty or not built yet). Run Force Refresh / Re-index, then retry. Until then, search uses exact keyword matching only.";
+      fallbackMessage = collection
+        ? "Semantic index returned no results (collection may be empty). A background re-index is queued when it is missing. Until then, search uses exact keyword matching only."
+        : "Semantic index is being built in the background. Until it finishes, search uses exact keyword matching only.";
     }
   }
 
@@ -646,6 +745,8 @@ export function peekDatabaseSearchCacheL1(
 /** Test helper — clears L1 only. */
 export function clearDatabaseSearchMemoryCacheForTests(): void {
   memoryCache.clear();
+  keyMapMemo.clear();
+  appliedChangedAt.clear();
 }
 
 /**
