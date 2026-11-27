@@ -2,7 +2,7 @@ import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fieldEditors as heroFieldEditors } from "@shared/component-registry/hero/v1.0/field-editors";
+import { fieldEditors as heroFieldEditors } from "../../../../fixtures/ci/content-learning-mdc-edu/component-registry/hero/v1.0/field-editors";
 import {
   buildFormAppearanceClearUpdates,
   splitFormAppearanceEntries,

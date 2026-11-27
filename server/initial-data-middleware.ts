@@ -520,6 +520,7 @@ function isSmallLogoEntry(entry: PreloadRegistryImageEntry | undefined): boolean
 
 export function resolvePreloadHints(
   payload: InitialDataPayload | null,
+  contentRoot?: string,
 ): PreloadHint[] {
   if (!payload) return [];
 
@@ -527,7 +528,7 @@ export function resolvePreloadHints(
   let registryData: PreloadRegistryPayload | null = null;
 
   const knownPageApiPaths = new Set(
-    Object.keys(getAllConfigs()).map((type) => getApiPath(type)),
+    Object.keys(getAllConfigs(contentRoot)).map((type) => getApiPath(type)),
   );
   knownPageApiPaths.add("/api/database-single");
 
@@ -677,7 +678,7 @@ export function injectSsrMetaTags(
   html = replaceMetaContent(html, "property", "og:locale", toOgLocale(lang));
 
   const knownPageApiPaths = new Set(
-    Object.keys(getAllConfigs()).map((type) => getApiPath(type)),
+    Object.keys(getAllConfigs(contentRoot)).map((type) => getApiPath(type)),
   );
   knownPageApiPaths.add("/api/database-single");
 

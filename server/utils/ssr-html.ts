@@ -105,7 +105,7 @@ export function assembleSsrDocument(opts: {
     ? replaceLiteral(opts.template, '<div id="root"></div>', `<div id="root">${opts.appHtml}</div>`)
     : opts.template;
 
-  html = injectPreloadTags(html, buildPreloadTags(resolvePreloadHints(opts.payload)));
+  html = injectPreloadTags(html, buildPreloadTags(resolvePreloadHints(opts.payload, opts.contentRoot)));
   html = injectSsrMetaTags(html, opts.payload, opts.contentRoot, opts.url);
 
   if (opts.ssrSchemaHtml) {

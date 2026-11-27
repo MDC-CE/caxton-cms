@@ -628,8 +628,8 @@ export function registerVersioningRoutes(app: Express): void {
     { rate: "staffWrite" },
     async (req, res) => {
       const { contentType, contentSlug: requestSlug, locale, variantSlug } = req.params;
-      if (!isValidType(contentType)) {
-        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+      if (!isValidType(contentType, getContentRoot(res))) {
+        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders(getContentRoot(res)) });
         return;
       }
       const auth = await requireCapability(req, res, "content_view", contentType);
@@ -1215,8 +1215,8 @@ export function registerVersioningRoutes(app: Express): void {
     { rate: "staffWrite" },
     async (req, res) => {
       const { contentType, contentSlug, locale } = req.params;
-      if (!isValidType(contentType)) {
-        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+      if (!isValidType(contentType, getContentRoot(res))) {
+        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders(getContentRoot(res)) });
         return;
       }
       const auth = await requireCapability(req, res, "content_allocate_traffic", contentType);
@@ -1845,8 +1845,8 @@ export function registerVersioningRoutes(app: Express): void {
     { rate: "staffWrite" },
     async (req, res) => {
       const { contentType, contentSlug, locale, variantSlug } = req.params;
-      if (!isValidType(contentType)) {
-        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+      if (!isValidType(contentType, getContentRoot(res))) {
+        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders(getContentRoot(res)) });
         return;
       }
       const auth = await requireCapability(req, res, "content_delete_variant", contentType);

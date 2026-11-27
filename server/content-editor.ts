@@ -3166,8 +3166,8 @@ export async function checkSlugRename(
   if (!contentType || !folderSlug || !locale || !newSlug) {
     return { ok: false, statusCode: 400, code: "missing_fields", error: "Missing required fields: contentType, folderSlug, locale, newSlug" };
   }
-  if (!isValidType(contentType)) {
-    return { ok: false, statusCode: 400, code: "invalid_type", error: `Invalid type. Must be one of: ${getAllTypes().join(", ")}` };
+  if (!isValidType(contentType, ci.contentRoot)) {
+    return { ok: false, statusCode: 400, code: "invalid_type", error: `Invalid type. Must be one of: ${getAllTypes(ci.contentRoot).join(", ")}` };
   }
   if (!isSlug(newSlug)) {
     return { ok: false, statusCode: 400, code: "invalid_slug", error: "Invalid slug format. Use lowercase letters, numbers, and hyphens only." };
@@ -4022,14 +4022,14 @@ export async function createContentEntry(
     }
   }
 
-  const folderPath = path.join(process.cwd(), rootName, getFolder(type), folderSlug);
+  const folderPath = path.join(process.cwd(), rootName, getFolder(type, contentRootAbs), folderSlug);
   if (fs.existsSync(folderPath)) {
     return { success: false, statusCode: 409, error: `A ${type} with slug "${folderSlug}" already exists` };
   }
 
   fs.mkdirSync(folderPath, { recursive: true });
   const draftVariant = DEFAULT_DRAFT_VARIANT;
-  const relFolder = `${rootName}/${getFolder(type)}/${folderSlug}`;
+  const relFolder = `${rootName}/${getFolder(type, contentRootAbs)}/${folderSlug}`;
 
   const writeDraftVersioning = (locales: string[]) => {
     const data = buildDraftVersioning(locales, draftVariant);
@@ -4068,7 +4068,7 @@ export async function createContentEntry(
 
       if (sourceSlug) {
         const srcType = sourceType || type;
-        const srcFolder = getFolder(srcType);
+        const srcFolder = getFolder(srcType, contentRootAbs);
         const candidate = path.join(process.cwd(), rootName, srcFolder, sourceSlug);
         if (fs.existsSync(candidate)) {
           foundSourceFolder = candidate;
@@ -4082,7 +4082,7 @@ export async function createContentEntry(
         if (previewMatch) {
           const previewType = sourceType || previewMatch[1];
           const previewSlug = previewMatch[2];
-          const srcFolder = getFolder(previewType);
+          const srcFolder = getFolder(previewType, contentRootAbs);
           const candidate = path.join(process.cwd(), rootName, srcFolder, previewSlug);
           if (fs.existsSync(candidate)) {
             foundSourceFolder = candidate;
@@ -4109,7 +4109,7 @@ export async function createContentEntry(
             localeTitles,
           });
           for (const file of result.copiedFiles) {
-            markFileAsModified(`${rootName}/${getFolder(type)}/${folderSlug}/${file}`, author);
+            markFileAsModified(`${rootName}/${getFolder(type, contentRootAbs)}/${folderSlug}/${file}`, author);
           }
           const crossTypeStripInfo = deprecatedStripPayload(
             stripDeprecatedFromEntryFolder(folderPath, typeConfigForParams?.editor),
@@ -4188,7 +4188,7 @@ export async function createContentEntry(
             success: true,
             data: {
               success: true, slugEn: enSlug, slugEs: esSlug, type,
-              directory: `${rootName}/${getFolder(type)}/${folderSlug}`,
+              directory: `${rootName}/${getFolder(type, contentRootAbs)}/${folderSlug}`,
               duplicatedFrom: sourceUrl || `${resolvedSourceType}/${sourceSlug}`, typeChanged: true,
               conversion: { from: resolvedSourceType, to: type, copiedFiles: result.copiedFiles, strippedFields: result.strippedFields, replacedVars: result.replacedVars },
               ...(result.clearedFields.length > 0 ? { clearedFields: result.clearedFields } : {}),
@@ -4253,14 +4253,14 @@ export async function createContentEntry(
           if (!isContentFile) {
             if (draftFirst) continue;
             fs.writeFileSync(path.join(folderPath, file), rawContent);
-            markFileAsModified(`${rootName}/${getFolder(type)}/${folderSlug}/${file}`, author);
+            markFileAsModified(`${rootName}/${getFolder(type, contentRootAbs)}/${folderSlug}/${file}`, author);
             continue;
           }
 
           const parsed = contentIndex.safeYamlLoad(rawContent) as Record<string, unknown> | null;
           if (!parsed) {
             fs.writeFileSync(path.join(folderPath, file), rawContent);
-            markFileAsModified(`${rootName}/${getFolder(type)}/${folderSlug}/${file}`, author);
+            markFileAsModified(`${rootName}/${getFolder(type, contentRootAbs)}/${folderSlug}/${file}`, author);
             continue;
           }
 
@@ -4406,7 +4406,7 @@ export async function createContentEntry(
           const { file } = parsedDupFiles[i];
           const content = safeYamlDump(regeneratedDup[i], { lineWidth: 120, noRefs: true, sortKeys: false });
           fs.writeFileSync(path.join(folderPath, file), content);
-          markFileAsModified(`${rootName}/${getFolder(type)}/${folderSlug}/${file}`, author);
+          markFileAsModified(`${rootName}/${getFolder(type, contentRootAbs)}/${folderSlug}/${file}`, author);
           const dm = file.match(new RegExp(`^${draftVariant}\\.([a-z]{2}(?:-[a-z]{2})?)\\.ya?ml$`));
           if (dm) draftLocalesWritten.push(dm[1]);
         }
@@ -4449,7 +4449,7 @@ export async function createContentEntry(
           success: true,
           data: {
             success: true, slugEn: enSlug, slugEs: esSlug, type,
-            directory: `${rootName}/${getFolder(type)}/${folderSlug}`,
+            directory: `${rootName}/${getFolder(type, contentRootAbs)}/${folderSlug}`,
             duplicatedFrom: sourceUrl || `${resolvedSourceType}/${sourceSlug}`,
             ...(clearedFields.length > 0 ? { clearedFields } : {}),
             ...deprecatedStripInfo,
@@ -4565,7 +4565,7 @@ export async function createContentEntry(
     success: true,
     data: {
       success: true, slugEn: enSlug, slugEs: esSlug, type,
-      directory: `${rootName}/${getFolder(type)}/${folderSlug}`,
+      directory: `${rootName}/${getFolder(type, contentRootAbs)}/${folderSlug}`,
       files: createdFiles,
       skippedLocales: skipLocales.length > 0 ? skipLocales : undefined,
     },
