@@ -306,14 +306,27 @@ function loadStaticContentTypeItems(
   contentRoot: string,
   ci: ContentIndex,
 ): Record<string, unknown>[] {
+  const slugs = ci.listContentSlugs(contentType as ContentType);
   const cached = getStaticListingCache(contentRoot, contentType);
-  if (cached) return cached;
+  if (cached) {
+    // Self-heal when the in-memory projection was built before new folders
+    // appeared (common on long-lived Sidequest workers that rebuild HTML).
+    const cachedSlugs = new Set(
+      cached
+        .map((item) => String(item.entry_id || item.slug || "").trim())
+        .filter(Boolean),
+    );
+    const indexSlugs = new Set(slugs.map((slug) => String(slug).trim()).filter(Boolean));
+    const sameSize = cachedSlugs.size === indexSlugs.size;
+    const sameMembers = sameSize && [...indexSlugs].every((slug) => cachedSlugs.has(slug));
+    if (sameMembers) return cached;
+    invalidateStaticListingCache(contentType, contentRoot);
+  }
 
   const mapping = getFieldMapping(contentType, contentRoot);
   const localeKey = getLocaleKey(contentType, contentRoot) || "lang";
   const directory = getDirectory(contentType, contentRoot) || contentType;
   const typeDir = path.join(contentRoot, directory);
-  const slugs = ci.listContentSlugs(contentType as ContentType);
   const items: Record<string, unknown>[] = [];
   let idx = 0;
 

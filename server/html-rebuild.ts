@@ -22,6 +22,7 @@ import {
   parseHtmlCacheKey,
   snapshotHotHtmlPages,
 } from "./html-page-cache";
+import { invalidateStaticListingCache } from "./static-listing-cache";
 import { AUDIENCE_LLM_VARIANT } from "../shared/llm-html-audience";
 
 const log = child({ module: "html-rebuild" });
@@ -53,6 +54,9 @@ export function buildHtmlRebuildSite(contentRootInput: string, siteId?: string):
   const database = new DatabaseManager(contentRoot, mediaGallery);
   const contentIndex = new ContentIndex(contentRoot, database);
   contentIndex.scanFast();
+  // Sidequest is a long-lived process: an earlier listing projection can outlive
+  // new YAML entries. Drop it so HTML rebuilds re-read disk against this scan.
+  invalidateStaticListingCache(undefined, contentRoot);
   let domain = id;
   let contentFolder = id;
   let fallbackContentFolder: string | undefined;

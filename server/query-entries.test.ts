@@ -309,6 +309,46 @@ description: changed
       "Alpha Changed",
     );
   });
+
+  it("rebuilds static projections when the index gains a new slug", async () => {
+    const first = await queryEntries(
+      { from: { contentType: "blog" }, locale: "en" },
+      { contentIndex: ci, contentRoot },
+    );
+    expect(first.items).toHaveLength(2);
+
+    const postDelta = path.join(contentRoot, "blog", "post-delta");
+    fs.mkdirSync(postDelta, { recursive: true });
+    fs.writeFileSync(
+      path.join(postDelta, "_common.yml"),
+      `image: https://example.com/d.jpg
+published_at: '2025-08-01T00:00:00.000Z'
+status: PUBLISHED
+category: ai
+lang: en
+slug: post-delta
+`,
+      "utf-8",
+    );
+    fs.writeFileSync(
+      path.join(postDelta, "en.yml"),
+      `title: Delta Post
+description: new listing row
+`,
+      "utf-8",
+    );
+    ci.scanFast();
+
+    const rebuilt = await queryEntries(
+      { from: { contentType: "blog" }, locale: "en" },
+      { contentIndex: ci, contentRoot },
+    );
+    expect(rebuilt.items.map((i) => i.slug).sort()).toEqual([
+      "post-alpha",
+      "post-beta",
+      "post-delta",
+    ]);
+  });
 });
 
 describe("queryEntries database from", () => {
