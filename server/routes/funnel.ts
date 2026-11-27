@@ -26,11 +26,37 @@ import { markFileAsModified } from "../sync-state";
 import { child } from "../logger";
 import { enrollmentCardIds } from "@shared/resolveProductScope";
 import { buildServerPageTracking } from "../tracking-page-context";
+import { entryRefFailureMessage, resolveEntryRef, type EntryRefResult } from "../entry-ref";
+import { api } from "../rate-limit/api";
+import {
+  FUNNEL_PROPOSE_MAX_SLUGS,
+  proposeFunnelForSlugs,
+} from "../funnel-propose";
+import {
+  deleteFunnelSuggestion,
+  isFunnelSuggestionStale,
+  readFunnelSuggestion,
+  suggestedFunnelFromDoc,
+  suggestionListPayload,
+} from "../funnel-suggestion";
+import { DECISION_ID_FUNNEL_CLASSIFICATION } from "../ai/decisions";
 
 const log = child({ module: "routes/funnel" });
 
 function getContentRoot(res: Response): string {
   return (res.locals.site as { contentRoot?: string } | undefined)?.contentRoot ?? getDefaultContentRoot();
+}
+
+function getCI(res: Response): typeof contentIndex {
+  return (res.locals.site as { contentIndex?: typeof contentIndex } | undefined)?.contentIndex ?? contentIndex;
+}
+
+/**
+ * Callers send URL slugs (e.g. `ai-engineering-for-devs`); `_common.yml` lives under the page ID
+ * folder (`ai-engineering-devs`). Joining the raw slug creates a stray folder that shadows the page.
+ */
+function resolveFunnelEntry(res: Response, contentType: string, slug: string): EntryRefResult {
+  return resolveEntryRef(getCI(res), { contentType, ref: slug });
 }
 
 const funnelBindingSchema = z.union([
@@ -133,10 +159,207 @@ function storeJourneyMembership(
 }
 
 export function registerFunnelRoutes(app: Express): void {
+  api.post(
+    app,
+    "/api/content-types/:type/funnel/propose",
+    { rate: "expensiveAi" },
+    async (req: Request, res: Response) => {
+      const contentType = req.params.type;
+      const auth = await requireCapability(req, res, "content_edit_structure", contentType);
+      if (!auth.authorized) return;
+
+      const parsed = z
+        .object({
+          slugs: z.array(z.string()).min(1).max(FUNNEL_PROPOSE_MAX_SLUGS),
+        })
+        .safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({
+          error: `Body must include slugs: string[] (1–${FUNNEL_PROPOSE_MAX_SLUGS})`,
+          details: parsed.error.flatten(),
+        });
+      }
+
+      try {
+        const contentRoot = getContentRoot(res);
+        const ci = getCI(res);
+        const author = auth.author ?? "staff";
+        const resolvedSlugs: string[] = [];
+        const failedResolve: { slug: string; error: string; code?: string }[] = [];
+        for (const raw of parsed.data.slugs) {
+          const entry = resolveFunnelEntry(res, contentType, raw);
+          if (!entry.ok) {
+            failedResolve.push({
+              slug: raw,
+              error: entryRefFailureMessage(contentType, raw, entry),
+              code: entry.reason === "ambiguous" ? "ambiguous_slug" : "entry_not_found",
+            });
+            continue;
+          }
+          resolvedSlugs.push(entry.entryId);
+        }
+
+        const result = await proposeFunnelForSlugs({
+          contentType,
+          slugs: resolvedSlugs,
+          contentRoot,
+          contentIndex: ci,
+          author,
+        });
+
+        res.json({
+          ok: result.ok,
+          failed: [...failedResolve, ...result.failed],
+          decision_id: DECISION_ID_FUNNEL_CLASSIFICATION,
+        });
+      } catch (err) {
+        log.error({ err }, "POST funnel propose");
+        res.status(500).json({ error: String(err) });
+      }
+    },
+  );
+
+  api.get(
+    app,
+    "/api/content-types/:type/funnel/propose-prompt",
+    { rate: "publicRead" },
+    async (req: Request, res: Response) => {
+      const auth = await requireCapability(req, res, "content_edit_structure", req.params.type);
+      if (!auth.authorized) return;
+      res.json({
+        decision_id: DECISION_ID_FUNNEL_CLASSIFICATION,
+        about:
+          "Jev scores each selected page from title, hero, and CTAs against your product personas, then writes a pending suggestion file. Accept applies the live funnel; Reject or Edit Funnel drops the suggestion.",
+        questions: {
+          stage: "choice: awareness | consideration | decision | post-enrollment",
+          products_all: "noul: true site-wide story vs single-product fit",
+          personas: "noul per product persona (and product-only when audience is empty)",
+        },
+        suggestion_file: "_funnel_suggestion.yml",
+      });
+    },
+  );
+
+  api.post(
+    app,
+    "/api/content-types/:type/funnel/:slug/suggestion/accept",
+    { rate: "staffWrite" },
+    async (req: Request, res: Response) => {
+      const contentType = req.params.type;
+      const auth = await requireCapability(req, res, "content_edit_structure", contentType);
+      if (!auth.authorized) return;
+
+      try {
+        const entry = resolveFunnelEntry(res, contentType, req.params.slug);
+        if (!entry.ok) {
+          return res.status(entry.reason === "ambiguous" ? 409 : 404).json({
+            error: entryRefFailureMessage(contentType, req.params.slug, entry),
+            code: entry.reason === "ambiguous" ? "ambiguous_slug" : "entry_not_found",
+          });
+        }
+        const slug = entry.entryId;
+        const contentRoot = getContentRoot(res);
+        const doc = readFunnelSuggestion(contentType, slug, contentRoot);
+        if (!doc) {
+          return res.status(404).json({
+            error: "No pending funnel suggestion for this page.",
+            code: "suggestion_missing",
+          });
+        }
+
+        const live = readFunnelBlockFromFile(commonYmlPath(contentType, slug, contentRoot));
+        if (isFunnelSuggestionStale(doc, live)) {
+          deleteFunnelSuggestion(contentType, slug, contentRoot, auth.author ?? "staff");
+          return res.status(409).json({
+            error: "Suggestion is outdated because the live funnel changed. Propose again.",
+            code: "suggestion_stale",
+          });
+        }
+
+        const suggested = suggestedFunnelFromDoc(doc);
+        const result = prepareAndWriteFunnelMerge(
+          contentType,
+          slug,
+          {
+            touchStage: true,
+            stage: suggested.stage ?? null,
+            touchProducts: true,
+            products: suggested.products ?? null,
+          },
+          contentRoot,
+          assertFunnelAudienceGates,
+        );
+        if (!result.ok) {
+          return res.status(400).json({
+            error: result.error,
+            code: result.code,
+            details: result.details,
+            suggestion_kept: true,
+          });
+        }
+
+        if (result.relativePath) {
+          markFileAsModified(result.relativePath, auth.author ?? "staff", undefined, contentRoot);
+        }
+        deleteFunnelSuggestion(contentType, slug, contentRoot, auth.author ?? "staff");
+
+        const [{ clearPathStageIndex }, { clearPageStatsCache }] = await Promise.all([
+          import("../analytics/page-stats/resolve"),
+          import("../analytics/page-stats"),
+        ]);
+        clearPathStageIndex();
+        clearPageStatsCache();
+
+        res.json({
+          success: true,
+          funnel: result.coerced,
+          warnings: result.warnings,
+        });
+      } catch (err) {
+        log.error({ err }, "POST funnel suggestion accept");
+        res.status(500).json({ error: String(err) });
+      }
+    },
+  );
+
+  api.delete(
+    app,
+    "/api/content-types/:type/funnel/:slug/suggestion",
+    { rate: "staffWrite" },
+    async (req: Request, res: Response) => {
+      const contentType = req.params.type;
+      const auth = await requireCapability(req, res, "content_edit_structure", contentType);
+      if (!auth.authorized) return;
+
+      try {
+        const entry = resolveFunnelEntry(res, contentType, req.params.slug);
+        if (!entry.ok) {
+          return res.status(entry.reason === "ambiguous" ? 409 : 404).json({
+            error: entryRefFailureMessage(contentType, req.params.slug, entry),
+            code: entry.reason === "ambiguous" ? "ambiguous_slug" : "entry_not_found",
+          });
+        }
+        const slug = entry.entryId;
+        const contentRoot = getContentRoot(res);
+        const result = deleteFunnelSuggestion(
+          contentType,
+          slug,
+          contentRoot,
+          auth.author ?? "staff",
+        );
+        res.json({ success: true, deleted: result.deleted });
+      } catch (err) {
+        log.error({ err }, "DELETE funnel suggestion");
+        res.status(500).json({ error: String(err) });
+      }
+    },
+  );
+
   app.get("/api/content-types/:type/funnel/:slug", async (req: Request, res: Response) => {
     try {
       const contentType = req.params.type;
-      const slug = req.params.slug;
+      const entry = resolveFunnelEntry(res, contentType, req.params.slug);
+      const slug = entry.ok ? entry.entryId : req.params.slug;
       const contentRoot = getContentRoot(res);
       const filePath = commonYmlPath(contentType, slug, contentRoot);
       const funnel = readFunnelBlockFromFile(filePath);
@@ -144,7 +367,7 @@ export function registerFunnelRoutes(app: Express): void {
       const bindings = effectiveBindings(funnel, { contentType, contentSlug: slug });
 
       const enrollmentWarnings: { code: string; message: string; ids: string[] }[] = [];
-      const merged = contentIndex.loadMergedContent(contentType, slug, "en");
+      const merged = getCI(res).loadMergedContent(contentType, slug, "en");
       const sections = (merged.data as { sections?: unknown[] } | null)?.sections;
       if (Array.isArray(sections)) {
         const allCardIds: string[] = [];
@@ -214,7 +437,14 @@ export function registerFunnelRoutes(app: Express): void {
 
     try {
       const contentType = req.params.type;
-      const slug = req.params.slug;
+      const entry = resolveFunnelEntry(res, contentType, req.params.slug);
+      if (!entry.ok) {
+        return res.status(entry.reason === "ambiguous" ? 409 : 404).json({
+          error: entryRefFailureMessage(contentType, req.params.slug, entry),
+          code: entry.reason === "ambiguous" ? "ambiguous_slug" : "entry_not_found",
+        });
+      }
+      const slug = entry.entryId;
       const contentRoot = getContentRoot(res);
       // Path-touched merge: omitted keys leave current; null clears.
       const body = parsed.data;
@@ -241,6 +471,8 @@ export function registerFunnelRoutes(app: Express): void {
       if (result.relativePath) {
         markFileAsModified(result.relativePath, auth.author ?? "staff", undefined, contentRoot);
       }
+      // Edit Funnel cancels any pending auto-suggestion.
+      deleteFunnelSuggestion(contentType, slug, contentRoot, auth.author ?? "staff");
       if (body.stage !== undefined) {
         const [{ clearPathStageIndex }, { clearPageStatsCache }] = await Promise.all([
           import("../analytics/page-stats/resolve"),
@@ -264,4 +496,21 @@ export function registerFunnelRoutes(app: Express): void {
       res.status(500).json({ error: String(err) });
     }
   });
+}
+
+/** Attach non-stale suggestion for list rows; stale files are deleted best-effort. */
+export function attachFunnelSuggestionForList(
+  contentType: string,
+  slug: string,
+  liveFunnel: FunnelBlock,
+  contentRoot: string,
+  author = "system",
+): ReturnType<typeof suggestionListPayload> | null {
+  const doc = readFunnelSuggestion(contentType, slug, contentRoot);
+  if (!doc) return null;
+  if (isFunnelSuggestionStale(doc, liveFunnel)) {
+    deleteFunnelSuggestion(contentType, slug, contentRoot, author);
+    return null;
+  }
+  return suggestionListPayload(doc);
 }

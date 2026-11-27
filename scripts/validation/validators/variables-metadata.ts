@@ -14,13 +14,16 @@ import { getVariableManager, type VariableDefinition } from "../../../server/var
 import {
   isSystemManagedVariable,
   isVariableCategory,
+  isVariableSource,
   isVariableUnit,
   missingVariableMetadata,
+  normalizeVariableProducts,
 } from "../../../shared/variable-metadata";
 import {
   VARIABLES_METADATA_ISSUE_CODES,
   VARIABLES_METADATA_VALIDATOR_NAME,
 } from "./variables-metadata.issueCodes";
+import { listProductRows } from "../../../server/product/product-io";
 
 const TOKEN_RE = /\{\{\s*(global\.[a-zA-Z0-9_.]+)\s*(?:\|[^}]*)?\}\}/g;
 
@@ -45,12 +48,25 @@ function walkYamlFiles(dir: string): string[] {
   return out;
 }
 
+function valueAsUnitCheckString(raw: unknown): string | null {
+  if (typeof raw === "string") return raw;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const o = raw as { amount?: unknown; currency?: unknown };
+    if (typeof o.amount === "number") return String(o.amount);
+  }
+  return null;
+}
+
 function allValues(def: VariableDefinition): string[] {
   const vals: string[] = [];
-  if (typeof def.default === "string") vals.push(def.default);
-  for (const c of def.conditions ?? []) if (typeof c.value === "string") vals.push(c.value);
+  const push = (raw: unknown) => {
+    const s = valueAsUnitCheckString(raw);
+    if (s != null) vals.push(s);
+  };
+  if (def.default !== undefined) push(def.default);
+  for (const c of def.conditions ?? []) push(c.value);
   for (const m of [def.by_region, def.by_location, def.by_locale]) {
-    for (const v of Object.values(m ?? {})) if (typeof v === "string") vals.push(v);
+    for (const v of Object.values(m ?? {})) push(v);
   }
   return vals;
 }
@@ -90,7 +106,7 @@ export const variablesMetadataValidator: Validator = {
   name: VARIABLES_METADATA_VALIDATOR_NAME,
   issueCodes: VARIABLES_METADATA_ISSUE_CODES,
   description:
-    "Site variables (facts) need description + category; flags unit mismatches, deprecated variables in use, broken replaced_by, near-duplicate names",
+    "Site variables (facts) need description + category; flags unit/source/products issues, deprecated variables in use, broken replaced_by, near-duplicate names",
   apiExposed: true,
   estimatedDuration: "fast",
   category: "integrity",
@@ -107,6 +123,14 @@ export const variablesMetadataValidator: Validator = {
     const own = Object.entries(defs).filter(
       ([name, def]) => name.startsWith("global.") && !isSystemManagedVariable(name, def),
     );
+    let knownProductSlugs: Set<string> | null = null;
+    try {
+      knownProductSlugs = new Set(
+        listProductRows({ includePaused: true, contentRoot }).map((p) => p.content_slug),
+      );
+    } catch {
+      knownProductSlugs = null;
+    }
 
     for (const [name, def] of own) {
       const missing = missingVariableMetadata(name, def);
@@ -158,6 +182,50 @@ export const variablesMetadataValidator: Validator = {
               .join("; ")}.`,
             file: variablesFile,
             suggestion: VARIABLES_METADATA_ISSUE_CODES.VARIABLE_UNIT_MISMATCH.suggestion,
+          });
+        }
+      }
+      if (def.source && !isVariableSource(def.source)) {
+        errors.push({
+          type: "error",
+          code: "VARIABLE_INVALID_SOURCE",
+          message: `Variable "${name}" has unknown source "${def.source}".`,
+          file: variablesFile,
+          suggestion: VARIABLES_METADATA_ISSUE_CODES.VARIABLE_INVALID_SOURCE.suggestion,
+        });
+      }
+      if (def.products != null) {
+        if (!Array.isArray(def.products) || def.products.some((p) => typeof p !== "string")) {
+          errors.push({
+            type: "error",
+            code: "VARIABLE_INVALID_PRODUCTS",
+            message: `Variable "${name}" products must be a list of product content slugs.`,
+            file: variablesFile,
+            suggestion: VARIABLES_METADATA_ISSUE_CODES.VARIABLE_INVALID_PRODUCTS.suggestion,
+          });
+        } else if (knownProductSlugs && knownProductSlugs.size > 0) {
+          const normalized = normalizeVariableProducts(def.products) ?? [];
+          const unknown = normalized.filter((slug) => !knownProductSlugs!.has(slug));
+          if (unknown.length) {
+            warnings.push({
+              type: "warning",
+              code: "VARIABLE_UNKNOWN_PRODUCT",
+              message: `Variable "${name}" products unknown on this site: ${unknown.join(", ")}.`,
+              file: variablesFile,
+              suggestion: VARIABLES_METADATA_ISSUE_CODES.VARIABLE_UNKNOWN_PRODUCT.suggestion,
+            });
+          }
+        }
+      }
+      if (def.category === "price") {
+        const n = normalizeVariableProducts(def.products)?.length ?? 0;
+        if (n !== 1) {
+          warnings.push({
+            type: "warning",
+            code: "VARIABLE_PRICE_PRODUCTS_REQUIRED",
+            message: `Price variable "${name}" must link to exactly one product (has ${n}).`,
+            file: variablesFile,
+            suggestion: VARIABLES_METADATA_ISSUE_CODES.VARIABLE_PRICE_PRODUCTS_REQUIRED.suggestion,
           });
         }
       }

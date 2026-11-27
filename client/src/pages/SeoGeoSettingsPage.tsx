@@ -2,8 +2,10 @@ import { useEffect } from "react";
 import { Link, useLocation } from "wouter";
 import {
   IconBrandGoogle,
+  IconChartBar,
   IconPhoto,
   IconCode,
+  IconFileText,
   IconSearch,
   IconWorldSearch,
   IconWorldUpload,
@@ -13,24 +15,37 @@ import { OgImageTab } from "@/components/settings/OgImageTab";
 import { SchemaOrgTab } from "@/components/settings/SchemaOrgTab";
 import { SearchConsoleTab } from "@/components/settings/SearchConsoleTab";
 import { OpenRushTab } from "@/components/settings/OpenRushTab";
+import { DataForSeoTab } from "@/components/settings/DataForSeoTab";
 import { IndexNowTab } from "@/components/settings/IndexNowTab";
+import { LlmsTxtTab } from "@/components/settings/LlmsTxtTab";
 
-type SeoGeoTab = "og" | "schema" | "search-console" | "indexnow" | "openrush";
+type SeoGeoTab =
+  | "og"
+  | "schema"
+  | "search-console"
+  | "indexnow"
+  | "openrush"
+  | "dataforseo"
+  | "llms-txt";
 
 const SEO_TABS: SettingsSecondaryTab<SeoGeoTab>[] = [
   { id: "og", href: "/private/settings/seo/og", label: "OG Image", Icon: IconPhoto },
   { id: "schema", href: "/private/settings/seo/schema", label: "Schema org", Icon: IconCode },
+  { id: "llms-txt", href: "/private/settings/seo/llms-txt", label: "llms.txt", Icon: IconFileText },
   { id: "search-console", href: "/private/settings/seo/search-console", label: "Search Console", Icon: IconBrandGoogle },
   { id: "indexnow", href: "/private/settings/seo/indexnow", label: "IndexNow", Icon: IconWorldUpload },
   { id: "openrush", href: "/private/settings/seo/openrush", label: "OpenRush", Icon: IconWorldSearch },
+  { id: "dataforseo", href: "/private/settings/seo/dataforseo", label: "DataForSEO", Icon: IconChartBar },
 ];
 
 function resolveSeoTab(pathname: string): SeoGeoTab | null {
   if (pathname === "/private/settings/seo/og") return "og";
   if (pathname === "/private/settings/seo/schema") return "schema";
+  if (pathname === "/private/settings/seo/llms-txt") return "llms-txt";
   if (pathname === "/private/settings/seo/search-console") return "search-console";
   if (pathname === "/private/settings/seo/indexnow") return "indexnow";
   if (pathname === "/private/settings/seo/openrush") return "openrush";
+  if (pathname === "/private/settings/seo/dataforseo") return "dataforseo";
   return null;
 }
 
@@ -61,8 +76,9 @@ export default function SeoGeoSettingsPage() {
       backTestId="button-seo-geo-settings-back"
       description={
         <>
-          Open Graph capture credentials, Schema.org site definitions, Search Console inspection,
-          IndexNow notices to Bing, and OpenRush SERP snapshots. Brand logos, social links, and the default social image stay under{" "}
+          Open Graph capture credentials, Schema.org site definitions, public{" "}
+          <code className="text-xs">/llms.txt</code> for agents, Search Console inspection,
+          IndexNow notices to Bing, OpenRush SERP snapshots, and DataForSEO keyword metrics. Brand logos, social links, and the default social image stay under{" "}
           <Link href="/private/settings/brand" className="underline underline-offset-2 hover:text-foreground">
             General → Brand
           </Link>
@@ -79,9 +95,11 @@ export default function SeoGeoSettingsPage() {
       <div role="tabpanel">
         {activeTab === "og" && <OgImageTab />}
         {activeTab === "schema" && <SchemaOrgTab />}
+        {activeTab === "llms-txt" && <LlmsTxtTab />}
         {activeTab === "search-console" && <SearchConsoleTab />}
         {activeTab === "indexnow" && <IndexNowTab />}
         {activeTab === "openrush" && <OpenRushTab />}
+        {activeTab === "dataforseo" && <DataForSeoTab />}
       </div>
     </SettingsShell>
   );

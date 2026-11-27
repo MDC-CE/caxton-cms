@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import {AlertTriangle, ArrowLeft, ArrowLeftRight, ArrowRight, ArrowUpDown, Check, ChevronDown, ChevronUp, CircleCheck, CircleX, Clock, CloudUpload, Code, Copy, Database, Download, ExternalLink, Eye, File, HeartPulse, HelpCircle, Image, Info, Link as LinkIcon, Loader2, Network, Pencil, Play, Plus, RefreshCw, Save, Search, Server, Settings, ShieldCheck, SlidersHorizontal, Sparkles, Table, Tags, TestTube, Trash2, Upload, Wand2, Webhook, X} from "lucide-react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useRoute, Link, useLocation, useSearch } from "wouter";
@@ -59,8 +59,21 @@ import type { DatabaseEvidenceConfig, EvidenceRowTrust } from "@shared/evidence-
 import { EvidenceSourceKpiCard } from "@/components/databases/EvidenceSourceKpiCard";
 import { ArchiveColumnHeader, EvidenceArchiveCell } from "@/components/databases/EvidenceArchiveCell";
 import { EvidenceTrustLabel } from "@/components/databases/EvidenceTrustLabel";
+import {
+  SaveCancelledError,
+  useEvidenceDuplicateGuard,
+} from "@/components/databases/EvidenceDuplicateDialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { KpiLabelHelp } from "@/components/databases/KpiLabelHelp";
 import type { RowArchiveView } from "@shared/evidence-archive";
+import {
+  ensureLocalFilenameExtension,
+  isEmptyCreateableFilename,
+  sanitizeLocalFilenameInput,
+} from "@shared/local-db-filename";
+import { slugify, slugifyInput } from "@shared/slug";
+
+const SNAKE = { separator: "_" as const };
 
 const RELATIVE_FETCHED_AT_MAX_MS = 2 * 24 * 60 * 60 * 1000;
 
@@ -354,6 +367,16 @@ interface DatabaseItems {
   evidence_trust?: EvidenceRowTrust[];
   /** Evidence databases only: Internet Archive copy of each returned row's link. */
   evidence_archive?: RowArchiveView[];
+  /** Evidence databases only: rows each returned row looked like when it was saved past the warning. */
+  evidence_similar_to?: Array<Array<{ title: string | null; link: string | null; at: string }>>;
+}
+
+interface RejectionPreview {
+  storedIndex: number;
+  mode: "reject" | "restore";
+  translations: Array<{ index: number; title: string | null; locale: string | null }>;
+  sameLink: Array<{ index: number; title: string | null; locale: string | null }>;
+  rows: Array<{ index: number; title: string | null; locale: string | null }>;
 }
 
 interface KeyValuePair {
@@ -379,14 +402,6 @@ function flattenKeys(obj: unknown, prefix = ""): string[] {
     }
   }
   return paths;
-}
-
-function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9\s_-]/g, "")
-    .replace(/[\s-]+/g, "_")
-    .replace(/^_+|_+$/g, "");
 }
 
 async function parseDatabaseApiError(res: Response, fallback: string): Promise<string> {
@@ -647,6 +662,145 @@ function lastSegment(dotPath: string): string {
   return parts[parts.length - 1];
 }
 
+type LocalFileStatus = "idle" | "checking" | "found" | "not-found";
+
+function localFilePathHint(slug: string, filename: string): string {
+  return `4geeks-com/db/${slug || "<slug>"}/${filename || "your-file.json"}`;
+}
+
+/** True when Next/Save may proceed for a local source filename. */
+function canProceedLocalFile(
+  filename: string,
+  status: LocalFileStatus,
+  createEmptyConsent: boolean,
+): boolean {
+  const name = ensureLocalFilenameExtension(filename);
+  if (!name) return false;
+  if (status === "found") return true;
+  if (status === "not-found" && isEmptyCreateableFilename(name) && createEmptyConsent) return true;
+  return false;
+}
+
+function LocalFilenameFields({
+  slug,
+  filename,
+  onFilenameChange,
+  status,
+  createEmptyConsent,
+  onCreateEmptyConsentChange,
+  resultsPath,
+  onResultsPathChange,
+  mode,
+  inputId,
+  testIdPrefix,
+}: {
+  slug: string;
+  filename: string;
+  onFilenameChange: (value: string) => void;
+  status: LocalFileStatus;
+  createEmptyConsent: boolean;
+  onCreateEmptyConsentChange: (value: boolean) => void;
+  resultsPath: string;
+  onResultsPathChange: (value: string) => void;
+  mode: "create" | "edit";
+  inputId: string;
+  testIdPrefix: string;
+}) {
+  const ensuredName = ensureLocalFilenameExtension(filename);
+  const emptyCreateable = isEmptyCreateableFilename(filename);
+  const pathHint = localFilePathHint(slug, ensuredName || filename);
+
+  return (
+    <>
+      <div className="space-y-2">
+        <Label htmlFor={inputId}>Filename</Label>
+        <div className="relative">
+          <Input
+            id={inputId}
+            placeholder="e.g. products.json, data.csv"
+            value={filename}
+            onChange={(e) => onFilenameChange(sanitizeLocalFilenameInput(e.target.value))}
+            onBlur={() => {
+              if (filename.trim()) onFilenameChange(ensureLocalFilenameExtension(filename));
+            }}
+            data-testid={`input-${testIdPrefix}-local-filename`}
+            className="pr-8"
+          />
+          {status === "checking" && (
+            <Loader2 className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+          )}
+          {status === "found" && (
+            <Check className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-green-500" />
+          )}
+          {status === "not-found" && (
+            <AlertTriangle className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-amber-500" />
+          )}
+        </div>
+
+        {status === "found" && (
+          <div className="rounded-md bg-muted/50 border px-3 py-2 text-xs text-muted-foreground space-y-1">
+            <p className="font-medium text-foreground">File found</p>
+            <p>
+              Using{" "}
+              <code className="bg-muted px-1 rounded">{pathHint}</code>
+            </p>
+          </div>
+        )}
+
+        {status === "not-found" && emptyCreateable && (
+          <div className="rounded-md bg-muted/50 border px-3 py-2 text-xs text-muted-foreground space-y-2">
+            <p className="font-medium text-foreground">No file found — we can create an empty one</p>
+            <p>
+              Confirming creates an empty bank at{" "}
+              <code className="bg-muted px-1 rounded">{pathHint}</code>
+              {mode === "edit" ? ". This starts a new empty file; the previous file is left as-is (not deleted)." : "."}
+            </p>
+            <label className="flex items-start gap-2 cursor-pointer text-foreground">
+              <Checkbox
+                checked={createEmptyConsent}
+                onCheckedChange={(v) => onCreateEmptyConsentChange(v === true)}
+                data-testid={`checkbox-${testIdPrefix}-create-empty`}
+                className="mt-0.5"
+              />
+              <span>Yes, create the empty file for me</span>
+            </label>
+          </div>
+        )}
+
+        {status === "not-found" && !emptyCreateable && ensuredName && (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-muted-foreground space-y-1">
+            <p className="font-medium text-foreground flex items-center gap-1.5">
+              <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+              Add this file yourself
+            </p>
+            <p>
+              Empty auto-create only works for JSON or YAML. Place your file at{" "}
+              <code className="bg-muted px-1 rounded">{pathHint}</code>{" "}
+              before continuing.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {status === "found" && (
+        <div className="space-y-2">
+          <Label htmlFor={`${inputId}-results-path`}>Results Path (optional)</Label>
+          <Input
+            id={`${inputId}-results-path`}
+            placeholder="e.g. results, data.items"
+            value={resultsPath}
+            onChange={(e) => onResultsPathChange(e.target.value)}
+            data-testid={`input-${testIdPrefix}-local-results-path`}
+          />
+          <p className="text-xs text-muted-foreground">
+            For JSON files: dot-notation path to the array. Leave empty if the file is already an array.
+          </p>
+        </div>
+      )}
+    </>
+  );
+}
+
 function CreateDatabaseDialog({
   open,
   onOpenChange,
@@ -675,19 +829,31 @@ function CreateDatabaseDialog({
   const [params, setParams] = useState<KeyValuePair[]>([]);
   const [headers, setHeaders] = useState<KeyValuePair[]>([]);
   const [localFilename, setLocalFilename] = useState("");
-  const [localFileStatus, setLocalFileStatus] = useState<"idle" | "checking" | "found" | "not-found">("idle");
+  const [localFileStatus, setLocalFileStatus] = useState<LocalFileStatus>("idle");
+  const [createEmptyFileConsent, setCreateEmptyFileConsent] = useState(false);
   const [remoteUrl, setRemoteUrl] = useState("");
   const [datasetPickerOpen, setDatasetPickerOpen] = useState(false);
+
+  useEffect(() => {
+    setCreateEmptyFileConsent(false);
+  }, [localFilename, slug]);
+
+  useEffect(() => {
+    if (localFileStatus === "found" || localFileStatus === "checking") {
+      setCreateEmptyFileConsent(false);
+    }
+  }, [localFileStatus]);
 
   useEffect(() => {
     if (sourceType !== "local" || !localFilename.trim() || !slug.trim()) {
       setLocalFileStatus("idle");
       return;
     }
+    const checkName = ensureLocalFilenameExtension(localFilename) || localFilename.trim();
     setLocalFileStatus("checking");
     const timer = setTimeout(async () => {
       try {
-        const res = await apiFetch(`/api/databases/check-file?slug=${encodeURIComponent(slug)}&filename=${encodeURIComponent(localFilename.trim())}`);
+        const res = await apiFetch(`/api/databases/check-file?slug=${encodeURIComponent(slug)}&filename=${encodeURIComponent(checkName)}`);
         const data = await res.json();
         setLocalFileStatus(data.exists ? "found" : "not-found");
       } catch {
@@ -721,6 +887,7 @@ function CreateDatabaseDialog({
     setParams([]);
     setHeaders([]);
     setLocalFilename("");
+    setCreateEmptyFileConsent(false);
     setRemoteUrl("");
     setDatasetPickerOpen(false);
     setTesting(false);
@@ -732,17 +899,22 @@ function CreateDatabaseDialog({
   const handleNameChange = (val: string) => {
     setDisplayName(val);
     if (!slugTouched) {
-      setSlug(slugify(val));
+      setSlug(slugify(val, SNAKE));
     }
   };
 
   const buildSourceConfig = () => {
     if (sourceType === "local") {
+      const filename = ensureLocalFilenameExtension(localFilename);
+      const creatingEmpty =
+        localFileStatus === "not-found" &&
+        isEmptyCreateableFilename(filename) &&
+        createEmptyFileConsent;
       return {
         type: "local",
         local: {
-          filename: localFilename,
-          ...(resultsPath ? { results_path: resultsPath } : {}),
+          filename,
+          ...(!creatingEmpty && resultsPath ? { results_path: resultsPath } : {}),
         },
       };
     }
@@ -773,6 +945,12 @@ function CreateDatabaseDialog({
     return source;
   };
 
+  const isEmptyLocalCreate =
+    sourceType === "local" &&
+    localFileStatus === "not-found" &&
+    isEmptyCreateableFilename(localFilename) &&
+    createEmptyFileConsent;
+
   const handleTest = async () => {
     setTesting(true);
     setTestResult(null);
@@ -784,12 +962,15 @@ function CreateDatabaseDialog({
       });
       const data = await res.json();
       setTestResult(data);
-      if (data.success && data.sample) {
-        const paths = flattenKeys(data.sample);
+      const sampleItem =
+        data.sample ??
+        (Array.isArray(data.samples) && data.samples.length > 0 ? data.samples[0] : undefined);
+      if (data.success && sampleItem) {
+        const paths = flattenKeys(sampleItem);
         setFields(
           paths.map((p) => ({
             sourcePath: p,
-            normalizedKey: lastSegment(p),
+            normalizedKey: slugify(lastSegment(p), SNAKE) || lastSegment(p),
             enabled: true,
           }))
         );
@@ -807,10 +988,14 @@ function CreateDatabaseDialog({
   const handleCreate = async () => {
     setSaving(true);
     try {
+      if (sourceType === "local" && localFilename.trim()) {
+        setLocalFilename(ensureLocalFilenameExtension(localFilename));
+      }
       const fieldMapping: Record<string, string> = {};
       for (const f of fields) {
-        if (f.enabled && f.normalizedKey.trim()) {
-          fieldMapping[f.normalizedKey] = f.sourcePath;
+        const key = slugify(f.normalizedKey, SNAKE);
+        if (f.enabled && key) {
+          fieldMapping[key] = f.sourcePath;
         }
       }
 
@@ -825,7 +1010,7 @@ function CreateDatabaseDialog({
       const res = await apiFetch("/api/databases", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slug, config }),
+        body: JSON.stringify({ slug: slugify(slug, SNAKE) || slug, config }),
       });
 
       if (!res.ok) {
@@ -855,7 +1040,7 @@ function CreateDatabaseDialog({
     sourceType === "api"
       ? endpoint.trim().length > 0
       : sourceType === "local"
-      ? localFilename.trim().length > 0
+      ? canProceedLocalFile(localFilename, localFileStatus, createEmptyFileConsent)
       : remoteUrl.trim().length > 0;
   const canCreate = fields.some((f) => f.enabled) || fields.length === 0;
 
@@ -897,7 +1082,7 @@ function CreateDatabaseDialog({
                 placeholder="e.g. upcoming_cohorts"
                 value={slug}
                 onChange={(e) => {
-                  setSlug(e.target.value);
+                  setSlug(slugifyInput(e.target.value, SNAKE));
                   setSlugTouched(true);
                 }}
                 data-testid="input-db-slug"
@@ -972,7 +1157,7 @@ function CreateDatabaseDialog({
                   <SelectItem value="local">
                     <div className="flex items-center gap-2">
                       <Server className="h-4 w-4" />
-                      Local File
+                      Manual or local file
                     </div>
                   </SelectItem>
                   <SelectItem value="remote">
@@ -1047,53 +1232,19 @@ function CreateDatabaseDialog({
             )}
 
             {sourceType === "local" && (
-              <>
-                <div className="space-y-2">
-                  <Label htmlFor="db-local-filename">Filename</Label>
-                  <div className="relative">
-                    <Input
-                      id="db-local-filename"
-                      placeholder="e.g. products.json, data.csv"
-                      value={localFilename}
-                      onChange={(e) => setLocalFilename(e.target.value)}
-                      data-testid="input-db-local-filename"
-                      className="pr-8"
-                    />
-                    {localFileStatus === "checking" && (
-                      <Loader2 className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
-                    )}
-                    {localFileStatus === "found" && (
-                      <Check className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-green-500" />
-                    )}
-                    {localFileStatus === "not-found" && (
-                      <X className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-destructive" />
-                    )}
-                  </div>
-                  <div className="rounded-md bg-muted/50 border px-3 py-2 text-xs text-muted-foreground space-y-1">
-                    <p className="font-medium text-foreground">Where to place the file</p>
-                    <p>
-                      Put your file at{" "}
-                      <code className="bg-muted px-1 rounded">
-                        4geeks-com/db/{slug || "<slug>"}/<span className="text-foreground">{localFilename || "your-file.json"}</span>
-                      </code>{" "}
-                      before syncing.
-                    </p>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="db-local-results-path">Results Path (optional)</Label>
-                  <Input
-                    id="db-local-results-path"
-                    placeholder="e.g. results, data.items"
-                    value={resultsPath}
-                    onChange={(e) => setResultsPath(e.target.value)}
-                    data-testid="input-db-local-results-path"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    For JSON files: dot-notation path to the array. Leave empty if the file is already an array.
-                  </p>
-                </div>
-              </>
+              <LocalFilenameFields
+                slug={slug}
+                filename={localFilename}
+                onFilenameChange={setLocalFilename}
+                status={localFileStatus}
+                createEmptyConsent={createEmptyFileConsent}
+                onCreateEmptyConsentChange={setCreateEmptyFileConsent}
+                resultsPath={resultsPath}
+                onResultsPathChange={setResultsPath}
+                mode="create"
+                inputId="db-local-filename"
+                testIdPrefix="db"
+              />
             )}
 
             {sourceType === "remote" && (
@@ -1144,101 +1295,119 @@ function CreateDatabaseDialog({
 
         {step === 3 && (
           <div className="space-y-4">
-            <div className="flex items-center gap-2 flex-wrap">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleTest}
-                disabled={testing}
-                data-testid="button-test-connection"
+            {isEmptyLocalCreate ? (
+              <div
+                className="rounded-md bg-muted/50 border px-3 py-4 text-sm text-muted-foreground space-y-1"
+                data-testid="empty-local-create-note"
               >
-                {testing ? (
-                  <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
-                ) : (
-                  <TestTube className="h-3.5 w-3.5 mr-1" />
-                )}
-                Test Connection
-              </Button>
-              {testResult && (
-                <Badge variant={testResult.success ? "secondary" : "destructive"}>
-                  {testResult.success ? (
-                    <>
-                      <Check className="h-3 w-3 mr-1" />
-                      {testResult.item_count} items found
-                    </>
-                  ) : (
-                    <>
-                      <X className="h-3 w-3 mr-1" />
-                      Failed
-                    </>
-                  )}
-                </Badge>
-              )}
-            </div>
-
-            {testResult?.error && (
-              <div className="bg-destructive/10 border border-destructive/20 rounded-md p-3 text-xs text-destructive">
-                {testResult.error}
-              </div>
-            )}
-
-            {testResult?.success && fields.length > 0 && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <Label className="text-sm">Field Mapping</Label>
-                  <p className="text-xs text-muted-foreground">
-                    {fields.filter((f) => f.enabled).length} of {fields.length} fields selected
-                  </p>
-                </div>
-                <div className="border rounded-md divide-y max-h-64 overflow-y-auto">
-                  {fields.map((field, i) => (
-                    <div
-                      key={field.sourcePath}
-                      className="flex items-center gap-2 px-3 py-2"
-                      data-testid={`field-mapping-${i}`}
-                    >
-                      <Switch
-                        checked={field.enabled}
-                        onCheckedChange={(checked) => {
-                          const updated = [...fields];
-                          updated[i] = { ...updated[i], enabled: checked };
-                          setFields(updated);
-                        }}
-                        data-testid={`switch-field-${i}`}
-                      />
-                      <Input
-                        value={field.normalizedKey}
-                        onChange={(e) => {
-                          const updated = [...fields];
-                          updated[i] = { ...updated[i], normalizedKey: e.target.value };
-                          setFields(updated);
-                        }}
-                        className="h-7 text-xs flex-1"
-                        disabled={!field.enabled}
-                        data-testid={`input-field-key-${i}`}
-                      />
-                      <code className="text-xs text-muted-foreground shrink-0 max-w-[200px] truncate" title={field.sourcePath}>
-                        {field.sourcePath}
-                      </code>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {testResult?.success && fields.length === 0 && (
-              <p className="text-xs text-muted-foreground">
-                No fields detected in sample. The database will store raw items without field mapping.
-              </p>
-            )}
-
-            {!testResult && (
-              <div className="text-center py-8">
-                <TestTube className="h-8 w-8 mx-auto text-muted-foreground/40 mb-2" />
-                <p className="text-sm text-muted-foreground">
-                  Test the connection to preview the data and configure field mappings.
+                <p className="font-medium text-foreground">Empty bank — ready to create</p>
+                <p>
+                  We&apos;ll create an empty file for this database. There&apos;s nothing to test yet.
+                  Add field mappings later after you add rows (Settings → Field Mappings).
                 </p>
               </div>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleTest}
+                    disabled={testing}
+                    data-testid="button-test-connection"
+                  >
+                    {testing ? (
+                      <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                    ) : (
+                      <TestTube className="h-3.5 w-3.5 mr-1" />
+                    )}
+                    Test Connection
+                  </Button>
+                  {testResult && (
+                    <Badge variant={testResult.success ? "secondary" : "destructive"}>
+                      {testResult.success ? (
+                        <>
+                          <Check className="h-3 w-3 mr-1" />
+                          {testResult.item_count} items found
+                        </>
+                      ) : (
+                        <>
+                          <X className="h-3 w-3 mr-1" />
+                          Failed
+                        </>
+                      )}
+                    </Badge>
+                  )}
+                </div>
+
+                {testResult?.error && (
+                  <div className="bg-destructive/10 border border-destructive/20 rounded-md p-3 text-xs text-destructive">
+                    {testResult.error}
+                  </div>
+                )}
+
+                {testResult?.success && fields.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-sm">Field Mapping</Label>
+                      <p className="text-xs text-muted-foreground">
+                        {fields.filter((f) => f.enabled).length} of {fields.length} fields selected
+                      </p>
+                    </div>
+                    <div className="border rounded-md divide-y max-h-64 overflow-y-auto">
+                      {fields.map((field, i) => (
+                        <div
+                          key={field.sourcePath}
+                          className="flex items-center gap-2 px-3 py-2"
+                          data-testid={`field-mapping-${i}`}
+                        >
+                          <Switch
+                            checked={field.enabled}
+                            onCheckedChange={(checked) => {
+                              const updated = [...fields];
+                              updated[i] = { ...updated[i], enabled: checked };
+                              setFields(updated);
+                            }}
+                            data-testid={`switch-field-${i}`}
+                          />
+                          <Input
+                            value={field.normalizedKey}
+                            onChange={(e) => {
+                              const updated = [...fields];
+                              updated[i] = {
+                                ...updated[i],
+                                normalizedKey: slugifyInput(e.target.value, SNAKE),
+                              };
+                              setFields(updated);
+                            }}
+                            className="h-7 text-xs flex-1"
+                            disabled={!field.enabled}
+                            data-testid={`input-field-key-${i}`}
+                          />
+                          <code className="text-xs text-muted-foreground shrink-0 max-w-[200px] truncate" title={field.sourcePath}>
+                            {field.sourcePath}
+                          </code>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {testResult?.success && fields.length === 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    No fields detected in sample. The database will store raw items without field mapping.
+                  </p>
+                )}
+
+                {!testResult && (
+                  <div className="text-center py-8">
+                    <TestTube className="h-8 w-8 mx-auto text-muted-foreground/40 mb-2" />
+                    <p className="text-sm text-muted-foreground">
+                      Test the connection to preview the data and configure field mappings.
+                    </p>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
@@ -1291,7 +1460,7 @@ function CreateDatabaseDialog({
         onOpenChange={setDatasetPickerOpen}
         slug={slug}
         onSelected={(result) => {
-          setLocalFilename(result.filename);
+          setLocalFilename(ensureLocalFilenameExtension(sanitizeLocalFilenameInput(result.filename)));
           setSourceType("local");
         }}
       />
@@ -1583,19 +1752,31 @@ function DatabaseConfigEditor({
     return Object.entries(h).map(([key, value]) => ({ key, value }));
   });
   const [localFilename, setLocalFilename] = useState(config.source.local?.filename || "");
-  const [localFileStatus, setLocalFileStatus] = useState<"idle" | "checking" | "found" | "not-found">("idle");
+  const [localFileStatus, setLocalFileStatus] = useState<LocalFileStatus>("idle");
+  const [createEmptyFileConsent, setCreateEmptyFileConsent] = useState(false);
   const [remoteUrl, setRemoteUrl] = useState(config.source.remote?.url || "");
   const [datasetPickerOpen, setDatasetPickerOpen] = useState(false);
+
+  useEffect(() => {
+    setCreateEmptyFileConsent(false);
+  }, [localFilename, dbName]);
+
+  useEffect(() => {
+    if (localFileStatus === "found" || localFileStatus === "checking") {
+      setCreateEmptyFileConsent(false);
+    }
+  }, [localFileStatus]);
 
   useEffect(() => {
     if (sourceType !== "local" || !localFilename.trim()) {
       setLocalFileStatus("idle");
       return;
     }
+    const checkName = ensureLocalFilenameExtension(localFilename) || localFilename.trim();
     setLocalFileStatus("checking");
     const timer = setTimeout(async () => {
       try {
-        const res = await apiFetch(`/api/databases/check-file?slug=${encodeURIComponent(dbName)}&filename=${encodeURIComponent(localFilename.trim())}`);
+        const res = await apiFetch(`/api/databases/check-file?slug=${encodeURIComponent(dbName)}&filename=${encodeURIComponent(checkName)}`);
         const data = await res.json();
         setLocalFileStatus(data.exists ? "found" : "not-found");
       } catch {
@@ -1693,7 +1874,7 @@ function DatabaseConfigEditor({
     sourceType === "api"
       ? endpoint.trim().length > 0
       : sourceType === "local"
-      ? localFilename.trim().length > 0
+      ? canProceedLocalFile(localFilename, localFileStatus, createEmptyFileConsent)
       : remoteUrl.trim().length > 0;
 
   const isDirty = (() => {
@@ -1743,11 +1924,16 @@ function DatabaseConfigEditor({
 
   const buildSourceConfig = () => {
     if (sourceType === "local") {
+      const filename = ensureLocalFilenameExtension(localFilename);
+      const creatingEmpty =
+        localFileStatus === "not-found" &&
+        isEmptyCreateableFilename(filename) &&
+        createEmptyFileConsent;
       return {
         type: "local",
         local: {
-          filename: localFilename,
-          ...(resultsPath ? { results_path: resultsPath } : {}),
+          filename,
+          ...(!creatingEmpty && resultsPath ? { results_path: resultsPath } : {}),
         },
       };
     }
@@ -1803,6 +1989,9 @@ function DatabaseConfigEditor({
   const handleSave = async () => {
     setSaving(true);
     try {
+      if (sourceType === "local" && localFilename.trim()) {
+        setLocalFilename(ensureLocalFilenameExtension(localFilename));
+      }
       const updatedConfig = {
         name: config.name,
         description: config.description || undefined,
@@ -1880,7 +2069,7 @@ function DatabaseConfigEditor({
               <SelectItem value="local">
                 <div className="flex items-center gap-2">
                   <Server className="h-4 w-4" />
-                  Local File
+                  Manual or local file
                 </div>
               </SelectItem>
               <SelectItem value="remote">
@@ -2039,53 +2228,19 @@ function DatabaseConfigEditor({
       )}
 
       {sourceType === "local" && (
-        <>
-          <div className="space-y-2">
-            <Label htmlFor="edit-local-filename">Filename</Label>
-            <div className="relative">
-              <Input
-                id="edit-local-filename"
-                placeholder="e.g. products.json, data.csv"
-                value={localFilename}
-                onChange={(e) => setLocalFilename(e.target.value)}
-                data-testid="input-edit-local-filename"
-                className="pr-8"
-              />
-              {localFileStatus === "checking" && (
-                <Loader2 className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
-              )}
-              {localFileStatus === "found" && (
-                <Check className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-green-500" />
-              )}
-              {localFileStatus === "not-found" && (
-                <X className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-destructive" />
-              )}
-            </div>
-            <div className="rounded-md bg-muted/50 border px-3 py-2 text-xs text-muted-foreground space-y-1">
-              <p className="font-medium text-foreground">Where to place the file</p>
-              <p>
-                Put your file at{" "}
-                <code className="bg-muted px-1 rounded">
-                  4geeks-com/db/{dbName}/{localFilename || "your-file.json"}
-                </code>{" "}
-                before syncing.
-              </p>
-            </div>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="edit-local-results-path">Results Path (optional)</Label>
-            <Input
-              id="edit-local-results-path"
-              placeholder="e.g. results, data.items"
-              value={resultsPath}
-              onChange={(e) => setResultsPath(e.target.value)}
-              data-testid="input-edit-local-results-path"
-            />
-            <p className="text-xs text-muted-foreground">
-              For JSON files: dot-notation path to the array. Leave empty if the file is already an array.
-            </p>
-          </div>
-        </>
+        <LocalFilenameFields
+          slug={dbName}
+          filename={localFilename}
+          onFilenameChange={setLocalFilename}
+          status={localFileStatus}
+          createEmptyConsent={createEmptyFileConsent}
+          onCreateEmptyConsentChange={setCreateEmptyFileConsent}
+          resultsPath={resultsPath}
+          onResultsPathChange={setResultsPath}
+          mode="edit"
+          inputId="edit-local-filename"
+          testIdPrefix="edit"
+        />
       )}
 
       {sourceType === "remote" && (
@@ -2209,7 +2364,7 @@ function DatabaseConfigEditor({
         onOpenChange={setDatasetPickerOpen}
         slug={dbName}
         onSelected={(result) => {
-          setLocalFilename(result.filename);
+          setLocalFilename(ensureLocalFilenameExtension(sanitizeLocalFilenameInput(result.filename)));
           setSourceType("local");
         }}
       />
@@ -2707,13 +2862,14 @@ function FieldMappingEditor({
       <div className="flex items-center gap-2">
         <Input
           value={newFieldKey}
-          onChange={(e) => setNewFieldKey(e.target.value)}
+          onChange={(e) => setNewFieldKey(slugifyInput(e.target.value, SNAKE))}
           placeholder="Add field (e.g. author_name)"
           className="h-8 text-xs font-mono flex-1"
           data-testid="input-new-field-key"
           onKeyDown={(e) => {
-            if (e.key === "Enter" && newFieldKey.trim()) {
-              setFieldMappingEntries((prev) => ({ ...prev, [newFieldKey.trim()]: null }));
+            const key = slugify(newFieldKey, SNAKE);
+            if (e.key === "Enter" && key) {
+              setFieldMappingEntries((prev) => ({ ...prev, [key]: null }));
               setNewFieldKey("");
             }
           }}
@@ -2721,9 +2877,11 @@ function FieldMappingEditor({
         <Button
           variant="outline"
           size="sm"
-          disabled={!newFieldKey.trim()}
+          disabled={!slugify(newFieldKey, SNAKE)}
           onClick={() => {
-            setFieldMappingEntries((prev) => ({ ...prev, [newFieldKey.trim()]: null }));
+            const key = slugify(newFieldKey, SNAKE);
+            if (!key) return;
+            setFieldMappingEntries((prev) => ({ ...prev, [key]: null }));
             setNewFieldKey("");
           }}
           data-testid="button-add-field"
@@ -4461,6 +4619,100 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
     const idx = (itemsData?.items ?? []).indexOf(item);
     return idx >= 0 ? itemsData?.evidence_archive?.[idx] ?? null : null;
   };
+  const similarToOf = (item: Record<string, unknown>) => {
+    if (!showEvidenceTrust) return [];
+    const idx = (itemsData?.items ?? []).indexOf(item);
+    return idx >= 0 ? itemsData?.evidence_similar_to?.[idx] ?? [] : [];
+  };
+  const trustAtStoredIndex = (storedIndex: number): EvidenceRowTrust | null => {
+    const pos = itemsData?.indices?.indexOf(storedIndex) ?? -1;
+    return pos >= 0 ? itemsData?.evidence_trust?.[pos] ?? null : null;
+  };
+  const [showRejected, setShowRejected] = useState(true);
+  const hasRejectedRows = (itemsData?.evidence_trust ?? []).includes("rejected");
+
+  const openStoredRow = useCallback(
+    (storedIndex: number) => {
+      const pos = itemsData?.indices?.indexOf(storedIndex) ?? -1;
+      const row = pos >= 0 ? itemsData?.items?.[pos] : undefined;
+      if (!row) {
+        toast({ title: `Row ${storedIndex + 1} is on another page`, description: "Change page or search for it to open it." });
+        return;
+      }
+      setIsAddingItem(false);
+      setEditingItem(row);
+      setEditingItemIndex(storedIndex);
+    },
+    [itemsData, toast],
+  );
+  const duplicateGuard = useEvidenceDuplicateGuard({ onOpenExisting: openStoredRow });
+
+  const [rejection, setRejection] = useState<RejectionPreview | null>(null);
+  const [rejectSameLink, setRejectSameLink] = useState(true);
+  const [pageSlugConfirm, setPageSlugConfirm] = useState<{
+    oldPath: string;
+    newPath: string;
+    pendingItem: Record<string, unknown>;
+  } | null>(null);
+  const [pageSlugConfirmBusy, setPageSlugConfirmBusy] = useState(false);
+  const [rejectionBusy, setRejectionBusy] = useState(false);
+  const openRejection = async (storedIndex: number, mode: "reject" | "restore") => {
+    setRejectionBusy(true);
+    try {
+      const res = await apiFetch(`/api/databases/${dbName}/items/${storedIndex}/${mode}?preview=1`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ include_same_link: true }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        translations?: RejectionPreview["translations"];
+        same_link?: RejectionPreview["sameLink"];
+        rows?: RejectionPreview["rows"];
+      };
+      if (!res.ok) throw new Error(body.error || `Could not ${mode} this row`);
+      setRejectSameLink(true);
+      setRejection({
+        storedIndex,
+        mode,
+        translations: body.translations ?? [],
+        sameLink: body.same_link ?? [],
+        rows: (body.rows ?? []).filter((r) => r.index !== storedIndex),
+      });
+    } catch (err) {
+      toast({ title: "Error", description: err instanceof Error ? err.message : String(err), variant: "destructive" });
+    } finally {
+      setRejectionBusy(false);
+    }
+  };
+  const confirmRejection = async () => {
+    if (!rejection) return;
+    setRejectionBusy(true);
+    try {
+      const res = await apiFetch(`/api/databases/${dbName}/items/${rejection.storedIndex}/${rejection.mode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ include_same_link: rejectSameLink }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error((err as { error?: string }).error || "Failed");
+      }
+      const restoring = rejection.mode === "restore";
+      setRejection(null);
+      await Promise.all([refetchItems(), refetchRawItems()]);
+      toast({
+        title: restoring ? "Story restored" : "Story rejected",
+        description: restoring
+          ? "It shows on the site again and can be used as proof."
+          : "It is hidden from the site, and agents cannot add it again.",
+      });
+    } catch (err) {
+      toast({ title: "Error", description: err instanceof Error ? err.message : String(err), variant: "destructive" });
+    } finally {
+      setRejectionBusy(false);
+    }
+  };
   const [verifyingIndex, setVerifyingIndex] = useState<number | null>(null);
   const verifyEvidenceRow = async (storedIndex: number) => {
     setVerifyingIndex(storedIndex);
@@ -5287,6 +5539,19 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                       Add Item
                     </Button>
                   )}
+                  {showEvidenceTrust && hasRejectedRows && (
+                    <label
+                      className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                      title="Rejected stories stay in the list so agents cannot add them again. They never show on the site."
+                    >
+                      <Switch
+                        checked={showRejected}
+                        onCheckedChange={setShowRejected}
+                        data-testid="switch-show-rejected"
+                      />
+                      Show rejected
+                    </label>
+                  )}
                 </div>
                 <div className="flex items-start gap-2">
                   {!!itemsData && (
@@ -5606,17 +5871,47 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                       Force Refresh
                     </Button>
                   )}
-                  {config?.source.type === "local" && canEditRows && (
-                    <Button
-                      variant={editMode ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => setEditMode(!editMode)}
-                      disabled={!itemsData}
-                      data-testid="button-edit-items"
-                    >
-                      <Pencil className="h-3.5 w-3.5 mr-1" />
-                      {editMode ? "Done" : "Edit Items"}
-                    </Button>
+                  {config?.source.type === "local" && (
+                    canEditRows ? (
+                      <Button
+                        variant={editMode ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => setEditMode(!editMode)}
+                        disabled={!itemsData}
+                        data-testid="button-edit-items"
+                      >
+                        <Pencil className="h-3.5 w-3.5 mr-1" />
+                        {editMode ? "Done" : "Edit Items"}
+                      </Button>
+                    ) : (
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={!itemsData}
+                            className={itemsData ? "opacity-70" : undefined}
+                            data-testid="button-edit-items"
+                          >
+                            <Pencil className="h-3.5 w-3.5 mr-1" />
+                            Edit Items
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent
+                          side="bottom"
+                          align="end"
+                          className="w-72 text-xs space-y-1"
+                          data-testid="popover-edit-items-permission"
+                        >
+                          <p className="font-medium text-sm text-foreground">Permission needed</p>
+                          <p className="text-muted-foreground leading-relaxed">
+                            Row edits need{" "}
+                            <span className="text-foreground">Edit database data</span> for this bank.
+                            Ask an admin to grant it, then sign in again.
+                          </p>
+                        </PopoverContent>
+                      </Popover>
+                    )
                   )}
                 </div>
               </div>
@@ -5711,16 +6006,20 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                       </tr>
                     </thead>
                     <tbody>
-                      {(editMode ? (itemsData?.items || []) : filteredItems).map((item, i) => {
+                      {(editMode ? (itemsData?.items || []) : filteredItems)
+                        .filter((item) => showRejected || trustOf(item) !== "rejected")
+                        .map((item, i) => {
                         const openItemEdit = () => {
                           setEditingItem(item);
                           setEditingItemIndex(storedIndexOf(item, i));
                           setIsAddingItem(false);
                         };
+                        const rowRejected = trustOf(item) === "rejected";
+                        const similarTo = similarToOf(item);
                         return (
                         <tr
                           key={i}
-                          className="border-b last:border-b-0 hover:bg-muted/30 cursor-pointer"
+                          className={`border-b last:border-b-0 hover:bg-muted/30 cursor-pointer ${rowRejected ? "opacity-60" : ""}`}
                           data-testid={`row-item-${i}`}
                           onClick={openItemEdit}
                         >
@@ -5756,7 +6055,32 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                           )}
                           {showEvidenceTrust && (
                             <td className="px-3 py-1.5 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                              {trustOf(item) === "unverified" ? (
+                              <div className="flex flex-col gap-1">
+                              <div className="flex items-center gap-1.5">
+                              {rowRejected ? (
+                                <div className="flex items-center gap-1.5">
+                                  <Badge
+                                    variant="outline"
+                                    className="font-normal text-[10px]"
+                                    title="Hidden from the site and never used as proof. Agents cannot add this link again."
+                                    data-testid={`badge-evidence-rejected-${i}`}
+                                  >
+                                    Rejected
+                                  </Badge>
+                                  {canEditRows && (
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-6 px-2 text-[10px]"
+                                      disabled={rejectionBusy}
+                                      onClick={() => void openRejection(storedIndexOf(item, i), "restore")}
+                                      data-testid={`button-restore-evidence-${i}`}
+                                    >
+                                      Restore
+                                    </Button>
+                                  )}
+                                </div>
+                              ) : trustOf(item) === "unverified" ? (
                                 <div className="flex items-center gap-1.5">
                                   <Badge
                                     variant="outline"
@@ -5784,6 +6108,31 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                               ) : (
                                 <span className="text-[10px] text-muted-foreground">—</span>
                               )}
+                              {canEditRows && !rowRejected && trustOf(item) !== null && (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-6 px-2 text-[10px] text-muted-foreground"
+                                  disabled={rejectionBusy}
+                                  title="Hide this story from the site and stop agents from adding it again"
+                                  onClick={() => void openRejection(storedIndexOf(item, i), "reject")}
+                                  data-testid={`button-reject-evidence-${i}`}
+                                >
+                                  Reject
+                                </Button>
+                              )}
+                              </div>
+                              {similarTo.length > 0 && (
+                                <span
+                                  className="max-w-[260px] truncate text-[10px] text-muted-foreground"
+                                  title={similarTo.map((s) => s.title || s.link || "").join("\n")}
+                                  data-testid={`text-evidence-similar-${i}`}
+                                >
+                                  Looks like: “{similarTo[0]!.title || similarTo[0]!.link}”
+                                  {similarTo.length > 1 ? ` +${similarTo.length - 1}` : ""}
+                                </span>
+                              )}
+                              </div>
                             </td>
                           )}
                           {showEvidenceTrust && (
@@ -6196,7 +6545,9 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
             <DialogHeader>
               <DialogTitle>Delete Item</DialogTitle>
               <DialogDescription>
-                Are you sure you want to delete item {deleteConfirmIndex + 1}? This will immediately save the file without this entry.
+                {trustAtStoredIndex(deleteConfirmIndex) === "rejected"
+                  ? "This story was rejected. Deleting it removes the record that stops agents from adding it again, so agents may add this story again. Keep it rejected instead?"
+                  : `Are you sure you want to delete item ${deleteConfirmIndex + 1}? This will immediately save the file without this entry.`}
               </DialogDescription>
             </DialogHeader>
             <DialogFooter className="flex items-center justify-end gap-2">
@@ -6207,7 +6558,7 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                 disabled={savingItems}
                 data-testid="button-cancel-delete-item"
               >
-                Cancel
+                {trustAtStoredIndex(deleteConfirmIndex) === "rejected" ? "Keep rejected" : "Cancel"}
               </Button>
               <Button
                 variant="destructive"
@@ -6244,7 +6595,149 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
                 ) : (
                   <Trash2 className="h-3.5 w-3.5 mr-1" />
                 )}
-                Delete
+                {trustAtStoredIndex(deleteConfirmIndex) === "rejected" ? "Delete anyway" : "Delete"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {rejection && (
+        <Dialog open onOpenChange={(v) => { if (!v) setRejection(null); }}>
+          <DialogContent data-testid="dialog-evidence-rejection">
+            <DialogHeader>
+              <DialogTitle>{rejection.mode === "reject" ? "Reject this story?" : "Restore this story?"}</DialogTitle>
+              <DialogDescription>
+                {rejection.mode === "reject"
+                  ? "Rejected stories stay in the list so agents know not to add them again. They are hidden from the site and never used as proof. You can restore them later."
+                  : "It shows on the site again and can be used as proof. Agents can add its link again too."}
+              </DialogDescription>
+            </DialogHeader>
+            {rejection.mode === "reject" && rejection.translations.length > 0 && (
+              <div className="text-sm">
+                <p className="font-medium text-foreground">Also rejects its other languages:</p>
+                <ul className="mt-1 list-disc pl-5 text-muted-foreground">
+                  {rejection.translations.map((r) => (
+                    <li key={r.index}>{`${r.title || `Row ${r.index + 1}`}${r.locale ? ` (${r.locale})` : ""}`}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {rejection.mode === "reject" && rejection.sameLink.length > 0 && (
+              <label className="flex items-start gap-2 text-sm">
+                <Checkbox
+                  checked={rejectSameLink}
+                  onCheckedChange={(v) => setRejectSameLink(v === true)}
+                  data-testid="checkbox-reject-same-link"
+                />
+                <span>
+                  {rejection.sameLink.length === 1 ? "1 other row uses this link" : `${rejection.sameLink.length} other rows use this link`}
+                  {": "}
+                  <span className="text-muted-foreground">
+                    {rejection.sameLink.map((r) => r.title || `Row ${r.index + 1}`).join(", ")}
+                  </span>
+                  . Reject {rejection.sameLink.length === 1 ? "it" : "them"} too.
+                </span>
+              </label>
+            )}
+            {rejection.mode === "restore" && rejection.rows.length > 0 && (
+              <div className="text-sm">
+                <p className="font-medium text-foreground">Also restores:</p>
+                <ul className="mt-1 list-disc pl-5 text-muted-foreground">
+                  {rejection.rows.map((r) => (
+                    <li key={r.index}>{`${r.title || `Row ${r.index + 1}`}${r.locale ? ` (${r.locale})` : ""}`}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <DialogFooter className="flex items-center justify-end gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setRejection(null)} disabled={rejectionBusy}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant={rejection.mode === "reject" ? "destructive" : "default"}
+                onClick={() => void confirmRejection()}
+                disabled={rejectionBusy}
+                data-testid="button-confirm-rejection"
+              >
+                {rejectionBusy && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
+                {rejection.mode === "reject" ? "Reject" : "Restore"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {duplicateGuard.dialog}
+
+      {pageSlugConfirm && (
+        <Dialog
+          open
+          onOpenChange={(v) => {
+            if (!v && !pageSlugConfirmBusy) setPageSlugConfirm(null);
+          }}
+        >
+          <DialogContent className="max-w-md" data-testid="dialog-confirm-page-slug-change">
+            <DialogHeader>
+              <DialogTitle>This edit moves the live page</DialogTitle>
+            </DialogHeader>
+            <p className="text-sm text-muted-foreground">
+              The article link is used as the page address. Saving will change the live URL from{" "}
+              <code className="font-mono text-xs bg-muted px-1 rounded">{pageSlugConfirm.oldPath || "(old)"}</code>{" "}
+              to{" "}
+              <code className="font-mono text-xs bg-muted px-1 rounded">{pageSlugConfirm.newPath || "(new)"}</code>.
+              The old address is not redirected and will stop working.
+            </p>
+            <DialogFooter className="flex items-center justify-end gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={pageSlugConfirmBusy}
+                onClick={() => setPageSlugConfirm(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                disabled={pageSlugConfirmBusy || editingItemIndex == null}
+                data-testid="button-confirm-page-slug-change"
+                onClick={async () => {
+                  if (editingItemIndex == null) return;
+                  setPageSlugConfirmBusy(true);
+                  try {
+                    const res = await duplicateGuard.send((query) =>
+                      apiFetch(`/api/databases/${dbName}/items/${editingItemIndex}${query}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          ...pageSlugConfirm.pendingItem,
+                          confirm_page_slug_change: true,
+                        }),
+                      }),
+                    );
+                    if (!res.ok) {
+                      const err = await res.json().catch(() => ({}));
+                      throw new Error((err as { error?: string }).error || "Failed to save item");
+                    }
+                    setPageSlugConfirm(null);
+                    setEditingItem(null);
+                    setEditingItemIndex(null);
+                    setIsAddingItem(false);
+                    void Promise.all([refetchItems(), refetchRawItems()]);
+                  } catch (err) {
+                    toast({
+                      title: "Save failed",
+                      description: err instanceof Error ? err.message : String(err),
+                      variant: "destructive",
+                    });
+                  } finally {
+                    setPageSlugConfirmBusy(false);
+                  }
+                }}
+              >
+                {pageSlugConfirmBusy && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
+                Move page and save
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -6253,27 +6746,40 @@ function DatabaseDetailView({ dbName }: { dbName: string }) {
 
       {(editingItem !== null || isAddingItem) && (
         <ItemEditModal
+          key={isAddingItem ? "new" : String(editingItemIndex)}
           dbName={dbName}
           item={isAddingItem ? null : editingItem}
           allItems={itemsData?.items || []}
           onSave={async (builtItem) => {
-            let res: Response;
-            if (isAddingItem) {
-              res = await apiFetch(`/api/databases/${dbName}/items`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ item: builtItem }),
-              });
-            } else {
-              res = await apiFetch(`/api/databases/${dbName}/items/${editingItemIndex}`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(builtItem),
-              });
-            }
+            const res = await duplicateGuard.send((query) =>
+              isAddingItem
+                ? apiFetch(`/api/databases/${dbName}/items${query}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ item: builtItem }),
+                  })
+                : apiFetch(`/api/databases/${dbName}/items/${editingItemIndex}${query}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(builtItem),
+                  }),
+            );
             if (!res.ok) {
-              const err = await res.json().catch(() => ({}));
-              throw new Error((err as { error?: string }).error || "Failed to save item");
+              const err = (await res.json().catch(() => ({}))) as {
+                error?: string;
+                code?: string;
+                old_path?: string;
+                new_path?: string;
+              };
+              if (err.code === "confirm_page_slug_change" && !isAddingItem) {
+                setPageSlugConfirm({
+                  oldPath: String(err.old_path || ""),
+                  newPath: String(err.new_path || ""),
+                  pendingItem: builtItem,
+                });
+                throw new SaveCancelledError();
+              }
+              throw new Error(err.error || "Failed to save item");
             }
             void Promise.all([refetchItems(), refetchRawItems()]);
           }}

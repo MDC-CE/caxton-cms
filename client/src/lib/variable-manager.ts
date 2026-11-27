@@ -6,29 +6,38 @@ import {
   formatEntryVarName,
   isEntryOrSingleVarName,
 } from "@shared/entryTemplateVars";
+import {
+  variableValueToDisplayString,
+  type VariableValue,
+} from "@shared/variable-money";
 
 const TEMPLATE_REGEX = /\{\{\s*([^|}]+?)\s*(?:\|\s*([\s\S]*?))?\s*\}\}/g;
 const META_PREFIX = "meta.";
 const PARAM_PREFIX = "param.";
 const VISITOR_PREFIX = "visitor.";
+const FORM_PREFIX = "form.";
 const FUNNEL_PREFIX = "funnel.";
 const EXACT_META_VAR_PATTERN = /^\{\{\s*meta\.([a-zA-Z_][a-zA-Z0-9_.]*)\s*(?:\|\s*([\s\S]*?))?\s*\}\}$/;
 const EXACT_PARAM_VAR_PATTERN = /^\{\{\s*param\.([a-zA-Z_][a-zA-Z0-9_.]*)\s*(?:\|\s*([\s\S]*?))?\s*\}\}$/;
 const EXACT_VISITOR_VAR_PATTERN = /^\{\{\s*visitor\.([a-zA-Z_][a-zA-Z0-9_.]*)\s*(?:\|\s*([\s\S]*?))?\s*\}\}$/;
+const EXACT_FORM_VAR_PATTERN = /^\{\{\s*form\.([a-zA-Z_][a-zA-Z0-9_.]*)\s*(?:\|\s*([\s\S]*?))?\s*\}\}$/;
 const EXACT_FUNNEL_VAR_PATTERN = /^\{\{\s*funnel\.([a-zA-Z_][a-zA-Z0-9_.]*)\s*(?:\|\s*([\s\S]*?))?\s*\}\}$/;
 
 export interface VariableCondition {
   query: Record<string, string>;
-  value: string;
+  value: VariableValue;
 }
 
 export interface VariableDefinition {
   description?: string;
   category?: string;
   unit?: string;
+  source?: string;
+  products?: string[];
+  price_role?: string;
   deprecated?: boolean;
   replaced_by?: string;
-  default?: string;
+  default?: VariableValue;
   conditions?: VariableCondition[];
   by_locale?: Record<string, string>;
   by_region?: Record<string, string>;
@@ -46,7 +55,7 @@ export interface ResolvedVariable {
   original: string;
   variableName: string;
   resolvedValue: string;
-  source: "condition" | "location" | "region" | "locale" | "default" | "inline" | "single" | "meta" | "param" | "visitor" | "funnel";
+  source: "condition" | "location" | "region" | "locale" | "default" | "inline" | "single" | "meta" | "param" | "visitor" | "form" | "funnel";
   defaultValue: string;
 }
 
@@ -59,6 +68,8 @@ export interface ResolveOptions {
   param?: Record<string, unknown>;
   /** Logged-in consumer profile (AuthUserProfile-shaped) for {{ visitor.* }} */
   visitor?: Record<string, unknown>;
+  /** Watched/submitted lead-form values for {{ form.* }} (match-time only). */
+  form?: Record<string, unknown>;
   /** Page funnel block for {{ funnel.* }} (stored values, same lookup as meta). */
   funnel?: Record<string, unknown>;
 }
@@ -72,6 +83,10 @@ function getNestedValue(obj: Record<string, unknown>, dotPath: string): unknown 
     current = (current as Record<string, unknown>)[part];
   }
   return current;
+}
+
+function displayVariableValue(raw: unknown, context: VariableContext): string {
+  return variableValueToDisplayString(raw, { locale: context.locale });
 }
 
 export function resolveVariable(
@@ -89,22 +104,31 @@ export function resolveVariable(
         return contextVal === val;
       });
       if (matches) {
-        return { value: condition.value, source: "condition" };
+        return { value: displayVariableValue(condition.value, context), source: "condition" };
       }
     }
   }
 
   if (context.location && def.by_location?.[context.location]) {
-    return { value: def.by_location[context.location], source: "location" };
+    return {
+      value: displayVariableValue(def.by_location[context.location], context),
+      source: "location",
+    };
   }
   if (context.region && def.by_region?.[context.region]) {
-    return { value: def.by_region[context.region], source: "region" };
+    return {
+      value: displayVariableValue(def.by_region[context.region], context),
+      source: "region",
+    };
   }
   if (context.locale && def.by_locale?.[context.locale]) {
-    return { value: def.by_locale[context.locale], source: "locale" };
+    return {
+      value: displayVariableValue(def.by_locale[context.locale], context),
+      source: "locale",
+    };
   }
   if (def.default !== undefined) {
-    return { value: def.default, source: "default" };
+    return { value: displayVariableValue(def.default, context), source: "default" };
   }
   return null;
 }
@@ -153,6 +177,17 @@ function resolveVisitorVariable(
   return null;
 }
 
+function resolveFormVariable(
+  fieldPath: string,
+  form: Record<string, unknown>,
+): { value: unknown; source: "form" } | null {
+  const value = getNestedValue(form, fieldPath);
+  if (value !== undefined && value !== null) {
+    return { value, source: "form" };
+  }
+  return null;
+}
+
 function bagValueToDisplay(value: unknown): string {
   return String(typeof value === "object" ? JSON.stringify(value) : value);
 }
@@ -171,6 +206,7 @@ export function resolveTemplateString(
   const meta = options?.meta;
   const param = options?.param;
   const visitor = options?.visitor;
+  const form = options?.form;
   const funnel = options?.funnel;
 
   const resolved = text.replace(regex, (match, expression: string, inlineDefault: string) => {
@@ -342,6 +378,39 @@ export function resolveTemplateString(
       return visitorValue;
     }
 
+    if (name.startsWith(FORM_PREFIX)) {
+      if (!form) {
+        return match;
+      }
+      const fieldPath = name.slice(FORM_PREFIX.length);
+      const formResult = resolveFormVariable(fieldPath, form);
+
+      if (preserveTemplate) {
+        if (!formResult && !defVal) {
+          return match;
+        }
+        const displayValue = formResult ? bagValueToDisplay(formResult.value) : defVal;
+        variables.push({
+          original: match,
+          variableName: name,
+          resolvedValue: displayValue,
+          source: formResult ? "form" : "inline",
+          defaultValue: defVal,
+        });
+        return `{{ ${name} | ${displayValue} }}`;
+      }
+
+      const formValue = formResult ? bagValueToDisplay(formResult.value) : defVal || name;
+      variables.push({
+        original: match,
+        variableName: name,
+        resolvedValue: formValue,
+        source: formResult ? "form" : "inline",
+        defaultValue: defVal,
+      });
+      return formValue;
+    }
+
     const result = resolveVariable(name, definitions, context);
     const value = result?.value || defVal || name;
     const source = result?.source || "inline";
@@ -377,6 +446,7 @@ export function resolveDeep(
   const meta = options?.meta;
   const param = options?.param;
   const visitor = options?.visitor;
+  const form = options?.form;
 
   function walk(value: unknown): unknown {
     if (typeof value === "string") {
@@ -509,6 +579,33 @@ export function resolveDeep(
               variableName: `visitor.${fieldPath}`,
               resolvedValue: displayValue,
               source: resolved !== undefined && resolved !== null ? "visitor" : "inline",
+              defaultValue: fallback || "",
+            });
+
+            return resolvedValue;
+          }
+        }
+
+        if (form) {
+          const exactForm = value.match(EXACT_FORM_VAR_PATTERN);
+          if (exactForm) {
+            const fieldPath = exactForm[1];
+            const hasFallback = exactForm[2] !== undefined;
+            const fallback = exactForm[2]?.trim();
+            const resolved = getNestedValue(form, fieldPath);
+            const resolvedValue =
+              resolved !== undefined && resolved !== null
+                ? resolved
+                : hasFallback
+                  ? parsePipeFallback(fallback ?? "")
+                  : value;
+            const displayValue = typeof resolvedValue === "object" ? JSON.stringify(resolvedValue) : String(resolvedValue);
+
+            allVariables.push({
+              original: value,
+              variableName: `form.${fieldPath}`,
+              resolvedValue: displayValue,
+              source: resolved !== undefined && resolved !== null ? "form" : "inline",
               defaultValue: fallback || "",
             });
 

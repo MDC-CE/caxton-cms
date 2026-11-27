@@ -1,4 +1,5 @@
 import fs from "fs";
+import { isSingleAddressPattern } from "./locale-url-slug";
 import { getDefaultContentFolder, getDefaultContentRoot } from "./site-config";
 import path from "path";
 import yaml from "js-yaml";
@@ -31,6 +32,17 @@ import {
 } from "./draft-entry";
 import { runInternalLinkGate } from "./internal-link-gate";
 import { runConsentGate } from "./consent-gate";
+import {
+  adsAccountLocationBlockMessage,
+  landingPathForEntry,
+  runAdsAccountLocationGate,
+} from "./ads-account-location-gate";
+import {
+  editTouchesFormLocation,
+  formLocationBlockMessage,
+  runFormLocationGate,
+  type FormLocationIssue,
+} from "./form-location-gate";
 import type { BrokenInternalLink, InternalLinkWarning } from "@shared/internalLinkGate";
 import {
   clampSchemaOrgSectionsLeading,
@@ -61,6 +73,7 @@ import { getContentWriteContext } from "./write-context";
 import { buildEntryKey } from "../scripts/validation/shared/entryKey";
 import { contentIndex, ContentIndex } from "./content-index";
 import { entryRefFailureMessage, resolveEntryRef } from "./entry-ref";
+import type { AdsOnUrlResult } from "@shared/url-removal";
 import { deepMerge } from "./utils/deepMerge";
 import { mergeSingleTemplate, extractVariableFields, TEMPLATE_EXPR_RE } from "./database-single-loader";
 import { getDatabaseName, getLookupKey, getFieldMapping, isValidType, getAllTypes, getFolder, getContentTypeConfig, listExtraUrlPatternParams, detectUrlParamValueShape, formatUrlParamFieldValue, getRawUrlParamValue, type UrlParamValueShape } from "./content-types";
@@ -737,6 +750,10 @@ export async function editContent(request: ContentEditRequest): Promise<{
   brokenInternalLinks?: BrokenInternalLink[];
   /** Non-blocking internal-link findings (redirects, draft targets, not-yet-enforced). */
   linkWarnings?: InternalLinkWarning[];
+  /** Form location problems that did not block this save (drafts, untouched forms). */
+  formLocationWarnings?: FormLocationIssue[];
+  /** Set when a form location error blocked the save. */
+  formLocationIssues?: FormLocationIssue[];
 }> {
   const { contentType, slug, locale: rawLocale, operations: requestOperations, variant, version, contentRoot } = request;
   // Use per-site ContentIndex when provided (avoids resolving files against default site)
@@ -1551,6 +1568,7 @@ export async function editContent(request: ContentEditRequest): Promise<{
     const funnelErr = writingLiveLocale ? liveLocaleFunnelWriteError(previousLocaleData, localeData) : null;
     if (funnelErr) return { success: false, error: funnelErr, errorCode: "funnel_in_language_file" };
     let linkWarnings: InternalLinkWarning[] = [];
+    let formLocationWarnings: FormLocationIssue[] = [];
     if (writingLiveLocale) {
       const commonForGate = ci.loadCommonData(contentType, slug) || {};
       const mergedForGate = deepMerge(commonForGate, localeData) as Record<
@@ -1598,15 +1616,70 @@ export async function editContent(request: ContentEditRequest): Promise<{
           };
         }
       }
+      const locationGate = runFormLocationGate({ pageData: mergedForGate, contentType, contentRoot });
+      const blocksLocation =
+        locationGate.errors.length > 0 &&
+        (gateIntent === "publish" ||
+          editTouchesFormLocation(locationGate, {
+            paths: gateTouchedPaths,
+            sectionIndexes: collectTouchedSectionIndexes(resolvedOperations as never),
+          }));
+      if (blocksLocation) {
+        return {
+          success: false,
+          error: formLocationBlockMessage(locationGate.errors),
+          errorCode: locationGate.errors[0]!.code,
+          formLocationIssues: locationGate.errors,
+        };
+      }
+      formLocationWarnings = [...locationGate.errors, ...locationGate.warnings];
+      {
+        const landingPath = landingPathForEntry(contentType, slug, contentRoot);
+        if (landingPath) {
+          const adsGate = runAdsAccountLocationGate({ landingPath, contentType, contentRoot });
+          if (adsGate.errors.length > 0 && gateIntent === "publish") {
+            return {
+              success: false,
+              error: adsAccountLocationBlockMessage(adsGate.errors),
+              errorCode: adsGate.errors[0]!.code,
+            };
+          }
+          for (const w of [...adsGate.errors, ...adsGate.warnings]) {
+            formLocationWarnings.push({
+              code: w.code,
+              message: w.message,
+              property_path: w.property_path,
+              fix_field_path: w.fix_field_path,
+            });
+          }
+        }
+      }
     } else if (hasVariant && !writingSharedTemplate) {
       const commonForGate = ci.loadCommonData(contentType, slug) || {};
+      const draftPage = deepMerge(commonForGate, localeData) as Record<string, unknown>;
       linkWarnings = internalLinkGateForWrite({
-        pageData: deepMerge(commonForGate, localeData) as Record<string, unknown>,
+        pageData: draftPage,
         locale,
         contentRoot,
         ci,
         pageIsDraft: true,
       }).linkWarnings;
+      const locationGate = runFormLocationGate({ pageData: draftPage, contentType, contentRoot });
+      formLocationWarnings = [...locationGate.errors, ...locationGate.warnings];
+      {
+        const landingPath = landingPathForEntry(contentType, slug, contentRoot);
+        if (landingPath) {
+          const adsGate = runAdsAccountLocationGate({ landingPath, contentType, contentRoot });
+          for (const w of [...adsGate.errors, ...adsGate.warnings]) {
+            formLocationWarnings.push({
+              code: w.code,
+              message: w.message,
+              property_path: w.property_path,
+              fix_field_path: w.fix_field_path,
+            });
+          }
+        }
+      }
     }
 
     // Write locale data back to file (without _common.yml content)
@@ -1685,6 +1758,7 @@ export async function editContent(request: ContentEditRequest): Promise<{
       ...(clearedFields.length > 0 ? { clearedFields } : {}),
       ...(deprecatedTemplateRefs.length > 0 ? { deprecatedTemplateRefs } : {}),
       ...(linkWarnings.length > 0 ? { linkWarnings } : {}),
+      ...(formLocationWarnings.length > 0 ? { formLocationWarnings } : {}),
     };
   } catch (error) {
     log.error({ err: error }, "Content edit error:");
@@ -2723,6 +2797,8 @@ export function editCommonContent(request: CommonEditRequest): {
   deprecated?: DeprecatedFieldErrorInfo;
   brokenInternalLinks?: BrokenInternalLink[];
   linkWarnings?: InternalLinkWarning[];
+  formLocationWarnings?: FormLocationIssue[];
+  formLocationIssues?: FormLocationIssue[];
 } {
   const { contentType, slug, operations, author } = request;
   const ci = request.ci ?? contentIndex;
@@ -2817,6 +2893,57 @@ export function editCommonContent(request: CommonEditRequest): {
     });
     if (linkGate.blocked) return linkGate.blocked;
 
+    // Page Locations field: wrong names and forms left without a location block when it is the field edited.
+    const formLocationWarnings: FormLocationIssue[] = [];
+    const commonTouched = touchedPathsFromOperations(operations);
+    for (const gateLocale of getCommonEditGateLocales(contentType, slug, contentRootName)) {
+      const localeData = (ci.loadLocaleData(contentType, slug, gateLocale).data as Record<string, unknown> | null) || {};
+      const merged = deepMerge(commonData, localeData) as Record<string, unknown>;
+      const gate = runFormLocationGate({ pageData: merged, contentType, contentRoot: contentRootName });
+      if (gate.errors.length > 0 && editTouchesFormLocation(gate, { paths: commonTouched, sectionIndexes: new Set() })) {
+        return {
+          success: false,
+          error: formLocationBlockMessage(gate.errors),
+          errorCode: gate.errors[0]!.code,
+          formLocationIssues: gate.errors,
+        };
+      }
+      for (const issue of [...gate.errors, ...gate.warnings]) {
+        if (!formLocationWarnings.some((w) => w.code === issue.code && w.property_path === issue.property_path)) {
+          formLocationWarnings.push(issue);
+        }
+      }
+    }
+
+    {
+      const landingPath = landingPathForEntry(contentType, slug, contentRootName);
+      if (landingPath) {
+        const adsGate = runAdsAccountLocationGate({
+          landingPath,
+          contentType,
+          contentRoot: contentRootName,
+        });
+        // Common edits can go live immediately — block when multi-account ads are live.
+        if (adsGate.errors.length > 0) {
+          return {
+            success: false,
+            error: adsAccountLocationBlockMessage(adsGate.errors),
+            errorCode: adsGate.errors[0]!.code,
+          };
+        }
+        for (const w of adsGate.warnings) {
+          if (!formLocationWarnings.some((x) => x.code === w.code && x.property_path === w.property_path)) {
+            formLocationWarnings.push({
+              code: w.code,
+              message: w.message,
+              property_path: w.property_path,
+              fix_field_path: w.fix_field_path,
+            });
+          }
+        }
+      }
+    }
+
     const updatedYaml = safeYamlDump(commonData, {
       lineWidth: -1,
       noRefs: true,
@@ -2830,6 +2957,7 @@ export function editCommonContent(request: CommonEditRequest): {
     return {
       success: true,
       ...(linkGate.linkWarnings.length > 0 ? { linkWarnings: linkGate.linkWarnings } : {}),
+      ...(formLocationWarnings.length > 0 ? { formLocationWarnings } : {}),
     };
   } catch (error) {
     log.error({ err: error }, "Common content edit error:");
@@ -3053,7 +3181,7 @@ export async function checkSlugRename(
     };
   }
 
-  const { assertLocaleUrlAvailable, assertNoRedirectConflict, redirectPathsFromMeta } = await import(
+  const { assertLocaleUrlAvailable, assertNoRedirectConflict, redirectPathsFromMeta, resolveCurrentLocaleUrl } = await import(
     "./locale-url-slug.js"
   );
 
@@ -3077,16 +3205,26 @@ export async function checkSlugRename(
     };
   }
 
-  const effectiveLocale =
-    contentType === "landing"
-      ? ((ci.loadCommonData("landing", resolvedFolderSlug)?.locale as string) || locale)
-      : locale;
+  // The requested language's own file; `_common.yml` `locale` is ignored legacy.
+  const effectiveLocale = locale;
 
   const localeFile = [`${effectiveLocale}.yml`, `${effectiveLocale}.yaml`].find(
     (f) => fs.existsSync(path.join(folderPath, f)),
   );
   if (!localeFile) {
     return { ok: false, statusCode: 404, code: "locale_not_found", error: `Locale file not found: ${effectiveLocale}` };
+  }
+
+  const { singleAddressConflictResult } = await import("./locale-url-slug.js");
+  const sharedAddress = singleAddressConflictResult({
+    ci,
+    contentType,
+    folderSlug: resolvedFolderSlug,
+    locale: effectiveLocale,
+    newSlug,
+  });
+  if (!sharedAddress.ok) {
+    return { ok: false, statusCode: 409, code: sharedAddress.code, error: sharedAddress.error };
   }
 
   const localeFilePath = path.join(folderPath, localeFile);
@@ -3145,17 +3283,14 @@ export async function checkSlugRename(
     };
   }
 
-  const mergedOldForUrl = { ...commonData, ...parsed, slug: currentSlug };
-  const oldUrlResult = assertLocaleUrlAvailable({
+  const oldUrl = resolveCurrentLocaleUrl({
     contentType,
     entryIdentity: resolvedFolderSlug,
     locale: effectiveLocale,
-    mergedPageData: mergedOldForUrl,
+    parsed: { ...parsed, slug: currentSlug },
+    commonData,
     ci,
   });
-  const oldUrl = oldUrlResult.ok
-    ? oldUrlResult.url
-    : ci.buildUrl(contentType, effectiveLocale, currentSlug);
 
   return {
     ok: true,
@@ -3180,7 +3315,7 @@ export async function renameContentSlug(
 ): Promise<ContentLifecycleResult<{
   success: boolean; folderSlug: string; oldSlug: string; newSlug: string;
   oldUrl: string; newUrl: string; locale: string; redirectCreated: boolean; routed: boolean;
-  clusterRewireQueued: boolean;
+  clusterRewireQueued: boolean; ads_on_old_url: AdsOnUrlResult;
 }>> {
   const { contentType, newSlug, createRedirect = false, enforceRedirectPolicy = false, author } = input;
   const ci = input.ci ?? contentIndex;
@@ -3231,6 +3366,21 @@ export async function renameContentSlug(
   });
   if (!redirectGate.ok) {
     return { success: false, statusCode: redirectGate.statusCode, code: redirectGate.code, error: redirectGate.error };
+  }
+
+  const { adsForSitePath } = await import("./url-removal-check.js");
+  const { adFacts, adsByPlatformLabel } = await import("@shared/url-removal");
+  const adsOnOldUrl = adsForSitePath(oldUrl, ci);
+  if (adsOnOldUrl.live.length > 0 && !createRedirect) {
+    return {
+      success: false,
+      statusCode: 409,
+      code: "live_ads_point_to_old_url",
+      error:
+        `${adsOnOldUrl.live.length} live ad(s) (${adsByPlatformLabel(adsOnOldUrl.live)}) send people to ${oldUrl}. ` +
+        "Rename with a redirect so they keep working, or pause / move the ads first and refresh ad data.",
+      details: { old_url: oldUrl, ads: adFacts(adsOnOldUrl.live), paused_ads: adFacts(adsOnOldUrl.paused) },
+    };
   }
 
   if (check.ownRedirectHit) {
@@ -3293,6 +3443,7 @@ export async function renameContentSlug(
       success: true, folderSlug: resolvedFolderSlug, oldSlug: currentSlug,
       newSlug, oldUrl, newUrl, locale: effectiveLocale, redirectCreated: !!createRedirect, routed,
       clusterRewireQueued,
+      ads_on_old_url: adsOnOldUrl,
     },
   };
 }
@@ -3396,11 +3547,118 @@ export interface DeleteContentEntryInput {
   author?: string;
   localesToDelete?: string[];
   contentRootName?: string;
+  /** Send visitors of each deleted locale's URL (and its old addresses) to this entry, same locale. */
+  redirectTo?: { contentType: string; slug: string } | null;
+  /** Agents deleting a page live 24h or more without `redirectTo` must say why (min 10 chars). */
+  noRedirectReason?: string;
+  callerIsAgent?: boolean;
+  ci?: ContentIndex;
+}
+
+export const NO_REDIRECT_REASON_MIN = 10;
+
+type DeleteRedirectAdded = { from: string; to_type: string; to_slug: string; locale: string; file: string };
+
+/**
+ * Before deleting: add each deleted locale's URL (plus that locale's own old addresses) to the
+ * destination entry's `meta.redirects` in the same locale. All-or-nothing: nothing is written
+ * when a locale is missing on the destination or an address already redirects elsewhere.
+ */
+async function addDeleteRedirectsToDestination(opts: {
+  ci: ContentIndex;
+  rootName: string;
+  author?: string;
+  deletedType: string;
+  deletedSlug: string;
+  deletedFolderPath: string;
+  urlsByLocale: Array<{ locale: string; url: string }>;
+  redirectTo: { contentType: string; slug: string };
+}): Promise<
+  | { ok: true; added: DeleteRedirectAdded[] }
+  | { ok: false; statusCode: number; code: string; error: string; details?: Record<string, unknown> }
+> {
+  const { ci, rootName, author } = opts;
+  const redirectTo = { ...opts.redirectTo, contentType: ci.normalizeType(opts.redirectTo.contentType) };
+  const { assertNoRedirectConflict, redirectPathsFromMeta, normalizeRedirectPath } = await import("./locale-url-slug.js");
+  if (!isValidType(redirectTo.contentType)) {
+    return { ok: false, statusCode: 400, code: "redirect_destination_invalid", error: `Invalid destination type: ${redirectTo.contentType}` };
+  }
+  const destRef = resolveEntryRef(ci, { contentType: redirectTo.contentType, ref: redirectTo.slug });
+  const destSlug = destRef.ok ? destRef.entryId : ci.resolveBaseSlug(redirectTo.slug, redirectTo.contentType);
+  const destFolder = ci.getContentFolderPath(redirectTo.contentType, destSlug);
+  if (!fs.existsSync(destFolder)) {
+    return { ok: false, statusCode: 404, code: "redirect_destination_not_found", error: `Destination page not found: ${redirectTo.contentType}/${redirectTo.slug}` };
+  }
+  if (path.resolve(destFolder) === path.resolve(opts.deletedFolderPath)) {
+    return { ok: false, statusCode: 400, code: "redirect_destination_is_deleted_page", error: "Pick a different page to send visitors to (not the one being deleted)." };
+  }
+
+  const deletedCommon = (ci.loadCommonData(opts.deletedType as never, opts.deletedSlug) ?? {}) as Record<string, unknown>;
+  const ownPaths = new Set(redirectPathsFromMeta(deletedCommon));
+  const plan: Array<{ locale: string; file: string; paths: string[] }> = [];
+  const missing: string[] = [];
+  for (const { locale, url } of opts.urlsByLocale) {
+    const file = [`${locale}.yml`, `${locale}.yaml`].find((f) => fs.existsSync(path.join(destFolder, f)));
+    if (!file) {
+      missing.push(locale);
+      continue;
+    }
+    const deletedLocaleFile = [`${locale}.yml`, `${locale}.yaml`].map((f) => path.join(opts.deletedFolderPath, f)).find((f) => fs.existsSync(f));
+    const deletedDoc = deletedLocaleFile ? (ci.safeYamlLoad(fs.readFileSync(deletedLocaleFile, "utf-8")) ?? {}) : {};
+    const oldPaths = redirectPathsFromMeta(deletedDoc);
+    for (const p of oldPaths) ownPaths.add(p);
+    plan.push({ locale, file, paths: Array.from(new Set([normalizeRedirectPath(url), ...oldPaths])) });
+  }
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      statusCode: 400,
+      code: "redirect_destination_missing_locale",
+      error: `The destination page has no ${missing.join(", ")} version, so visitors of those URLs can't be sent there. Pick another page or delete only the other locales.`,
+      details: { missing_locales: missing },
+    };
+  }
+  const redirects = ci.getRedirects();
+  for (const step of plan) {
+    for (const p of step.paths) {
+      const conflict = assertNoRedirectConflict({ url: p, redirects, ownRedirectPaths: Array.from(ownPaths) });
+      if (!conflict.ok) {
+        return { ok: false, statusCode: conflict.statusCode, code: conflict.code, error: conflict.error, details: { conflictUrl: conflict.conflictUrl, redirectTo: conflict.redirectTo } };
+      }
+    }
+  }
+
+  const added: DeleteRedirectAdded[] = [];
+  const destTypeFolder = getFolder(redirectTo.contentType);
+  for (const step of plan) {
+    const filePath = path.join(destFolder, step.file);
+    const doc = (ci.safeYamlLoad(fs.readFileSync(filePath, "utf-8")) ?? {}) as Record<string, unknown>;
+    const meta = (doc.meta && typeof doc.meta === "object" ? doc.meta : {}) as Record<string, unknown>;
+    const list = Array.isArray(meta.redirects) ? [...meta.redirects] : [];
+    const existing = new Set(redirectPathsFromMeta({ meta: { redirects: list } }));
+    let changed = false;
+    for (const p of step.paths) {
+      if (existing.has(p)) continue;
+      list.push(p);
+      existing.add(p);
+      changed = true;
+      added.push({ from: p, to_type: redirectTo.contentType, to_slug: destSlug, locale: step.locale, file: `${rootName}/${destTypeFolder}/${destSlug}/${step.file}` });
+    }
+    if (!changed) continue;
+    meta.redirects = list;
+    doc.meta = meta;
+    fs.writeFileSync(filePath, safeYamlDump(doc, { lineWidth: -1, noRefs: true }), "utf-8");
+    markFileAsModified(`${rootName}/${destTypeFolder}/${destSlug}/${step.file}`, author);
+  }
+  return { ok: true, added };
 }
 
 export async function deleteContentEntry(
   input: DeleteContentEntryInput,
-): Promise<ContentLifecycleResult<{ success: boolean; message: string; deletedFiles?: string[]; folderRemoved?: boolean }>> {
+): Promise<ContentLifecycleResult<{
+  success: boolean; message: string; deletedFiles?: string[]; folderRemoved?: boolean;
+  redirects_added?: DeleteRedirectAdded[]; ads_on_url?: Record<string, unknown>; no_redirect_reason?: string;
+}>> {
   const { type, slug, author, localesToDelete = [] } = input;
   const rootName = input.contentRootName ?? getDefaultContentRootName();
 
@@ -3443,6 +3701,57 @@ export async function deleteContentEntry(
   if (!realPath.startsWith(allowedBase + path.sep)) {
     return { success: false, statusCode: 400, error: "Invalid path" };
   }
+
+  const ci = input.ci ?? contentIndex;
+  const { assessUrlRemoval, liveAdsOf, pausedAdsOf } = await import("./url-removal-check.js");
+  const { adFacts } = await import("@shared/url-removal");
+  const removal = await assessUrlRemoval({ contentType: type, slug: resolvedSlug, locales: localesToDelete, action: "delete", ci });
+  const urlsByLocale = removal.locales.flatMap((l) => (l.url ? [{ locale: l.locale, url: l.url }] : []));
+  const liveAds = liveAdsOf(removal);
+  const adsSummary = {
+    live: adFacts(liveAds),
+    paused: adFacts(pausedAdsOf(removal)),
+    checked: removal.ads_checked,
+    urls: urlsByLocale,
+  };
+  const reason = (input.noRedirectReason ?? "").trim();
+  if (
+    input.callerIsAgent &&
+    !input.redirectTo &&
+    removal.locales.some((l) => l.redirect_required_for_agents) &&
+    reason.length < NO_REDIRECT_REASON_MIN
+  ) {
+    return {
+      success: false,
+      statusCode: 400,
+      code: "redirect_destination_required",
+      error:
+        `"${type}/${resolvedSlug}" has been live 24 hours or more. Pass redirect_to (a page to send its visitors to) ` +
+        `or no_redirect_reason (at least ${NO_REDIRECT_REASON_MIN} characters) to delete it.`,
+      details: { urls: urlsByLocale, age_hours: removal.locales[0]?.age_hours ?? null, ads: adsSummary },
+    };
+  }
+  let redirectsAdded: DeleteRedirectAdded[] = [];
+  if (input.redirectTo && urlsByLocale.length > 0) {
+    const r = await addDeleteRedirectsToDestination({
+      ci,
+      rootName,
+      author,
+      deletedType: type,
+      deletedSlug: resolvedSlug,
+      deletedFolderPath: folderPath,
+      urlsByLocale,
+      redirectTo: input.redirectTo,
+    });
+    if (!r.ok) return { success: false, statusCode: r.statusCode, code: r.code, error: r.error, ...(r.details ? { details: r.details } : {}) };
+    redirectsAdded = r.added;
+    if (redirectsAdded.length > 0) clearRedirectCache();
+  }
+  const deleteExtras = {
+    redirects_added: redirectsAdded,
+    ads_on_url: adsSummary,
+    ...(reason && !input.redirectTo ? { no_redirect_reason: reason } : {}),
+  };
 
   if (localesToDelete.length > 0) {
     const deletedFiles: string[] = [];
@@ -3522,6 +3831,7 @@ export async function deleteContentEntry(
           : `Deleted ${deletedFiles.join(", ")} from ${type}/${slug}`,
         deletedFiles,
         folderRemoved,
+        ...deleteExtras,
       },
     };
   }
@@ -3556,7 +3866,7 @@ export async function deleteContentEntry(
     folderRemoved: true,
   });
 
-  return { success: true, data: { success: true, message: `Successfully deleted ${type}/${slug}` } };
+  return { success: true, data: { success: true, message: `Successfully deleted ${type}/${slug}`, ...deleteExtras } };
 }
 
 // ─── createContentEntry ───────────────────────────────────────────────────────
@@ -3976,6 +4286,8 @@ export async function createContentEntry(
           if (file === "_common.yml") {
             parsed.title = title;
             delete parsed.funnel;
+            // Language comes from the language file; `locale` here is ignored legacy.
+            if (isSingleAddressPattern(typeConfigForParams?.url_pattern)) delete parsed.locale;
             for (const [fieldName, newValue] of Object.entries(uniqueFieldValues)) {
               if (fieldName === "slug" || fieldName === "title") continue;
               parsed[fieldName] = coerceToOriginalType(String(newValue), parsed[fieldName]);

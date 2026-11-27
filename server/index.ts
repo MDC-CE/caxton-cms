@@ -20,6 +20,7 @@ import { siteResolutionMiddleware, buildSiteContextMap, getSiteContextMap } from
 import { loadSitesYmlFromBucket } from "./sites-yml-store";
 import { scanProductContent as scanEcommerceContent, startProductWatcher as startEcommerceWatcher } from "./product/product-index";
 import { loadUsersStateFromBucket } from "./user-store";
+import { loadErrorLogIgnoreFromBucket } from "./error-log-ignore-store";
 import {
   loadAllRuntimeIssuesFromBucket,
   shutdownRuntimeIssues,
@@ -53,11 +54,20 @@ import { getOptimizationSettings } from "./settings";
 import { BOOT_ID, BOOT_TIME, getLastSoftReload, registerShutdownHandler } from "./server-control";
 import { beginRequest, endRequest, flushTick, noteApi, resolveApiRoute, startTick } from "./process-stats";
 import logger from "./logger";
+import { applyServerTiming, markTiming, startServerTiming } from "./server-timing";
+import { assertConnectionTokenStaffNotEnabledInProduction } from "./weblify-connection-token";
 
 // Only this process may enqueue ContentIndex index_refresh (see enqueueIndexRefresh).
 process.env.WEBLIFY_PROCESS = "web";
 // Note: gcs.initFromEnv() is called by media.initFromEnv() in routes.ts,
 // which happens before sync-state needs it.
+
+try {
+  assertConnectionTokenStaffNotEnabledInProduction();
+} catch (err) {
+  logger.fatal({ err }, "[FATAL] connection-token staff misconfiguration");
+  process.exit(1);
+}
 
 // ─── Process-level crash guards ─────────────────────────────────────────────
 // Registered before any async work so no early failure goes unlogged.
@@ -74,6 +84,11 @@ process.on("unhandledRejection", (reason) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const app = express();
+
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  startServerTiming(res);
+  next();
+});
 
 app.use(cookieParser());
 
@@ -202,18 +217,40 @@ declare module 'http' {
     rawBody: unknown
   }
 }
-app.use(express.json({
+
+/** MCP/OAuth are proxied as raw streams — do not parse (Express default 100kb would 413 large tool uploads). */
+function isMcpProxyPath(pathname: string): boolean {
+  return (
+    pathname === "/mcp"
+    || pathname.startsWith("/mcp/")
+    || pathname === "/oauth"
+    || pathname.startsWith("/oauth/")
+    || pathname === "/.well-known/oauth-authorization-server"
+    || pathname === "/.well-known/oauth-protected-resource"
+    || pathname.startsWith("/.well-known/oauth-protected-resource/")
+  );
+}
+
+const jsonBodyParser = express.json({
   verify: (req, _res, buf) => {
     req.rawBody = buf;
-  }
-}));
-app.use(express.urlencoded({
+  },
+});
+const urlencodedBodyParser = express.urlencoded({
   extended: false,
   verify: (req, _res, buf) => {
-    // Capture raw bytes for proxy forwarding (same pattern as express.json above)
+    // Capture raw bytes for IPN / webhook / proxy consumers that need the original payload
     if (!req.rawBody) req.rawBody = buf;
   },
-}));
+});
+app.use((req, res, next) => {
+  if (isMcpProxyPath(req.path)) return next();
+  return jsonBodyParser(req, res, next);
+});
+app.use((req, res, next) => {
+  if (isMcpProxyPath(req.path)) return next();
+  return urlencodedBodyParser(req, res, next);
+});
 
 /** Cap JSON bodies in API request logs — full payloads (events feed, variables, redirects) flood dev stdout. */
 const API_LOG_BODY_MAX_CHARS = 280;
@@ -244,15 +281,7 @@ function shouldTrackRoute(req: Request): boolean {
   if (!req.route) return false;
   const path = req.path || "";
   if (path === "/apply" || path.startsWith("/apply/")) return false;
-  if (
-    path === "/mcp"
-    || path.startsWith("/mcp/")
-    || path === "/oauth"
-    || path.startsWith("/oauth/")
-    || path === "/.well-known/oauth-authorization-server"
-    || path === "/.well-known/oauth-protected-resource"
-    || path.startsWith("/.well-known/oauth-protected-resource/")
-  ) return false;
+  if (isMcpProxyPath(path)) return false;
   return true;
 }
 
@@ -351,25 +380,7 @@ app.use((req, res, next) => {
   const MCP_PORT = process.env.MCP_PORT || "3001";
 
   function pipeToMcp(req: Request, res: Response) {
-    // Express body-parser may have already consumed the stream, so we detect
-    // that and re-serialize the parsed body rather than piping a dead stream.
-    const bodyAlreadyParsed =
-      req.body !== undefined &&
-      ["POST", "PUT", "PATCH"].includes(req.method);
-
-    // Forward the original raw body bytes so the MCP server's own parsers
-    // receive exactly what the client sent (avoids re-encoding mismatches).
-    let bodyBuf: Buffer | null = null;
-    if (bodyAlreadyParsed) {
-      const raw = req.rawBody;
-      if (Buffer.isBuffer(raw) && raw.length > 0) {
-        bodyBuf = raw;
-      } else {
-        // Fallback: re-encode the parsed body (JSON requests only reach here)
-        bodyBuf = Buffer.from(JSON.stringify(req.body));
-      }
-    }
-
+    // Body parsers skip MCP proxy paths so the request stream is intact here.
     const firstHeaderValue = (v: string | string[] | undefined) =>
       (Array.isArray(v) ? v[0] : v)?.split(",")[0]?.trim() || undefined;
     const forwardedHost = firstHeaderValue(req.headers["x-forwarded-host"]) ?? req.get("host");
@@ -380,14 +391,7 @@ app.use((req, res, next) => {
       ...(forwardedHost ? { "x-forwarded-host": forwardedHost } : {}),
       "x-forwarded-proto": forwardedProto,
     };
-    // Remove hop-by-hop headers that conflict with our re-serialized body
-    delete headers["transfer-encoding"];
     delete headers["connection"];
-    if (bodyBuf) {
-      headers["content-length"] = bodyBuf.length;
-      // Only set a content-type fallback if none was forwarded
-      headers["content-type"] = (headers["content-type"] as string) ?? "application/json";
-    }
 
     const options: http.RequestOptions = {
       hostname: "127.0.0.1",
@@ -406,11 +410,7 @@ app.use((req, res, next) => {
       if (!res.headersSent) res.status(502).json({ error: "MCP server unavailable" });
     });
 
-    if (bodyBuf) {
-      proxy.end(bodyBuf);
-    } else {
-      req.pipe(proxy, { end: true });
-    }
+    req.pipe(proxy, { end: true });
   }
 
   app.all("/mcp", pipeToMcp as any);
@@ -490,6 +490,26 @@ app.use((req, res, next) => {
     res.json({ ok: true, adopted: adoptHtmlCacheKeys(keys), dropped: dropKeys.length });
   });
 
+  // Sidequest marked content dirty; requeue into this process's auto-commit memory queue.
+  app.post("/api/internal/content/requeue-dirties", async (req, res) => {
+    const addr = req.socket.remoteAddress || "";
+    const loopback = addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
+    const secret = process.env.SESSION_SECRET || "";
+    const header = typeof req.headers.authorization === "string" ? req.headers.authorization : "";
+    if (!loopback || !secret || header !== `Bearer ${secret}`) {
+      res.status(403).json({ ok: false });
+      return;
+    }
+    const body = req.body as { files?: unknown; author?: unknown } | undefined;
+    const files = Array.isArray(body?.files)
+      ? body.files.filter((f): f is string => typeof f === "string" && f.length > 0)
+      : [];
+    const author = typeof body?.author === "string" && body.author.trim() ? body.author.trim() : "agent";
+    const { requeueTrackedLocalDirties } = await import("./auto-commit");
+    requeueTrackedLocalDirties(files.map((filePath) => ({ filePath, author })));
+    res.json({ ok: true, requeued: files.length });
+  });
+
   // Serve cached anonymous HTML before initial-data resolution / SSR work.
   // Only active in production — development always re-renders for HMR accuracy.
   if (app.get("env") !== "development") {
@@ -502,12 +522,24 @@ app.use((req, res, next) => {
       htmlDocumentCacheControlFor,
       logHtmlRender,
       pickCachedEncoding,
+      getBootedHtmlBody,
       rehydrateHtmlPageCache,
     } = await import("./html-page-cache");
     const { urlBakesStoredPageQuery } = await import("./initial-data-middleware");
-    rehydrateHtmlPageCache();
+    const rehydrated = rehydrateHtmlPageCache();
+    logger.info(
+      {
+        files: rehydrated.files,
+        loaded: rehydrated.loaded,
+        skippedForSpace: rehydrated.skippedForSpace,
+        usedMb: Math.round(rehydrated.usedBytes / (1024 * 1024)),
+        budgetMb: Math.round(rehydrated.budgetBytes / (1024 * 1024)),
+      },
+      `HTML cache loaded ${rehydrated.loaded} of ${rehydrated.files} pages, ` +
+        `${Math.round(rehydrated.usedBytes / (1024 * 1024))} of ${Math.round(rehydrated.budgetBytes / (1024 * 1024))}MB`,
+    );
     const { resolveHtmlVariantKey } = await import("./html-variant-key");
-    const { applyPageBoot, needsPageBoot } = await import("./ads/ads-first");
+    const { injectPageBoot, needsPageBoot, pageBootKey, resolvePageBootForResponse } = await import("./ads/ads-first");
     app.use(async (req, res, next) => {
       if (req.path.startsWith("/api/") || req.path.startsWith("/private/")) {
         return next();
@@ -520,8 +552,12 @@ app.use((req, res, next) => {
         return next();
       }
       if (shouldBypassHtmlCache(req) || isEditDocumentRequest(req.originalUrl || req.url)) return next();
+      markTiming(res, "pre");
 
       const site = (res.locals as any).site;
+      const contentRoot = site?.contentRoot as string | undefined;
+      const { maybeHardDenyLlmRequest } = await import("./crawl-control");
+      if (maybeHardDenyLlmRequest(req, res, contentRoot)) return;
       const siteId =
         site?.contentRootName || site?.contentRoot || site?.domain || "default";
       const cleanUrl = (req.originalUrl || req.url || "/")
@@ -529,11 +565,15 @@ app.use((req, res, next) => {
         .split("#")[0];
       const cachePath = canonicalHtmlCachePath(cleanUrl, site?.contentIndex);
       const { prepareLlmHtmlRequest, renderAudienceLlmMiss, sendCachedHtmlPage, LLM_HTML_CACHE_CONTROL } = await import("./llm-html-request");
-      const llmHit = prepareLlmHtmlRequest(req, res, siteId, cachePath);
+      const { applyXRobotsTagFromHtml } = await import("./settings");
+      const llmHit = prepareLlmHtmlRequest(req, res, siteId, cachePath, contentRoot);
+      if (res.headersSent) return;
       const baked = urlBakesStoredPageQuery(req.originalUrl || req.url || "/", site?.contentIndex);
       if (llmHit && !baked) {
         logHtmlRender({ url: cleanUrl, ms: 0, cache: "HIT" });
-        sendCachedHtmlPage(req, res, llmHit, LLM_HTML_CACHE_CONTROL);
+        markTiming(res, "lookup");
+        applyServerTiming(res);
+        sendCachedHtmlPage(req, res, llmHit, LLM_HTML_CACHE_CONTROL, contentRoot);
         return;
       }
       if ((res.locals as { htmlVariantKey?: string }).htmlVariantKey === "live" && !baked) {
@@ -551,17 +591,33 @@ app.use((req, res, next) => {
       const cacheKey = buildHtmlCacheKey(siteId, cachePath, variantKey);
       const started = performance.now();
       const cached = getCachedHtml(cacheKey);
+      markTiming(res, "lookup");
       if (!cached) return next();
       if (urlBakesStoredPageQuery(req.originalUrl || req.url || "/", site?.contentIndex)) {
         return next();
       }
 
-      // Per-request page boot (token, ads-first flags) cannot go into precompressed bodies.
-      const boot = needsPageBoot(res);
-      const encoding = boot ? "identity" : pickCachedEncoding(req.headers["accept-encoding"]);
-      const body = boot
-        ? applyPageBoot(cached.html, req, res)
-        : encoding === "br" ? cached.br : encoding === "gzip" ? cached.gzip : cached.html;
+      let encoding = pickCachedEncoding(req.headers["accept-encoding"]);
+      let body: Buffer | string;
+      if (needsPageBoot(res)) {
+        const cfg = resolvePageBootForResponse(req, res);
+        const booted = encoding === "identity"
+          ? null
+          : getBootedHtmlBody(
+              cacheKey,
+              { key: pageBootKey(cfg), token: cfg.t, inject: (html) => injectPageBoot(html, cfg) },
+              encoding,
+            );
+        if (booted) {
+          body = booted;
+        } else {
+          encoding = "identity";
+          body = injectPageBoot(cached.html, cfg);
+        }
+      } else {
+        body = encoding === "br" ? cached.br : encoding === "gzip" ? cached.gzip : cached.html;
+      }
+      markTiming(res, "boot");
       logHtmlRender({
         url: cleanUrl,
         ms: Math.round(performance.now() - started),
@@ -576,6 +632,8 @@ app.use((req, res, next) => {
       res.setHeader("X-HTML-Cache", "HIT");
       res.setHeader("Vary", "Accept-Encoding");
       if (encoding !== "identity") res.setHeader("Content-Encoding", encoding);
+      applyXRobotsTagFromHtml(res, cached.html, contentRoot);
+      applyServerTiming(res);
       res.send(body);
     });
   }
@@ -772,6 +830,9 @@ app.use((req, res, next) => {
     });
     loadUsersStateFromBucket().catch((err) => {
       logger.error({ err, worker: "UserStore" }, "failed to load users state");
+    });
+    loadErrorLogIgnoreFromBucket().catch((err) => {
+      logger.error({ err, worker: "ErrorLogIgnore" }, "failed to load error log ignore rules");
     });
     loadAllRuntimeIssuesFromBucket(
       [...getSiteContextMap().values()].map((ctx) => ({

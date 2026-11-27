@@ -7,6 +7,7 @@ import { BROKEN_INTERNAL_LINKS_CODE, type BrokenInternalLink } from "@shared/int
 import {
   BROKEN_LINKS_STAFF_MESSAGE,
   BrokenInternalLinksNotice,
+  promoteFactLiteralWarningsText,
   promoteLinkWarningsText,
 } from "@/components/editing/BrokenInternalLinksNotice";
 import {
@@ -40,6 +41,8 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { EntryActivityDialog } from "@/components/pipeline/EntryActivityBadge";
 import { Link2, Loader2, Unlink } from "lucide-react";
+import { AdsOnUrlNotice, adsNoticeFromCheck } from "@/components/editing/AdsOnUrlNotice";
+import { useUrlRemovalCheck } from "@/hooks/useUrlRemovalCheck";
 import { useToast } from "@/hooks/use-toast";
 import { getDebugToken, useDebugAuth } from "@/hooks/useDebugAuth";
 import { apiFetch } from "@/lib/queryClient";
@@ -55,8 +58,12 @@ import { STORAGE_KEY, OPEN_STORAGE_KEY } from "../types";
 import { PageHealthIndicators } from "./PageHealthIndicators";
 import { LayoutApprovalControl } from "./LayoutApprovalControl";
 import { VariantProposalBadge } from "./VariantProposalBadge";
+import { VariantInfoPopover, VariantVerdictSummary, useVariantInfo } from "./VariantInfoPopover";
 import { PendingProposalsDialog } from "./PendingProposalsDialog";
+import { PublicCacheMenuItem, type PublicCacheTarget } from "./PublicCacheMenuItem";
 import { LocaleFlag } from "./LocaleFlag";
+import { TestGoalStartPicker } from "./TestGoalStartPicker";
+import type { TestGoal } from "@shared/page-stats";
 import {
   AbStickyAdvanced,
   AbTestingNotSetUpNotice,
@@ -130,14 +137,18 @@ function formatRelativeUpdatedAt(iso: string): { relative: string; absolute: str
 function UnregisteredVariantsNotice({
   variants,
   canRegister,
+  canDelete,
   registering,
   onRegister,
+  onDelete,
   onPreview,
 }: {
   variants: Array<{ locale: string; slug: string; fileName: string }>;
   canRegister: boolean;
+  canDelete: boolean;
   registering: string | null;
   onRegister: (locale: string, slug: string) => void;
+  onDelete: (locale: string, slug: string) => void;
   onPreview: (locale: string, slug: string) => void;
 }) {
   return (
@@ -173,19 +184,35 @@ function UnregisteredVariantsNotice({
                   Not registered
                 </Badge>
               </div>
-              {canRegister && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-6 px-2 text-[11px] flex-shrink-0"
-                  disabled={registering !== null}
-                  onClick={() => onRegister(v.locale, v.slug)}
-                  data-testid={`button-register-variant-${v.locale}-${v.slug}`}
-                >
-                  {registering === key ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
-                  Add to versions
-                </Button>
-              )}
+              <div className="flex items-center gap-1 flex-shrink-0">
+                {canRegister && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-6 px-2 text-[11px]"
+                    disabled={registering !== null}
+                    onClick={() => onRegister(v.locale, v.slug)}
+                    data-testid={`button-register-variant-${v.locale}-${v.slug}`}
+                  >
+                    {registering === key ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                    Add to versions
+                  </Button>
+                )}
+                {canDelete && (
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                    disabled={registering !== null}
+                    onClick={() => onDelete(v.locale, v.slug)}
+                    title="Delete this draft"
+                    aria-label={`Delete draft ${v.slug} (${v.locale})`}
+                    data-testid={`button-delete-unregistered-${v.locale}-${v.slug}`}
+                  >
+                    <IconTrash className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+              </div>
             </div>
           );
         })}
@@ -202,6 +229,7 @@ function DefaultLiveRowActions({
   onConvert,
   onEditYaml,
   onDelete,
+  publicCache,
 }: {
   locale: string;
   allocation: number;
@@ -210,7 +238,9 @@ function DefaultLiveRowActions({
   onConvert: () => void;
   onEditYaml?: () => void;
   onDelete?: () => void;
+  publicCache?: PublicCacheTarget;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   return (
     <div className="flex items-center gap-1.5 flex-shrink-0">
       <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium">
@@ -252,7 +282,7 @@ function DefaultLiveRowActions({
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
-      <DropdownMenu>
+      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
           <Button
             size="icon"
@@ -263,7 +293,8 @@ function DefaultLiveRowActions({
             <IconDots className="h-3 w-3" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-48">
+        <DropdownMenuContent align="end" className={publicCache ? "w-64" : "w-48"}>
+          {publicCache && <PublicCacheMenuItem target={publicCache} open={menuOpen} />}
           {onEditYaml && (
             <DropdownMenuItem
               onClick={onEditYaml}
@@ -375,6 +406,11 @@ export function VersioningView({
   // Template versioning only when attached shared-layout (API returns versioningSlug "single")
   const isTemplateVersioning =
     isSharedLayout && !isDetached && versioningData?.versioningSlug === TEMPLATE_VERSIONING_SLUG;
+  // The shared template itself has no public page; an attached entry still does.
+  const publicCacheFor = (locale: string): PublicCacheTarget | undefined =>
+    contentInfo.type && contentInfo.slug && contentInfo.slug !== TEMPLATE_VERSIONING_SLUG
+      ? { contentType: contentInfo.type, slug: contentInfo.slug, locale }
+      : undefined;
   // Mutations use the resolved slug from the API; never guess "single" while detached
   const versioningWriteSlug =
     versioningData?.versioningSlug ||
@@ -438,6 +474,7 @@ export function VersioningView({
   /** Traffic can only go down until A/B testing is set up and the latest check passed. */
   const abLowerOnly = abNotSetUp || abCheckFailing;
   const [tempAllocations, setTempAllocations] = useState<Record<string, number>>({});
+  const [startGoal, setStartGoal] = useState<TestGoal>("leads");
   const [isSaving, setIsSaving] = useState(false);
   const [savedLocale, setSavedLocale] = useState<string | null>(null);
 
@@ -476,7 +513,16 @@ export function VersioningView({
   });
   const [isPromoting, setIsPromoting] = useState(false);
 
-  const [deleteTarget, setDeleteTarget] = useState<{ locale: string; slug: string; allocation: number } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<
+    { locale: string; slug: string; allocation: number; unregistered?: boolean } | null
+  >(null);
+  const deleteInfoQuery = useVariantInfo({
+    contentType: contentInfo.type,
+    versioningSlug: versioningWriteSlug,
+    locale: deleteTarget?.locale ?? "",
+    variantSlug: deleteTarget?.slug ?? "",
+    enabled: Boolean(deleteTarget) && !(deleteTarget!.allocation > 0),
+  });
   const [isDeleting, setIsDeleting] = useState(false);
 
   const [convertTarget, setConvertTarget] = useState<string | null>(null);
@@ -760,12 +806,19 @@ export function VersioningView({
     return true;
   };
 
-  const toastIfRebuilt = (warnings: unknown) => {
+  const toastIfRebuilt = (warnings: unknown, factLiteralWarnings?: unknown) => {
     if (Array.isArray(warnings) && warnings.some((w) => (w as { code?: string })?.code === "draft_rebuilt")) {
       toast({ title: "Published combined with the live changes made after the draft was created." });
     }
     const linkText = promoteLinkWarningsText(warnings);
     if (linkText) toast({ title: "Check the links on this page", description: linkText });
+    const factText = promoteFactLiteralWarningsText(warnings, factLiteralWarnings);
+    if (factText) {
+      toast({
+        title: "Use the site fact variable",
+        description: factText,
+      });
+    }
   };
 
   const handlePromote = async (confirms = promoteConfirms, urlSlugs = promoteUrlSlugs) => {
@@ -795,7 +848,7 @@ export function VersioningView({
           title: `Published "${promoteTarget.slug}"`,
           description: `Live for locale(s): ${(data.locales || []).join(", ") || "all"}`,
         });
-        toastIfRebuilt(data.warnings);
+        toastIfRebuilt(data.warnings, data.fact_literal_warnings);
         resetPromoteIssue();
         emitVariantPromoted({
           contentType: contentInfo.type,
@@ -826,7 +879,7 @@ export function VersioningView({
         return;
       }
       toast({ title: `Variant "${promoteTarget.slug}" promoted to default` });
-      toastIfRebuilt(data.warnings);
+      toastIfRebuilt(data.warnings, data.fact_literal_warnings);
       resetPromoteIssue();
       emitVariantPromoted({ contentType: contentInfo.type, slug: contentInfo.slug, locale: promoteTarget.locale, variantSlug: promoteTarget.slug });
       setPromoteTarget(null);
@@ -896,6 +949,23 @@ export function VersioningView({
       return;
     }
     setConvertTarget(locale);
+  };
+
+  const convertAds = useUrlRemovalCheck({
+    action: "unpublish",
+    contentType: contentInfo.type,
+    slug: versioningWriteSlug || contentInfo.slug,
+    locales: convertTarget ? [convertTarget] : [],
+    enabled: convertTarget !== null,
+  });
+  const [convertAdsNote, setConvertAdsNote] = useState<string | null>(null);
+  const onRefreshConvertAds = async () => {
+    try {
+      await convertAds.refreshAds();
+      setConvertAdsNote("Meta ads re-read just now. Google ads update with the next daily sync.");
+    } catch (err) {
+      setConvertAdsNote(err instanceof Error ? err.message : "Couldn't refresh ad data.");
+    }
   };
 
   const handleConvertToDraft = async () => {
@@ -971,7 +1041,27 @@ export function VersioningView({
     const variantSum = localeData.variants.reduce((s, v) => s + v.allocation, 0);
     allocations["__default__"] = Math.max(0, 100 - variantSum);
     setTempAllocations(allocations);
+    setStartGoal("leads");
     setEditingLocale(locale);
+  };
+
+  /** True when saving the open split starts a test (no traffic now, some after). */
+  const savingStartsTest = (locale: string): boolean => {
+    const localeData = versioningData?.versioning?.[locale];
+    if (!localeData) return false;
+    const hadTraffic = localeData.variants.some((v) => (v.allocation ?? 0) > 0);
+    const willHave = localeData.variants.some((v) => v.slug !== "__default__" && (tempAllocations[v.slug] ?? v.allocation) > 0);
+    return !hadTraffic && willHave;
+  };
+
+  /** Versions that get traffic after the open split is saved (`default` = live page). */
+  const versionsAfterSave = (locale: string): string[] => {
+    const localeData = versioningData?.versioning?.[locale];
+    if (!localeData) return [];
+    const variants = localeData.variants
+      .filter((v) => v.slug !== "__default__" && v.slug !== "default" && (tempAllocations[v.slug] ?? v.allocation) > 0)
+      .map((v) => v.slug);
+    return (tempAllocations["__default__"] ?? 0) > 0 ? ["default", ...variants] : variants;
   };
 
   const cancelEdit = () => {
@@ -1003,9 +1093,13 @@ export function VersioningView({
         confirm_publish_variants?: boolean;
         validation_job_id?: string;
         validation_job_ids?: string[];
+        test_goal?: TestGoal;
       } = { variants };
       if (opts?.confirmPublish) {
         body.confirm_publish_variants = true;
+      }
+      if (savingStartsTest(editingLocale)) {
+        body.test_goal = startGoal;
       }
 
       const send = () =>
@@ -1731,8 +1825,10 @@ export function VersioningView({
             <UnregisteredVariantsNotice
               variants={versioningData!.unregisteredVariants!}
               canRegister={hasCapability("content_create_variant", contentInfo.type ?? undefined)}
+              canDelete={hasCapability("content_delete_variant", contentInfo.type ?? undefined)}
               registering={registeringVariant}
               onRegister={handleRegisterVariant}
+              onDelete={(locale, slug) => setDeleteTarget({ locale, slug, allocation: 0, unregistered: true })}
               onPreview={handlePreviewUnregistered}
             />
           )}
@@ -1792,6 +1888,7 @@ export function VersioningView({
                                 ? () => onRequestDeletePage({ locale, liveLocales })
                                 : undefined
                             }
+                            publicCache={publicCacheFor(locale)}
                           />
                         </div>
                       </div>
@@ -1953,6 +2050,16 @@ export function VersioningView({
                     </p>
                   )}
 
+                  {isEditing && savingStartsTest(locale) && (
+                    <TestGoalStartPicker
+                      locale={locale}
+                      goal={startGoal}
+                      onChange={setStartGoal}
+                      versions={versionsAfterSave(locale)}
+                      enrollButtons={versioningData?.enroll_buttons?.[locale]}
+                    />
+                  )}
+
                   {abNoticeLocale === locale && !isEditing && (
                     <AbTestingNotSetUpNotice
                       onClose={() => setAbNoticeLocale(null)}
@@ -2042,6 +2149,7 @@ export function VersioningView({
                                       ? () => onRequestDeletePage({ locale, liveLocales })
                                       : undefined
                                   }
+                                  publicCache={publicCacheFor(locale)}
                                 />
                               )}
                             </div>
@@ -2102,6 +2210,21 @@ export function VersioningView({
                                 </button>
                               )}
                             </div>
+                            <VariantInfoPopover
+                              contentType={contentInfo.type}
+                              versioningSlug={versioningWriteSlug}
+                              locale={locale}
+                              variantSlug={variant.slug}
+                              cleanup={versioningData?.cleanupByVariant?.[locale]?.[variant.slug] ?? null}
+                              onKept={() => {
+                                if (onVersioningDataUpdate && contentInfo.type && contentInfo.slug) {
+                                  fetch(`/api/versioning/${contentInfo.type}/${contentInfo.slug}`)
+                                    .then((r) => r.json())
+                                    .then(onVersioningDataUpdate)
+                                    .catch(() => {});
+                                }
+                              }}
+                            />
                             {isActive && (
                               <Badge variant="default" className="text-[10px] px-1.5 py-0 leading-4 flex-shrink-0" data-testid={`badge-active-variant-${locale}`}>
                                 active
@@ -2578,9 +2701,28 @@ export function VersioningView({
                 <DialogDescription>
                   This will permanently remove the variant file for{" "}
                   <code className="text-xs bg-muted px-1 py-0.5 rounded">{deleteTarget?.slug}</code>{" "}
-                  ({deleteTarget?.locale}) and remove it from the versioning list. This action cannot be undone.
+                  ({deleteTarget?.locale})
+                  {deleteTarget?.unregistered
+                    ? ". It isn't in the versions list, so nothing else changes."
+                    : " and remove it from the versioning list."}{" "}
+                  This action cannot be undone.
                 </DialogDescription>
               </DialogHeader>
+              {deleteInfoQuery.isLoading ? (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground" data-testid="delete-variant-info-loading">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Checking whether anyone is using this version…
+                </div>
+              ) : deleteInfoQuery.data ? (
+                <VariantVerdictSummary info={deleteInfoQuery.data} />
+              ) : deleteInfoQuery.isError ? (
+                <p
+                  className="rounded-md border border-status-away/40 bg-status-away/10 px-2.5 py-2 text-xs text-foreground"
+                  data-testid="delete-variant-info-error"
+                >
+                  Couldn't load details for this version. Check that nobody is using it before deleting.
+                </p>
+              ) : null}
               <DialogFooter>
                 <Button
                   variant="outline"
@@ -2656,7 +2798,7 @@ export function VersioningView({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={convertTarget !== null} onOpenChange={(open) => { if (!open && !isConverting) setConvertTarget(null); }}>
+      <Dialog open={convertTarget !== null} onOpenChange={(open) => { if (!open && !isConverting) { setConvertTarget(null); setConvertAdsNote(null); } }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Convert live {convertTarget?.toUpperCase()} to draft?</DialogTitle>
@@ -2672,6 +2814,16 @@ export function VersioningView({
               </span>
             </DialogDescription>
           </DialogHeader>
+          <AdsOnUrlNotice
+            context="unpublish"
+            data={adsNoticeFromCheck(convertAds.check)}
+            loading={convertAds.loading}
+            error={convertAds.error}
+            onRefresh={onRefreshConvertAds}
+            refreshing={convertAds.refreshing}
+            refreshNote={convertAdsNote}
+            testIdPrefix="convert-ads"
+          />
           <DialogFooter className="flex-col gap-2 sm:flex-col">
             <Button
               variant="destructive"

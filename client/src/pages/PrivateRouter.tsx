@@ -1,5 +1,5 @@
 import { Switch, Route, useLocation, useParams, useSearch } from "wouter";
-import { lazy, Suspense, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, type ReactNode } from "react";
 import NotFound from "@/pages/not-found";
 import { getDebugToken, useDebugAuth } from "@/hooks/useDebugAuth";
 import { resolvePrivatePageAccess } from "@/lib/private-page-access";
@@ -83,6 +83,18 @@ function SeoGeoRedirect() {
     window.location.replace("/private/diagnostics/seo");
   }
   return null;
+}
+
+function LlmsTxtSettingsRedirect() {
+  const [, setLocation] = useLocation();
+  useEffect(() => {
+    setLocation("/private/settings/seo/llms-txt", { replace: true });
+  }, [setLocation]);
+  return (
+    <div className="min-h-screen bg-background flex items-center justify-center">
+      <div className="text-muted-foreground text-sm">Redirecting…</div>
+    </div>
+  );
 }
 
 function AgentsRedirect() {
@@ -186,9 +198,11 @@ export default function PrivateRouter() {
           <Route path="/private/settings/ai" component={AISettingsPage} />
           <Route path="/private/settings/seo/og" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo/schema" component={SeoGeoSettingsPage} />
+          <Route path="/private/settings/seo/llms-txt" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo/search-console" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo/indexnow" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo/openrush" component={SeoGeoSettingsPage} />
+          <Route path="/private/settings/seo/dataforseo" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/seo" component={SeoGeoSettingsPage} />
           <Route path="/private/settings/ads/meta" component={AdsSettingsPage} />
           <Route path="/private/settings/ads/google" component={AdsSettingsPage} />
@@ -200,7 +214,9 @@ export default function PrivateRouter() {
           <Route path="/private/settings/migrations" component={SettingsPage} />
           <Route path="/private/settings/brand" component={SettingsPage} />
           <Route path="/private/settings/robots" component={SettingsPage} />
+          <Route path="/private/settings/llms-txt" component={LlmsTxtSettingsRedirect} />
           <Route path="/private/settings/legal" component={SettingsPage} />
+          <Route path="/private/settings/session" component={SettingsPage} />
           <Route path="/private/settings/server" component={SettingsPage} />
           <Route path="/private/settings" component={SettingsPage} />
           <Route path="/private/sync-log" component={SyncLogRedirect} />

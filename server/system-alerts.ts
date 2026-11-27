@@ -27,7 +27,9 @@ export type SystemAlertCode =
   | "github_app_env_missing"
   | "decision_model_unavailable"
   | "ab_check_failed"
-  | "ab_check_inconclusive";
+  | "ab_check_inconclusive"
+  | "render_gate_failed"
+  | "render_gate_skipped";
 
 export interface SystemAlert {
   id: string;
@@ -446,6 +448,12 @@ export async function collectSystemAlerts(): Promise<SystemAlert[]> {
     /* non-fatal */
   }
 
+  try {
+    alerts.push(...(await collectRenderGateAlerts()));
+  } catch {
+    /* non-fatal */
+  }
+
   const severityRank: Record<SystemAlertSeverity, number> = {
     critical: 0,
     warning: 1,
@@ -505,6 +513,54 @@ export async function collectAbTestingAlerts(
     }
   }
   return out;
+}
+
+/**
+ * Deploy page render check (data/render-gate.json, written before the traffic flip).
+ * Failed: critical, the deploy did not go live. Skipped by override: warning, it went
+ * live anyway. Cleared by the next deploy whose check passes.
+ */
+export async function collectRenderGateAlerts(
+  state?: import("./render-gate-state").RenderGateState | null,
+): Promise<SystemAlert[]> {
+  const gate = state === undefined ? (await import("./render-gate-state")).readRenderGateState() : state;
+  const conflicts = gate?.conflicts ?? [];
+  if (!gate || gate.result === "passed" || (!gate.failing?.length && conflicts.length === 0)) return [];
+  const parts: string[] = [];
+  if (gate.failing?.length) {
+    const worst = [...gate.failing].sort((a, b) => b.share - a.share)[0]!;
+    const others = gate.failing.length > 1 ? ` Also over the limit: ${gate.failing.filter((f) => f !== worst).map((f) => f.type).join(", ")}.` : "";
+    const pages = gate.empty_paths?.length
+      ? ` Empty pages include ${gate.empty_paths.slice(0, 5).join(", ")}${gate.empty_paths.length > 5 ? ", …" : ""}.`
+      : "";
+    parts.push(`${Math.round(worst.share * 100)}% of ${worst.type} pages (${worst.empty}/${worst.total}) rendered empty.${others}${pages}`);
+  }
+  if (conflicts.length) {
+    const list = conflicts.slice(0, 5).map((c) => `${c.address} (${c.locales.join(", ")})`).join(", ");
+    parts.push(`Two languages share one address: ${list}${conflicts.length > 5 ? ", …" : ""}. Give one language its own slug.`);
+  }
+  const deploy = gate.deploy_sha ? ` Deploy ${gate.deploy_sha.slice(0, 7)}.` : "";
+  const run = gate.run_url ? ` Details: ${gate.run_url}` : "";
+  if (gate.result === "failed") {
+    return [
+      {
+        id: "render_gate_failed",
+        severity: "critical",
+        code: "render_gate_failed",
+        title: "Deploy stopped before going live",
+        message: `${parts.join(" ")} The live site is unchanged.${deploy}${run}`,
+      },
+    ];
+  }
+  return [
+    {
+      id: "render_gate_skipped",
+      severity: "warning",
+      code: "render_gate_skipped",
+      title: "Deploy went live with the page render check skipped",
+      message: `${parts.join(" ")} The check was overridden.${deploy}${run}`,
+    },
+  ];
 }
 
 export interface DecisionModelRecheckResult {

@@ -5,6 +5,8 @@ import type { VariableDefinition } from "./variable-manager";
 const described: VariableDefinition = {
   description: "Full-stack tuition",
   category: "price",
+  products: ["full-stack"],
+  price_role: "list",
   default: "$10,999",
   conditions: [{ query: { region: "europe" }, value: "6.800 €" }],
 };
@@ -77,6 +79,48 @@ describe("evaluateVariableWrite — required metadata", () => {
     expect(!badUnit.ok && badUnit.code).toBe("invalid_unit");
   });
 
+  it("rejects unknown source and non-list products", () => {
+    const badSource = run("set_metadata", described, {
+      description: "d",
+      category: "price",
+      source: "third_party",
+    });
+    expect(!badSource.ok && badSource.code).toBe("invalid_source");
+    const badProducts = run("set_metadata", described, {
+      description: "d",
+      category: "price",
+      products: "ai-flex",
+    });
+    expect(!badProducts.ok && badProducts.code).toBe("invalid_products");
+  });
+
+  it("accepts source and a single product on price set_metadata", () => {
+    const r = run("set_metadata", described, {
+      description: "d",
+      category: "price",
+      source: "internal",
+      products: ["full-stack", "full-stack"],
+      price_role: "list",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.metadataPatch).toMatchObject({
+        source: "internal",
+        products: ["full-stack"],
+        price_role: "list",
+      });
+    }
+  });
+
+  it("rejects price vars with more than one product", () => {
+    const r = run("set_metadata", described, {
+      description: "d",
+      category: "price",
+      products: ["ai-flex", "full-stack"],
+    });
+    expect(!r.ok && r.code).toBe("price_products_required");
+  });
+
   it("rejects replaced_by pointing at a missing variable", () => {
     const r = run("set_metadata", described, { deprecated: true, replaced_by: "global.nope" });
     expect(!r.ok && r.code).toBe("replaced_by_unknown");
@@ -115,21 +159,63 @@ describe("evaluateVariableWrite — figure confirmation", () => {
 
   it("does not ask when creating a new figure variable", () => {
     expect(
-      run("set_default", null, { value: "$1", metadata: { description: "d", category: "price" } }, "global.new_price").ok,
+      run(
+        "set_default",
+        null,
+        {
+          value: "$1",
+          metadata: { description: "d", category: "price", products: ["full-stack"] },
+        },
+        "global.new_price",
+      ).ok,
     ).toBe(true);
+    expect(
+      run(
+        "set_default",
+        null,
+        { value: "$1", metadata: { description: "d", category: "price" } },
+        "global.new_price",
+      ).ok,
+    ).toBe(false);
   });
 });
 
 describe("readMetadataInput", () => {
   it("reads set_metadata fields from the body", () => {
-    expect(readMetadataInput("set_metadata", { description: "d", category: "price", unit: "usd" })).toEqual({
-      description: "d",
-      category: "price",
-      unit: "usd",
+    expect(
+      readMetadataInput("set_metadata", {
+        description: "d",
+        category: "price",
+        unit: "usd",
+        source: "external",
+        products: ["ai-flex"],
+      }),
+    ).toEqual({
+      ok: true,
+      patch: {
+        description: "d",
+        category: "price",
+        unit: "usd",
+        source: "external",
+        products: ["ai-flex"],
+      },
     });
   });
 
+  it("rejects non-array products at parse time", () => {
+    const r = readMetadataInput("set_metadata", {
+      description: "d",
+      category: "price",
+      products: "ai-flex",
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe("invalid_products");
+  });
+
   it("ignores body fields for value actions unless nested in metadata", () => {
-    expect(readMetadataInput("set_default", { value: "x", description: "d" })).toBeNull();
+    expect(readMetadataInput("set_default", { value: "x", description: "d" })).toEqual({
+      ok: true,
+      patch: null,
+    });
   });
 });

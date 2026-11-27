@@ -118,6 +118,9 @@ import { runScan as runComponentInsightsScan, readInsightsFile, suggestNext as s
 import { validateFieldSource, validateFieldMapping, extractByDotPath } from "../../scripts/validation/shared/fieldMappingValidator";
 import { validateSectionOperations } from "../section-save-validation";
 import { evaluateEditTextLimits } from "../text-limits-edit";
+import { evaluateFactLiteralWarnings, type FactLiteralWarning } from "../fact-literals-edit";
+import { buildEntryKey } from "../../scripts/validation/shared/entryKey";
+import { loadEntry } from "../entry-layer";
 import {
   evaluateEditThemeColors,
   summarizeThemeViolations,
@@ -251,6 +254,7 @@ import {
   enterContentWriteContext,
   resolveAgentSessionId,
   resolveEventActor,
+  isMcpLoopbackRequest,
 } from "./_helpers";
 import { child } from "../logger";
 import {
@@ -259,6 +263,23 @@ import {
   isSeoClusterOptOutOp,
 } from "../content-proposals/idea-origin";
 const log = child({ module: "routes/sections" });
+
+/** MCP loopback (or x-mcp-author) = agent; everything else is staff. */
+function isAgentCaller(req: Request): boolean {
+  return isMcpLoopbackRequest(req) || typeof req.headers["x-mcp-author"] === "string";
+}
+
+/** `redirectTo` from a delete body: `{ contentType?, slug }` or a bare slug (same type as the deleted page). */
+function parseRedirectTo(raw: unknown, defaultType: string): { contentType: string; slug: string } | null {
+  if (typeof raw === "string" && raw.trim()) return { contentType: defaultType, slug: raw.trim() };
+  if (raw && typeof raw === "object") {
+    const o = raw as { contentType?: unknown; content_type?: unknown; slug?: unknown };
+    const slug = typeof o.slug === "string" ? o.slug.trim() : "";
+    const ct = typeof o.contentType === "string" ? o.contentType : typeof o.content_type === "string" ? o.content_type : defaultType;
+    if (slug) return { contentType: ct, slug };
+  }
+  return null;
+}
 
 /** Returns the per-site ContentIndex for this request, falling back to the global singleton in single-site mode. */
 function getCI(res: Response): typeof contentIndex {
@@ -1203,6 +1224,7 @@ export function registerSectionsRoutes(app: Express): void {
       // edits only warn; an agent's live edit that lengthens limited text is
       // rejected. Unchanged over-limit copy never blocks an unrelated edit.
       let textLimitWarnings: TextLimitViolation[] = [];
+      let factLiteralWarnings: FactLiteralWarning[] = [];
       if (!isTypeLayoutTarget(resolvedLayoutTarget)) {
         const textLimits = evaluateEditTextLimits({
           ci: getCI(res),
@@ -1223,6 +1245,45 @@ export function registerSectionsRoutes(app: Express): void {
             return;
           }
           textLimitWarnings = textLimits.violations;
+        }
+
+        // Exact site-fact literals: warn-only on live selling pages (consideration/decision).
+        const isLiveFactWrite = !effectiveVariant && !textLimits.isDraftWrite;
+        if (isLiveFactWrite) {
+          const normalizedLoc = normalizeLocale(locale);
+          let entryData: Record<string, unknown> | null = null;
+          try {
+            entryData =
+              loadEntry(getCI(res), contentType, slug, normalizedLoc, undefined, {
+                entryVariant: effectiveVariant,
+              })?.data ?? null;
+          } catch {
+            entryData = null;
+          }
+          const changes: Array<{ field_path: string; value: unknown }> = [];
+          for (const op of finalOperations as Array<{
+            action?: string;
+            path?: string;
+            value?: unknown;
+            index?: number;
+            data?: unknown;
+          }>) {
+            if (op.action === "update_field" && typeof op.path === "string") {
+              changes.push({ field_path: op.path, value: op.value });
+            } else if (op.action === "update_section" && typeof op.index === "number") {
+              changes.push({ field_path: `sections.${op.index}`, value: op.data ?? op });
+            }
+          }
+          const baseSlug = getCI(res).resolveBaseSlug(slug, contentType);
+          factLiteralWarnings = evaluateFactLiteralWarnings({
+            contentRoot: getContentRoot(res),
+            site: getContentRootName(res),
+            entryKey: buildEntryKey(contentType, baseSlug, normalizedLoc),
+            isLiveWrite: true,
+            entryData,
+            changes,
+            locale: normalizedLoc,
+          });
         }
       }
 
@@ -1434,8 +1495,10 @@ export function registerSectionsRoutes(app: Express): void {
           shared_template_html_cache?: string;
           deprecated_template_refs?: unknown;
           text_limit_warnings?: TextLimitViolation[];
+          fact_literal_warnings?: FactLiteralWarning[];
           theme_color_warnings?: ThemeViolation[];
           link_warnings?: InternalLinkWarning[];
+          form_location_warnings?: unknown[];
         } = {
           success: true,
           updatedSections: result.updatedSections,
@@ -1443,8 +1506,14 @@ export function registerSectionsRoutes(app: Express): void {
         if (result.linkWarnings?.length) {
           response.link_warnings = result.linkWarnings;
         }
+        if (result.formLocationWarnings?.length) {
+          response.form_location_warnings = result.formLocationWarnings;
+        }
         if (textLimitWarnings.length > 0) {
           response.text_limit_warnings = textLimitWarnings;
+        }
+        if (factLiteralWarnings.length > 0) {
+          response.fact_literal_warnings = factLiteralWarnings;
         }
         if (themeColorWarnings.length > 0) {
           response.theme_color_warnings = themeColorWarnings;
@@ -1483,6 +1552,9 @@ export function registerSectionsRoutes(app: Express): void {
           ...(result.deprecated ? { deprecated: result.deprecated } : {}),
           ...(result.brokenInternalLinks?.length
             ? { broken_internal_links: result.brokenInternalLinks }
+            : {}),
+          ...(result.formLocationIssues?.length
+            ? { form_location_issues: result.formLocationIssues }
             : {}),
         });
       }
@@ -1842,6 +1914,7 @@ export function registerSectionsRoutes(app: Express): void {
         res.json({
           success: true,
           ...(result.linkWarnings?.length ? { link_warnings: result.linkWarnings } : {}),
+          ...(result.formLocationWarnings?.length ? { form_location_warnings: result.formLocationWarnings } : {}),
         });
       } else {
         res.status(400).json({
@@ -1854,6 +1927,7 @@ export function registerSectionsRoutes(app: Express): void {
           ...(result.brokenInternalLinks?.length
             ? { broken_internal_links: result.brokenInternalLinks }
             : {}),
+          ...(result.formLocationIssues?.length ? { form_location_issues: result.formLocationIssues } : {}),
         });
       }
     } catch (error) {
@@ -1910,6 +1984,97 @@ export function registerSectionsRoutes(app: Express): void {
     } catch (error) {
       log.error({ err: error }, "[Content] Check slug rename error:");
       res.status(500).json({ available: false, error: "Failed to check slug" });
+    }
+  });
+
+  // Ads and page gates for a URL that is about to go away (rename / delete / unpublish).
+  const URL_REMOVAL_CAPS: Record<string, CapabilityName> = {
+    rename: "content_edit_structure",
+    delete: "content_delete_entry",
+    unpublish: "content_promote_variant",
+  };
+  const readUrlRemovalInput = (src: Record<string, unknown>) => {
+    const action = String(src.action || "rename");
+    const contentType = String(src.contentType || "");
+    const slug = String(src.slug || src.folderSlug || "");
+    const rawLocales = src.locales ?? src.locale;
+    const locales = (Array.isArray(rawLocales) ? rawLocales.map(String) : String(rawLocales || "").split(","))
+      .map((l) => l.trim())
+      .filter(Boolean);
+    return { action, contentType, slug, locales };
+  };
+
+  api.get(app, "/api/content/url-removal-check", { rate: "publicRead" }, async (req, res) => {
+    try {
+      const input = readUrlRemovalInput(req.query as Record<string, unknown>);
+      const cap = URL_REMOVAL_CAPS[input.action];
+      if (!cap || !input.contentType || !input.slug) {
+        res.status(400).json({ error: "Required: action (rename|delete|unpublish), contentType, slug" });
+        return;
+      }
+      const auth = await requireCapability(req, res, cap, input.contentType);
+      if (!auth.authorized) return;
+      if (!isValidType(input.contentType)) {
+        res.status(400).json({ error: `Invalid type. Must be one of: ${getAllTypes().join(", ")}` });
+        return;
+      }
+      const { assessUrlRemoval } = await import("../url-removal-check");
+      res.json(
+        await assessUrlRemoval({
+          contentType: input.contentType,
+          slug: input.slug,
+          locales: input.locales,
+          action: input.action as "rename" | "delete" | "unpublish",
+          ci: getCI(res),
+        }),
+      );
+    } catch (error) {
+      log.error({ err: error }, "[Content] URL removal check error:");
+      res.status(500).json({ error: "Failed to check ads for this URL" });
+    }
+  });
+
+  // Re-read the matched Meta ads now (Google only updates with its daily sync), then check again.
+  api.post(app, "/api/content/url-removal-check/refresh-ads", { rate: "staffWrite" }, async (req, res) => {
+    try {
+      const input = readUrlRemovalInput((req.body ?? {}) as Record<string, unknown>);
+      const cap = URL_REMOVAL_CAPS[input.action];
+      if (!cap || !input.contentType || !input.slug) {
+        res.status(400).json({ error: "Required: action (rename|delete|unpublish), contentType, slug" });
+        return;
+      }
+      const auth = await requireCapability(req, res, cap, input.contentType);
+      if (!auth.authorized) return;
+      const { assessUrlRemoval } = await import("../url-removal-check");
+      const { refreshAdSetup } = await import("../ads/ads-setup");
+      const { resetAdsByLandingPageCache } = await import("../ads/ads-by-landing-page");
+      const params = {
+        contentType: input.contentType,
+        slug: input.slug,
+        locales: input.locales,
+        action: input.action as "rename" | "delete" | "unpublish",
+        ci: getCI(res),
+      };
+      const before = await assessUrlRemoval(params);
+      const metaIdsBySite = new Map<string, Set<string>>();
+      for (const l of before.locales) {
+        for (const a of [...l.ads.live, ...l.ads.paused]) {
+          if (a.platform !== "meta") continue;
+          let ids = metaIdsBySite.get(a.site);
+          if (!ids) metaIdsBySite.set(a.site, (ids = new Set()));
+          ids.add(a.ad_id);
+        }
+      }
+      const refreshed: Array<{ site: string; ok: boolean; error?: string }> = [];
+      for (const [site, ids] of Array.from(metaIdsBySite.entries())) {
+        const r = await refreshAdSetup(site, "meta", Array.from(ids));
+        refreshed.push(r.ok ? { site, ok: true } : { site, ok: false, error: r.error });
+      }
+      resetAdsByLandingPageCache();
+      res.json({ check: await assessUrlRemoval(params), refreshed, google_note: "Google ads update with the next daily sync." });
+    } catch (error) {
+      log.error({ err: error }, "[Content] Refresh ads for URL removal error:");
+      res.status(500).json({ error: "Failed to refresh ad data" });
     }
   });
 
@@ -2163,8 +2328,26 @@ export function registerSectionsRoutes(app: Express): void {
       if (slug !== confirmSlug) {
         res.status(400).json({ error: "Confirmation slug does not match. Deletion cancelled." }); return;
       }
-      const result = await deleteContentEntry({ type, slug, author, localesToDelete, contentRootName: getContentRootName(res) });
-      if (!result.success) { res.status(result.statusCode).json({ error: result.error }); return; }
+      const redirectTo = parseRedirectTo(req.body.redirectTo, type);
+      const result = await deleteContentEntry({
+        type,
+        slug,
+        author,
+        localesToDelete,
+        contentRootName: getContentRootName(res),
+        redirectTo,
+        noRedirectReason: typeof req.body.noRedirectReason === "string" ? req.body.noRedirectReason : undefined,
+        callerIsAgent: isAgentCaller(req),
+        ci: getCI(res),
+      });
+      if (!result.success) {
+        res.status(result.statusCode).json({
+          error: result.error,
+          ...(result.code ? { code: result.code } : {}),
+          ...(result.details ?? {}),
+        });
+        return;
+      }
       res.json(result.data);
     } catch (error) {
       log.error({ err: error }, "Content delete error:");
@@ -2260,6 +2443,32 @@ export function registerSectionsRoutes(app: Express): void {
       const rebuild_hint =
         "Relation index isn’t ready. It normally rebuilds when site validation runs the site-relation-index check — try again after that.";
 
+      // Ads + "live 24h or more" per slug, so staff see paid traffic and agents know which slugs need a destination.
+      const { assessUrlRemoval, liveAdsOf, pausedAdsOf } = await import("../url-removal-check");
+      const { adFacts } = await import("@shared/url-removal");
+      const ads_by_slug: Record<string, { live: ReturnType<typeof adFacts>; paused: ReturnType<typeof adFacts>; checked: boolean; urls: string[] }> = {};
+      const redirect_required_slugs: string[] = [];
+      for (const slug of slugs) {
+        try {
+          const removal = await assessUrlRemoval({ contentType, slug, action: "delete", ci: getCI(res) });
+          ads_by_slug[slug] = {
+            live: adFacts(liveAdsOf(removal)),
+            paused: adFacts(pausedAdsOf(removal)),
+            checked: removal.ads_checked,
+            urls: removal.locales.flatMap((l) => (l.url ? [l.url] : [])),
+          };
+          if (removal.locales.some((l) => l.redirect_required_for_agents)) redirect_required_slugs.push(slug);
+        } catch (err) {
+          log.warn({ err, slug }, "[delete-entries] URL removal check failed");
+        }
+      }
+      const redirectToAll = parseRedirectTo(req.body?.redirectTo, contentType);
+      const redirectBySlug: Record<string, { contentType: string; slug: string } | null> = {};
+      if (req.body?.redirectToBySlug && typeof req.body.redirectToBySlug === "object") {
+        for (const [s, v] of Object.entries(req.body.redirectToBySlug as Record<string, unknown>)) redirectBySlug[s] = parseRedirectTo(v, contentType);
+      }
+      const noRedirectReason = typeof req.body?.noRedirectReason === "string" ? req.body.noRedirectReason : undefined;
+
       if (!confirm) {
         res.json({
           success: true,
@@ -2271,6 +2480,8 @@ export function registerSectionsRoutes(app: Express): void {
             blocked_by_relation,
             deletable: indexStatus.ready ? deletable : [],
             link_preview_by_slug,
+            ads_by_slug,
+            redirect_required_slugs,
             rebuild_hint: indexStatus.ready ? undefined : rebuild_hint,
           },
           message: !indexStatus.ready
@@ -2298,11 +2509,35 @@ export function registerSectionsRoutes(app: Express): void {
         return;
       }
 
+      if (isAgentCaller(req)) {
+        const { NO_REDIRECT_REASON_MIN } = await import("../content-editor");
+        const missing = redirect_required_slugs.filter(
+          (s) =>
+            deletable.includes(s) &&
+            !redirectBySlug[s] &&
+            !redirectToAll &&
+            (noRedirectReason ?? "").trim().length < NO_REDIRECT_REASON_MIN,
+        );
+        if (missing.length > 0) {
+          res.status(400).json({
+            error:
+              `${missing.length} page(s) have been live 24 hours or more: ${missing.join(", ")}. Pass redirectTo / redirectToBySlug ` +
+              `(a page to send their visitors to) or noRedirectReason (at least ${NO_REDIRECT_REASON_MIN} characters). Nothing was deleted.`,
+            code: "redirect_destination_required",
+            slugs: missing,
+            ads_by_slug,
+          });
+          return;
+        }
+      }
+
       const results: Array<{
         slug: string;
         ok: boolean;
         error?: string;
+        code?: string;
         skipped?: boolean;
+        redirects_added?: unknown[];
       }> = [];
 
       for (const slug of slugs) {
@@ -2330,11 +2565,15 @@ export function registerSectionsRoutes(app: Express): void {
           slug,
           author,
           contentRootName: getContentRootName(res),
+          redirectTo: redirectBySlug[slug] ?? redirectToAll,
+          noRedirectReason,
+          callerIsAgent: isAgentCaller(req),
+          ci: getCI(res),
         });
         if (!result.success) {
-          results.push({ slug, ok: false, error: result.error });
+          results.push({ slug, ok: false, error: result.error, ...(result.code ? { code: result.code } : {}) });
         } else {
-          results.push({ slug, ok: true });
+          results.push({ slug, ok: true, ...(result.data.redirects_added?.length ? { redirects_added: result.data.redirects_added } : {}) });
         }
       }
 
@@ -2348,6 +2587,7 @@ export function registerSectionsRoutes(app: Express): void {
           blocked_by_relation,
           deletable,
           link_preview_by_slug,
+          ads_by_slug,
         },
         blocked: [...blocked_protected, ...blocked_by_relation.map((b) => b.slug)],
       });

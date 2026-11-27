@@ -17,7 +17,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { locations } from "@/lib/locations";
+import type { Location } from "@shared/session";
+import { useLocationCatalog } from "@/hooks/useLocationCatalog";
 import { useToast } from "@/hooks/use-toast";
 import { getDebugUserName } from "@/hooks/useDebugAuth";
 import {
@@ -66,6 +67,13 @@ import {
   type VariableMetadataDraft,
 } from "@/components/editing/VariableMetadataFields";
 import { variableWrite, VariableWriteError, type FigureChangeDetails } from "@/lib/variable-write";
+import { MoneyValueFields } from "@/components/editing/MoneyValueFields";
+import {
+  isMoneyValue,
+  type MoneyValue,
+  type VariableValue,
+  variableValueToDisplayString,
+} from "@shared/variable-money";
 
 interface VariableDetailModalProps {
   open: boolean;
@@ -82,7 +90,11 @@ const QUERY_KEY_OPTIONS: { value: string; label: string }[] = [
   { value: "locale", label: "Locale" },
 ];
 
-function getValueOptionsForKey(queryKey: string, localeOptions: { value: string; label: string }[]): { value: string; label: string }[] {
+function getValueOptionsForKey(
+  queryKey: string,
+  localeOptions: { value: string; label: string }[],
+  locations: Location[],
+): { value: string; label: string }[] {
   if (queryKey === "location") {
     return locations
       .filter((loc) => loc.visibility === "listed")
@@ -114,21 +126,26 @@ function ConditionForm({
   saveLabel,
   localeOptions,
   blocked = false,
+  isPrice = false,
 }: {
   initialQuery?: Record<string, string>;
-  initialValue?: string;
-  onSave: (query: Record<string, string>, value: string) => void;
+  initialValue?: VariableValue;
+  onSave: (query: Record<string, string>, value: VariableValue) => void;
   onCancel: () => void;
   saveLabel: string;
   localeOptions: { value: string; label: string }[];
   blocked?: boolean;
+  isPrice?: boolean;
 }) {
+  const { data: locations = [] } = useLocationCatalog();
   const [queryPairs, setQueryPairs] = useState<{ key: string; value: string }[]>(
     initialQuery
       ? Object.entries(initialQuery).map(([k, v]) => ({ key: k, value: v }))
       : [{ key: "", value: "" }],
   );
-  const [conditionValue, setConditionValue] = useState(initialValue || "");
+  const [conditionValue, setConditionValue] = useState<VariableValue>(
+    initialValue ?? (isPrice ? { amount: 0, currency: "USD" } : ""),
+  );
 
   const addQueryPair = () => {
     setQueryPairs((prev) => [...prev, { key: "", value: "" }]);
@@ -144,11 +161,18 @@ function ConditionForm({
     );
   };
 
+  const valueOk =
+    isPrice
+      ? isMoneyValue(conditionValue) ||
+        (typeof conditionValue === "object" &&
+          conditionValue !== null &&
+          typeof (conditionValue as MoneyValue).amount === "number")
+      : typeof conditionValue === "string" && conditionValue.trim() !== "";
   const canSave =
     !blocked &&
     queryPairs.length > 0 &&
     queryPairs.every((p) => p.key && p.value) &&
-    conditionValue.trim() !== "";
+    valueOk;
 
   const handleSubmit = () => {
     if (!canSave) return;
@@ -196,7 +220,7 @@ function ConditionForm({
                   <SelectValue placeholder="Value..." />
                 </SelectTrigger>
                 <SelectContent>
-                  {getValueOptionsForKey(pair.key, localeOptions).map((opt) => (
+                  {getValueOptionsForKey(pair.key, localeOptions, locations).map((opt) => (
                     <SelectItem key={opt.value} value={opt.value}>
                       {opt.label}
                     </SelectItem>
@@ -235,16 +259,24 @@ function ConditionForm({
 
       <div className="space-y-1">
         <span className="text-sm font-medium text-foreground">Value</span>
-        <Input
-          value={conditionValue}
-          onChange={(e) => setConditionValue(e.target.value)}
-          placeholder="Resolved value when this condition matches"
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && canSave) handleSubmit();
-            if (e.key === "Escape") onCancel();
-          }}
-          data-testid="input-condition-value"
-        />
+        {isPrice ? (
+          <MoneyValueFields
+            value={conditionValue}
+            onChange={(m) => setConditionValue(m)}
+            testIdPrefix="condition-money"
+          />
+        ) : (
+          <Input
+            value={typeof conditionValue === "string" ? conditionValue : variableValueToDisplayString(conditionValue)}
+            onChange={(e) => setConditionValue(e.target.value)}
+            placeholder="Resolved value when this condition matches"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && canSave) handleSubmit();
+              if (e.key === "Escape") onCancel();
+            }}
+            data-testid="input-condition-value"
+          />
+        )}
       </div>
 
       <div className="flex justify-end gap-2">
@@ -309,11 +341,15 @@ export function VariableDetailModal({
   const [inspectVarName, setInspectVarName] = useState("");
   const [varComboboxOpen, setVarComboboxOpen] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+  /** Pipe/default fallback for create mode; seeded from selection when present. */
+  const [createFallback, setCreateFallback] = useState(inlineDefault);
+  /** True when open without a selection-derived default — staff must type one. */
+  const [askForFallback, setAskForFallback] = useState(!inlineDefault.trim());
 
   const [addingCondition, setAddingCondition] = useState(false);
   const [editingConditionIndex, setEditingConditionIndex] = useState<number | null>(null);
   const [editingDefault, setEditingDefault] = useState(false);
-  const [editDefaultValue, setEditDefaultValue] = useState("");
+  const [editDefaultValue, setEditDefaultValue] = useState<VariableValue>("");
 
   const [renameTo, setRenameTo] = useState("");
   const [renameAvailable, setRenameAvailable] = useState<boolean | null>(null);
@@ -328,6 +364,8 @@ export function VariableDetailModal({
       setExistingVarName("");
       setInspectVarName("");
       setNameAvailable(null);
+      setCreateFallback(inlineDefault);
+      setAskForFallback(!inlineDefault.trim());
       if (nameCheckTimerRef.current) clearTimeout(nameCheckTimerRef.current);
     } else if (mode === "inspect" && open) {
       setInspectVarName("");
@@ -337,7 +375,7 @@ export function VariableDetailModal({
     setEditingDefault(false);
     setRenameTo("");
     setRenameAvailable(null);
-  }, [mode, open]);
+  }, [mode, open, inlineDefault]);
 
   const effectiveVarName =
     currentMode === "create"
@@ -469,21 +507,21 @@ export function VariableDetailModal({
     }
   };
 
-  const handleSetDefault = async (value: string) => {
+  const handleSetDefault = async (value: VariableValue) => {
     await writeVariable(
       { action: "set_default", value },
       { successTitle: "Default updated", failTitle: "Failed to save", onDone: () => setEditingDefault(false) },
     );
   };
 
-  const handleAddCondition = async (query: Record<string, string>, value: string) => {
+  const handleAddCondition = async (query: Record<string, string>, value: VariableValue) => {
     await writeVariable(
       { action: "add_condition", condition: { query, value } },
       { successTitle: "Condition added", failTitle: "Failed to add condition", onDone: () => setAddingCondition(false) },
     );
   };
 
-  const handleUpdateCondition = async (index: number, query: Record<string, string>, value: string) => {
+  const handleUpdateCondition = async (index: number, query: Record<string, string>, value: VariableValue) => {
     await writeVariable(
       { action: "update_condition", index, condition: { query, value } },
       {
@@ -536,6 +574,15 @@ export function VariableDetailModal({
       });
       return;
     }
+    const fallback = createFallback.trim();
+    if (!fallback) {
+      toast({
+        title: "Fallback required",
+        description: "Enter the default text used when this variable has no match.",
+        variant: "destructive",
+      });
+      return;
+    }
     const fullName = baseName.startsWith("global.") ? baseName : `global.${baseName}`;
     if (definitions?.[fullName]) {
       toast({
@@ -558,11 +605,11 @@ export function VariableDetailModal({
     try {
       await variableWrite("PUT", `/api/variables/${fullName}`, {
         action: "set_default",
-        value: inlineDefault,
+        value: fallback,
         metadata: metadataDraftToBody(createMeta),
       });
       await invalidateAndRefetch();
-      const templateSyntax = `{{ ${fullName} | ${inlineDefault} }}`;
+      const templateSyntax = `{{ ${fullName} | ${fallback} }}`;
       toast({
         title: "Variable created",
         description: `"${fullName}" is ready to use.`,
@@ -590,7 +637,16 @@ export function VariableDetailModal({
       });
       return;
     }
-    const templateSyntax = `{{ ${existingVarName} | ${inlineDefault} }}`;
+    const fallback = createFallback.trim();
+    if (!fallback) {
+      toast({
+        title: "Fallback required",
+        description: "Enter the default text used when this variable has no match.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const templateSyntax = `{{ ${existingVarName} | ${fallback} }}`;
     toast({
       title: "Variable linked",
       description: `Text will use "{{ ${existingVarName} }}".`,
@@ -620,16 +676,18 @@ export function VariableDetailModal({
 
   const resolvedCreateValue = (() => {
     if (createSubMode === "existing") {
-      if (!existingVarName || !definitions?.[existingVarName]) return inlineDefault;
+      if (!existingVarName || !definitions?.[existingVarName]) return createFallback;
       const res = resolveVariable(existingVarName, definitions, varContext);
-      return res?.value || inlineDefault || existingVarName;
+      return res?.value || createFallback || existingVarName;
     }
     const baseName = createName.trim().replace(/\s+/g, "_").toLowerCase();
     const fullName = baseName.startsWith("global.") ? baseName : `global.${baseName}`;
-    if (!fullName || !definitions?.[fullName]) return inlineDefault;
+    if (!fullName || !definitions?.[fullName]) return createFallback;
     const res = resolveVariable(fullName, definitions, varContext);
-    return res?.value || inlineDefault || fullName;
+    return res?.value || createFallback || fullName;
   })();
+
+  const createFallbackReady = createFallback.trim().length > 0;
 
   const { data: usageData, isLoading: usageLoading } = useQuery<{ variable: string; files: string[] }>({
     queryKey: ["/api/variables", effectiveVarName, "usage"],
@@ -720,7 +778,9 @@ export function VariableDetailModal({
             <DialogHeader>
               <DialogTitle>Convert to Variable</DialogTitle>
               <DialogDescription>
-                Replace the selected text with a variable template.
+                {askForFallback
+                  ? "Choose or create a variable and set its fallback value."
+                  : "Replace the selected text with a variable template."}
               </DialogDescription>
             </DialogHeader>
 
@@ -887,26 +947,62 @@ export function VariableDetailModal({
                 </div>
               )}
 
-              <div className="space-y-1">
-                <p className="text-sm text-muted-foreground">
-                  Based on your current session in{" "}
-                  <span className="font-medium text-foreground">
-                    {varContext.locale || "en"}
-                  </span>
-                  ,{" "}
-                  <span className="font-medium text-foreground">
-                    {varContext.region || "unknown"}
-                  </span>{" "}
-                  and location{" "}
-                  <span className="font-medium text-foreground">
-                    {varContext.location || "unknown"}
-                  </span>
-                  , the value of this variable will be:
-                </p>
-                <div className="px-3 py-2 rounded-md bg-muted text-sm font-medium">
-                  "{resolvedCreateValue}"
+              {askForFallback ? (
+                <div className="space-y-1">
+                  <label
+                    htmlFor="var-fallback-input"
+                    className="text-sm font-medium text-foreground"
+                  >
+                    Fallback value
+                  </label>
+                  <Input
+                    id="var-fallback-input"
+                    value={createFallback}
+                    onChange={(e) => setCreateFallback(e.target.value)}
+                    placeholder="Text shown when the variable has no match"
+                    data-testid="input-create-fallback"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Used as the variable default and as the{" "}
+                    <span className="font-mono">| fallback</span> in the
+                    template.
+                  </p>
+                  {createSubMode === "existing" &&
+                    existingVarName &&
+                    definitions?.[existingVarName] && (
+                      <p className="text-xs text-muted-foreground pt-1">
+                        For your current session (
+                        {varContext.locale || "en"},{" "}
+                        {varContext.region || "unknown"},{" "}
+                        {varContext.location || "unknown"}), this resolves to:{" "}
+                        <span className="font-medium text-foreground">
+                          "{resolvedCreateValue}"
+                        </span>
+                      </p>
+                    )}
                 </div>
-              </div>
+              ) : (
+                <div className="space-y-1">
+                  <p className="text-sm text-muted-foreground">
+                    Based on your current session in{" "}
+                    <span className="font-medium text-foreground">
+                      {varContext.locale || "en"}
+                    </span>
+                    ,{" "}
+                    <span className="font-medium text-foreground">
+                      {varContext.region || "unknown"}
+                    </span>{" "}
+                    and location{" "}
+                    <span className="font-medium text-foreground">
+                      {varContext.location || "unknown"}
+                    </span>
+                    , the value of this variable will be:
+                  </p>
+                  <div className="px-3 py-2 rounded-md bg-muted text-sm font-medium">
+                    "{resolvedCreateValue}"
+                  </div>
+                </div>
+              )}
 
               {((createSubMode === "new" && createName.trim()) ||
                 (createSubMode === "existing" && existingVarName)) && (
@@ -920,7 +1016,7 @@ export function VariableDetailModal({
                       ? (() => { const n = createName.trim().replace(/\s+/g, "_").toLowerCase(); return n.startsWith("global.") ? n : `global.${n}`; })()
                       : existingVarName}
                     {" | "}
-                    {inlineDefault}
+                    {createFallback}
                     {" }}"}
                   </div>
                 </div>
@@ -941,7 +1037,8 @@ export function VariableDetailModal({
                       createSaving ||
                       !createName.trim() ||
                       nameAvailable === false ||
-                      !metadataDraftReady(createMeta)
+                      !metadataDraftReady(createMeta) ||
+                      !createFallbackReady
                     }
                     data-testid="button-confirm-create"
                   >
@@ -950,7 +1047,7 @@ export function VariableDetailModal({
                 ) : (
                   <Button
                     onClick={handleUseExisting}
-                    disabled={!existingVarName}
+                    disabled={!existingVarName || !createFallbackReady}
                     data-testid="button-confirm-use-existing"
                   >
                     Use Variable
@@ -1076,7 +1173,7 @@ export function VariableDetailModal({
                               <div className="text-sm mt-1">
                                 <span className="text-muted-foreground/60">&rarr;</span>{" "}
                                 <span className={isMatched ? "font-medium text-foreground" : "text-muted-foreground"}>
-                                  "{cond.value}"
+                                  "{variableValueToDisplayString(cond.value)}"
                                 </span>
                               </div>
                             </div>
@@ -1123,7 +1220,7 @@ export function VariableDetailModal({
                           <div className="text-sm mt-1">
                             <span className="text-muted-foreground/60">&rarr;</span>{" "}
                             <span className={resolvedSource === "default" ? "font-medium text-foreground" : "text-muted-foreground"}>
-                              "{definition.default}"
+                              "{variableValueToDisplayString(definition.default)}"
                             </span>
                           </div>
                         ) : (
@@ -1248,47 +1345,66 @@ export function VariableDetailModal({
                 <div className="space-y-2">
                   <h4 className="text-sm font-medium text-foreground">Default Value</h4>
                   {!definition?.isReserved && editingDefault ? (
-                    <div className="flex items-center gap-2">
-                      <Input
-                        value={editDefaultValue}
-                        onChange={(e) => setEditDefaultValue(e.target.value)}
-                        className="flex-1"
-                        autoFocus
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && metaReady) handleSetDefault(editDefaultValue);
-                          if (e.key === "Escape") setEditingDefault(false);
-                        }}
-                        data-testid="input-edit-default"
-                      />
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        onClick={() => handleSetDefault(editDefaultValue)}
-                        disabled={!metaReady}
-                        data-testid="button-save-default"
-                      >
-                        <Check className="w-3.5 h-3.5 text-primary" />
-                      </Button>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        onClick={() => setEditingDefault(false)}
-                        data-testid="button-cancel-default"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </Button>
+                    <div className="space-y-2">
+                      {definition?.category === "price" ? (
+                        <MoneyValueFields
+                          value={editDefaultValue}
+                          onChange={setEditDefaultValue}
+                          testIdPrefix="default-money"
+                        />
+                      ) : (
+                        <Input
+                          value={typeof editDefaultValue === "string" ? editDefaultValue : variableValueToDisplayString(editDefaultValue)}
+                          onChange={(e) => setEditDefaultValue(e.target.value)}
+                          className="flex-1"
+                          autoFocus
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && metaReady) handleSetDefault(editDefaultValue);
+                            if (e.key === "Escape") setEditingDefault(false);
+                          }}
+                          data-testid="input-edit-default"
+                        />
+                      )}
+                      <div className="flex items-center gap-2 justify-end">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          onClick={() => handleSetDefault(editDefaultValue)}
+                          disabled={!metaReady}
+                          data-testid="button-save-default"
+                        >
+                          <Check className="w-3.5 h-3.5 text-primary" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          onClick={() => setEditingDefault(false)}
+                          data-testid="button-cancel-default"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </Button>
+                      </div>
                     </div>
                   ) : (
                     <div className="flex items-center gap-2">
                       <span className="text-sm flex-1 truncate">
-                        {definition?.default !== undefined ? `"${definition.default}"` : <span className="text-muted-foreground/60 italic">Not set</span>}
+                        {definition?.default !== undefined ? (
+                          `"${variableValueToDisplayString(definition.default)}"`
+                        ) : (
+                          <span className="text-muted-foreground/60 italic">Not set</span>
+                        )}
                       </span>
                       {!definition?.isReserved && (
                         <Button
                           size="icon"
                           variant="ghost"
                           onClick={() => {
-                            setEditDefaultValue(definition?.default || "");
+                            setEditDefaultValue(
+                              definition?.default ??
+                                (definition?.category === "price"
+                                  ? { amount: 0, currency: "USD" }
+                                  : ""),
+                            );
                             setEditingDefault(true);
                           }}
                           data-testid="button-edit-default"
@@ -1336,6 +1452,7 @@ export function VariableDetailModal({
                           saveLabel="Update"
                           localeOptions={localeOptions}
                           blocked={!metaReady}
+                          isPrice={definition?.category === "price"}
                         />
                       ) : (
                         <div
@@ -1350,7 +1467,9 @@ export function VariableDetailModal({
                                 </Badge>
                               ))}
                               <span className="text-muted-foreground/60">&rarr;</span>
-                              <span className="text-sm truncate">"{cond.value}"</span>
+                              <span className="text-sm truncate">
+                                &quot;{variableValueToDisplayString(cond.value)}&quot;
+                              </span>
                             </div>
                           </div>
                           {!definition?.isReserved && (
@@ -1403,6 +1522,7 @@ export function VariableDetailModal({
                       saveLabel="Add"
                       localeOptions={localeOptions}
                       blocked={!metaReady}
+                      isPrice={definition?.category === "price"}
                     />
                   )}
                 </div>

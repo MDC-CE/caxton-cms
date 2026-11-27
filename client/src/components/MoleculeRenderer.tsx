@@ -167,7 +167,7 @@ interface CtaButtonMolecule {
   props: {
     text: string;
     url: string;
-    variant: "primary" | "secondary" | "outline" | "ghost";
+    variant: "primary" | "secondary" | "outline" | "accent" | "ghost";
     icon?: string;
   };
 }
@@ -232,10 +232,11 @@ interface MoleculeRendererProps {
   molecule: MoleculeDefinition;
 }
 
-function resolveCtaVariant(v: string): "default" | "secondary" | "outline" | "ghost" | "destructive" | "link" {
+function resolveCtaVariant(v: string): "default" | "secondary" | "outline" | "accent" | "ghost" | "destructive" | "link" {
   if (v === "primary") return "default";
   if (v === "secondary") return "secondary";
   if (v === "outline") return "outline";
+  if (v === "accent") return "accent";
   if (v === "ghost") return "ghost";
   if (v === "destructive") return "destructive";
   if (v === "link") return "link";
@@ -255,6 +256,7 @@ export function MoleculeRenderer({ molecule }: MoleculeRendererProps) {
           preview_image_url={molecule.props.preview_image_url}
           withShadowBorder={molecule.props.with_shadow_border}
           open_modal_on_click={molecule.props.open_modal_on_click}
+          show_controls_on_autoplay={molecule.props.show_controls_on_autoplay}
           overlay_on_muted={molecule.props.overlay_on_muted}
         />
       );

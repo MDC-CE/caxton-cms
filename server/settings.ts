@@ -10,6 +10,11 @@ import {
   parseConsentWindowSettings,
   type ConsentWindowSettings,
 } from "@shared/consent";
+import {
+  DEFAULT_SESSION_SETTINGS,
+  parseSessionSettings,
+  type SessionSettings,
+} from "@shared/session-settings";
 import { parseAdsSettings, type AdsSettings, type GoogleAdsSettings, type MetaAdsSettings } from "@shared/ads-settings";
 import {
   ADS_CONFIG_FILENAME,
@@ -20,6 +25,7 @@ import {
   type AdsConfigStatus,
 } from "./ads-config";
 import { validateConversionEventIntent } from "@shared/conversionEventIntent";
+import { normalizeSkipDomain, normalizeSkipDomains } from "@shared/gtm-payload";
 import { parseStageTargets, serializeStageTargets, type StageTargets } from "@shared/page-objectives";
 import {
   type AuthSignupFieldMapEntry,
@@ -41,11 +47,15 @@ import {
   validateAuthConversionEventConfig,
   type AuthConversionEventConfig,
 } from "@shared/authConversionEvents";
+import { isLlmHtmlAudience } from "../shared/runtime-issues";
 import {
   DEFAULT_ORGANIC_MARKETS,
+  DEFAULT_RESEARCH_MARKET_DEFAULTS,
   parseOrganicMarkets,
+  parseResearchMarketDefaults,
   serializeOrganicMarkets,
   type OrganicMarket,
+  type ResearchMarketDefaults,
 } from "./gsc-organic-markets";
 
 export type { AuthSignupFieldMapEntry };
@@ -118,12 +128,16 @@ export interface ConsentDefaults {
   sms?: boolean;
   whatsapp?: boolean;
   sms_usa_only?: boolean;
+  sms_countries?: string[];
+  sms_countries_mode?: "include" | "exclude";
+  whatsapp_countries?: string[];
+  whatsapp_countries_mode?: "include" | "exclude";
   marketing_text?: string;
   sms_text?: string;
   show_terms?: boolean;
   terms_url?: string;
   privacy_url?: string;
-  [key: string]: boolean | string | undefined;
+  [key: string]: boolean | string | string[] | undefined;
 }
 
 export interface SuccessDefaults {
@@ -195,6 +209,8 @@ export interface TrackingSettings {
   signup_event_aliases: string[];
   /** Former login_event_name values after rename — reserved + alias-matched. */
   login_event_aliases: string[];
+  /** Outbound `gtm_payload` on the checkout path; links to these domains are never changed. */
+  gtm_payload?: { skip_domains: string[] };
 }
 
 export function parseTrackingBigQuerySettings(
@@ -404,15 +420,36 @@ function injectAuthYamlComments(dumped: string): string {
   return stripped.replace(/(^|\n)(auth:)/, `$1${AUTH_YAML_COMMENT_HEADER}$2`);
 }
 
+/** Who may crawl this site: none = open; ai = block known AI crawlers; all = block everyone (noindex). */
+export type IndexingBlockMode = "none" | "ai" | "all";
+
+export const INDEXING_BLOCK_MODES: readonly IndexingBlockMode[] = ["none", "ai", "all"] as const;
+
+export function isIndexingBlockMode(value: unknown): value is IndexingBlockMode {
+  return value === "none" || value === "ai" || value === "all";
+}
+
+/**
+ * Prefer `indexing_block`; map legacy `block_indexing: true` → `all`, false/missing → `none`.
+ */
+export function normalizeIndexingBlock(
+  raw: Record<string, unknown> | undefined,
+  fallback: IndexingBlockMode = "none",
+): IndexingBlockMode {
+  if (isIndexingBlockMode(raw?.indexing_block)) return raw.indexing_block;
+  if (typeof raw?.block_indexing === "boolean") return raw.block_indexing ? "all" : "none";
+  return fallback;
+}
+
 export interface RobotsSettings {
-  block_indexing: boolean;
+  indexing_block: IndexingBlockMode;
   include_sitemap: boolean;
   disallow_paths: string[];
   ai_bots: string[];
 }
 
 export const DEFAULT_ROBOTS_SETTINGS: RobotsSettings = {
-  block_indexing: false,
+  indexing_block: "none",
   include_sitemap: true,
   disallow_paths: ["/api/", "/private/", "/preview-frame", "/health"],
   ai_bots: [
@@ -456,8 +493,10 @@ export const DEFAULT_SEARCH_CONSOLE_BIGQUERY: SearchConsoleBigQuerySettings = {
 export interface SearchConsoleSettings {
   site_url: string | null;
   bigquery: SearchConsoleBigQuerySettings;
-  /** Cluster Map organic markets (GSC country codes on day-cache rows). */
+  /** Cluster Map organic markets (GSC country codes on day-cache rows); also keyword research markets. */
   organic_markets: OrganicMarket[];
+  /** Page locale → country market id for keyword research when the caller names none. */
+  research_market_defaults: ResearchMarketDefaults;
 }
 
 export const DEFAULT_SEARCH_CONSOLE_SETTINGS: SearchConsoleSettings = {
@@ -467,6 +506,7 @@ export const DEFAULT_SEARCH_CONSOLE_SETTINGS: SearchConsoleSettings = {
     ...m,
     countries: [...m.countries],
   })),
+  research_market_defaults: { ...DEFAULT_RESEARCH_MARKET_DEFAULTS },
 };
 
 /** IndexNow notices (Bing and other IndexNow engines). The key is public by design. */
@@ -476,6 +516,24 @@ export interface IndexNowSettings {
 }
 
 export const DEFAULT_INDEXNOW_SETTINGS: IndexNowSettings = { enabled: false, key: "" };
+
+/** Public /llms.txt gate. Template stays in llms.template.md; this only toggles serving. */
+export interface LlmsTxtSettings {
+  enabled: boolean;
+}
+
+/** Default off when `llms_txt` is missing from settings.yml — staff must Serve explicitly. */
+export const DEFAULT_LLMS_TXT_SETTINGS: LlmsTxtSettings = { enabled: false };
+
+export function parseLlmsTxtSettings(raw: unknown): LlmsTxtSettings {
+  const obj =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : {};
+  return {
+    enabled: typeof obj.enabled === "boolean" ? obj.enabled : DEFAULT_LLMS_TXT_SETTINGS.enabled,
+  };
+}
 
 export const INDEXNOW_KEY_RE = /^[A-Za-z0-9-]{8,128}$/;
 
@@ -552,6 +610,51 @@ export function parseOpenRushSettings(
       1,
       1_000_000,
     ),
+    budget_warn_percent: clampPositiveInt(
+      o.budget_warn_percent,
+      defaults.budget_warn_percent,
+      1,
+      99,
+    ),
+  };
+}
+
+/** DataForSEO keyword metrics (non-secret). Login/password stay in DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD. */
+export interface DataForSeoSettings {
+  enabled: boolean;
+  /** Shared daily spend cap in USD (staff + agents). */
+  daily_usd_limit: number;
+  /** Agent session spend cap in USD (agents only). */
+  session_usd_limit: number;
+  /** Warn band start as percent of limit (1–99); confirm required until 100%. */
+  budget_warn_percent: number;
+}
+
+export const DEFAULT_DATAFORSEO_SETTINGS: DataForSeoSettings = {
+  enabled: false,
+  daily_usd_limit: 2,
+  session_usd_limit: 0.5,
+  budget_warn_percent: 80,
+};
+
+function clampUsd(raw: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.round(Math.min(max, Math.max(min, n)) * 100) / 100;
+}
+
+export function parseDataForSeoSettings(
+  raw: unknown,
+  defaults: DataForSeoSettings = DEFAULT_DATAFORSEO_SETTINGS,
+): DataForSeoSettings {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ...defaults };
+  }
+  const o = raw as Record<string, unknown>;
+  return {
+    enabled: typeof o.enabled === "boolean" ? o.enabled : defaults.enabled,
+    daily_usd_limit: clampUsd(o.daily_usd_limit, defaults.daily_usd_limit, 0.01, 10_000),
+    session_usd_limit: clampUsd(o.session_usd_limit, defaults.session_usd_limit, 0.01, 10_000),
     budget_warn_percent: clampPositiveInt(
       o.budget_warn_percent,
       defaults.budget_warn_percent,
@@ -877,6 +980,7 @@ export function parseSearchConsoleSettings(raw: unknown): SearchConsoleSettings 
     site_url: siteUrl,
     bigquery: parseSearchConsoleBigQuerySettings(obj.bigquery),
     organic_markets: parseOrganicMarkets(obj.organic_markets),
+    research_market_defaults: parseResearchMarketDefaults(obj.research_market_defaults),
   };
 }
 
@@ -900,6 +1004,7 @@ function writeSearchConsoleBlock(
   const block: Record<string, unknown> = {
     bigquery: serializeSearchConsoleBigQuery(sc.bigquery),
     organic_markets: serializeOrganicMarkets(sc.organic_markets),
+    research_market_defaults: { ...sc.research_market_defaults },
   };
   if (sc.site_url) {
     block.site_url = sc.site_url;
@@ -966,6 +1071,8 @@ export interface SiteConsentSettings {
   window: ConsentWindowSettings;
 }
 
+export type { SessionSettings };
+
 interface SiteSettings {
   i18n: I18nSettings;
   home_page: HomePageSettings;
@@ -974,12 +1081,15 @@ interface SiteSettings {
   robots: RobotsSettings;
   search_console: SearchConsoleSettings;
   indexnow: IndexNowSettings;
+  llms_txt: LlmsTxtSettings;
   openrush: OpenRushSettings;
+  dataforseo: DataForSeoSettings;
   funnel: FunnelSettings;
   proposals: ProposalSettings;
   auth: AuthSettings;
   entry_preview: EntryPreviewSettings;
   consent: SiteConsentSettings;
+  session: SessionSettings;
   /** Legacy `ads:` block; ads-config.yml wins when it exists (read through getAdsSettings). */
   ads: AdsSettings;
   ads_legacy_present: boolean;
@@ -996,7 +1106,7 @@ function parseSiteConsentSettings(raw: unknown): SiteConsentSettings {
 
 /** Build robots.txt body from settings. `baseUrl` is used for the Sitemap line when included. */
 export function buildRobotsTxtContent(robots: RobotsSettings, baseUrl: string): string {
-  if (robots.block_indexing) {
+  if (robots.indexing_block === "all") {
     return `# Site indexing blocked
 User-agent: *
 Disallow: /
@@ -1015,12 +1125,13 @@ Disallow: /
   lines.push("");
 
   if (robots.ai_bots.length > 0) {
-    lines.push("# Allow AI/LLM crawlers explicitly");
+    const blockAi = robots.indexing_block === "ai";
+    lines.push(blockAi ? "# Block AI/LLM crawlers" : "# Allow AI/LLM crawlers explicitly");
     for (const bot of robots.ai_bots) {
       const name = bot.trim();
       if (!name) continue;
       lines.push(`User-agent: ${name}`);
-      lines.push("Allow: /");
+      lines.push(blockAi ? "Disallow: /" : "Allow: /");
       lines.push("");
     }
   }
@@ -1105,7 +1216,9 @@ function readSettingsFile(settingsPath: string, quiet = false): { ok: boolean; s
     robots: { ...DEFAULT_ROBOTS_SETTINGS },
     search_console: { ...DEFAULT_SEARCH_CONSOLE_SETTINGS },
     indexnow: { ...DEFAULT_INDEXNOW_SETTINGS },
+    llms_txt: { ...DEFAULT_LLMS_TXT_SETTINGS },
     openrush: { ...DEFAULT_OPENRUSH_SETTINGS },
+    dataforseo: { ...DEFAULT_DATAFORSEO_SETTINGS },
     funnel: { ...DEFAULT_FUNNEL_SETTINGS },
     proposals: {
       withdraw: { ...DEFAULT_PROPOSAL_SETTINGS.withdraw },
@@ -1116,6 +1229,9 @@ function readSettingsFile(settingsPath: string, quiet = false): { ok: boolean; s
     auth: {},
     entry_preview: { ...DEFAULT_ENTRY_PREVIEW_SETTINGS },
     consent: { fallback: null, window: { ...DEFAULT_CONSENT_WINDOW } },
+    session: {
+      location: { ...DEFAULT_SESSION_SETTINGS.location },
+    },
     ads: parseAdsSettings(undefined),
     ads_legacy_present: false,
   };
@@ -1218,12 +1334,22 @@ function readSettingsFile(settingsPath: string, quiet = false): { ok: boolean; s
     };
     const parseConsent = (raw: Record<string, unknown>): ConsentDefaults => {
       const result: ConsentDefaults = {};
-      const textKeys = new Set(["marketing_text", "sms_text", "terms_url", "privacy_url"]);
+      const textKeys = new Set([
+        "marketing_text",
+        "sms_text",
+        "terms_url",
+        "privacy_url",
+        "sms_countries_mode",
+        "whatsapp_countries_mode",
+      ]);
+      const arrayKeys = new Set(["sms_countries", "whatsapp_countries"]);
       for (const [key, value] of Object.entries(raw)) {
         if (typeof value === "boolean") {
           result[key] = value;
         } else if (typeof value === "string" && value && textKeys.has(key)) {
           result[key] = value;
+        } else if (arrayKeys.has(key) && Array.isArray(value)) {
+          result[key] = value.filter((el): el is string => typeof el === "string" && el.trim() !== "");
         }
       }
       return result;
@@ -1295,15 +1421,17 @@ function readSettingsFile(settingsPath: string, quiet = false): { ok: boolean; s
       login_event_name: authConv.login_event_name,
       signup_event_aliases: authConv.signup_event_aliases,
       login_event_aliases: authConv.login_event_aliases,
+      gtm_payload: {
+        skip_domains: normalizeSkipDomains(
+          (trackingRaw?.gtm_payload as Record<string, unknown> | undefined)?.skip_domains,
+        ),
+      },
     };
 
     const robotsRaw = parsed.robots as Record<string, unknown> | undefined;
     const defRobots = defaults.robots;
     const robots: RobotsSettings = {
-      block_indexing:
-        typeof robotsRaw?.block_indexing === "boolean"
-          ? robotsRaw.block_indexing
-          : defRobots.block_indexing,
+      indexing_block: normalizeIndexingBlock(robotsRaw, defRobots.indexing_block),
       include_sitemap:
         typeof robotsRaw?.include_sitemap === "boolean"
           ? robotsRaw.include_sitemap
@@ -1331,17 +1459,20 @@ function readSettingsFile(settingsPath: string, quiet = false): { ok: boolean; s
       robots,
       search_console: parseSearchConsoleSettings(parsed.search_console),
       indexnow: parseIndexNowSettings(parsed.indexnow),
+      llms_txt: parseLlmsTxtSettings(parsed.llms_txt),
       openrush: parseOpenRushSettings(parsed.openrush),
+      dataforseo: parseDataForSeoSettings(parsed.dataforseo),
       funnel: parseFunnelSettings(parsed.funnel),
       proposals: parseProposalSettings(parsed.proposals),
       auth,
       entry_preview: parseEntryPreviewSettings(parsed.entry_preview),
       consent: parseSiteConsentSettings(parsed.consent),
+      session: parseSessionSettings(parsed.session),
       ads: parseAdsSettings(parsed.ads),
       ads_legacy_present: parsed.ads != null && typeof parsed.ads === "object",
     };
     log.info(
-      `[Settings] Loaded: ${i18n.supported_locales.length} locale(s), default="${i18n.default_locale}", home_page="${home_page.slug}", conversion_events=${tracking.conversion_events.length}, block_indexing=${robots.block_indexing}`
+      `[Settings] Loaded: ${i18n.supported_locales.length} locale(s), default="${i18n.default_locale}", home_page="${home_page.slug}", conversion_events=${tracking.conversion_events.length}, indexing_block=${robots.indexing_block}`
     );
     return { ok: true, settings: result };
   } catch (err) {
@@ -1705,8 +1836,42 @@ export function getIndexNowSettings(contentRoot?: string): IndexNowSettings {
   return loadSettings(contentRoot).indexnow;
 }
 
+export function getLlmsTxtSettings(contentRoot?: string): LlmsTxtSettings {
+  return loadSettings(contentRoot).llms_txt;
+}
+
+export function updateLlmsTxtSettings(
+  input: Partial<LlmsTxtSettings>,
+  contentRoot?: string,
+): LlmsTxtSettings {
+  const settingsPath = getSettingsPath(contentRoot);
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const raw = fs.readFileSync(settingsPath, "utf-8");
+      existing = (yaml.load(raw) as Record<string, unknown>) || {};
+    } catch {}
+  }
+
+  const current = parseLlmsTxtSettings(existing.llms_txt);
+  const updated: LlmsTxtSettings = {
+    enabled: typeof input.enabled === "boolean" ? input.enabled : current.enabled,
+  };
+  existing.llms_txt = { enabled: updated.enabled };
+
+  const output = yaml.dump(existing, { lineWidth: 120, noRefs: true });
+  fs.writeFileSync(settingsPath, output, "utf-8");
+  resetSettings(resolveSettingsRoot(contentRoot));
+  log.info(`[Settings] Updated llms_txt enabled=${updated.enabled}`);
+  return updated;
+}
+
 export function getOpenRushSettings(contentRoot?: string): OpenRushSettings {
   return loadSettings(contentRoot).openrush;
+}
+
+export function getDataForSeoSettings(contentRoot?: string): DataForSeoSettings {
+  return loadSettings(contentRoot).dataforseo;
 }
 
 export function getFunnelSettings(contentRoot?: string): FunnelSettings {
@@ -1723,6 +1888,64 @@ export function getEntryPreviewSettings(contentRoot?: string): EntryPreviewSetti
 
 export function getAuthSettings(contentRoot?: string): AuthSettings {
   return loadSettings(contentRoot).auth;
+}
+
+export function getSessionSettings(contentRoot?: string): SessionSettings {
+  return loadSettings(contentRoot).session;
+}
+
+/**
+ * Persist visitor session config to settings.yml → session.
+ * `location.database` null/empty = do not fill session.location from a campus bank.
+ */
+export function updateSessionSettings(
+  input: Partial<SessionSettings> & { location?: Partial<SessionSettings["location"]> },
+  contentRoot?: string,
+): SessionSettings {
+  const settingsPath = getSettingsPath(contentRoot);
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const raw = fs.readFileSync(settingsPath, "utf-8");
+      existing = (yaml.load(raw) as Record<string, unknown>) || {};
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const current = loadSettings(contentRoot).session;
+  const nextLoc = input.location ?? {};
+  let database = current.location.database;
+  if (nextLoc.database !== undefined) {
+    if (nextLoc.database === null || nextLoc.database === "") {
+      database = null;
+    } else if (typeof nextLoc.database === "string") {
+      database = nextLoc.database.trim() || null;
+    } else {
+      throw new Error("session.location.database must be a string or null");
+    }
+  }
+  const fill_from_ip =
+    nextLoc.fill_from_ip !== undefined ? nextLoc.fill_from_ip !== false : current.location.fill_from_ip;
+
+  const updated: SessionSettings = {
+    location: { database, fill_from_ip },
+  };
+
+  existing.session = {
+    location: {
+      database: updated.location.database,
+      fill_from_ip: updated.location.fill_from_ip,
+    },
+  };
+
+  const output = yaml.dump(existing, { lineWidth: 120, noRefs: true });
+  fs.writeFileSync(settingsPath, output, "utf-8");
+  resetSettings(resolveSettingsRoot(contentRoot));
+  log.info(
+    `[Settings] Updated session: location.database="${updated.location.database ?? ""}", fill_from_ip=${updated.location.fill_from_ip}`,
+  );
+  return loadSettings(contentRoot).session;
 }
 
 /**
@@ -1994,8 +2217,31 @@ export function updateAuthSettings(
   return updated;
 }
 
+export function getIndexingBlock(contentRoot?: string): IndexingBlockMode {
+  return loadSettings(contentRoot).robots.indexing_block;
+}
+
+/** Search indexing is site-blocked (mode `all`). */
 export function isIndexingBlocked(contentRoot?: string): boolean {
-  return loadSettings(contentRoot).robots.block_indexing;
+  return getIndexingBlock(contentRoot) === "all";
+}
+
+/** Soft + hard AI block modes (`ai` or `all`). */
+export function isAiIndexingBlocked(contentRoot?: string): boolean {
+  const mode = getIndexingBlock(contentRoot);
+  return mode === "ai" || mode === "all";
+}
+
+/**
+ * Known LLM crawler UA should be refused (403) when indexing_block is `ai` or `all`.
+ * Does not consult the editable ai_bots list — that list drives robots.txt only.
+ */
+export function shouldHardDenyLlmCrawler(
+  ua: string | undefined | null,
+  contentRoot?: string,
+): boolean {
+  if (!isAiIndexingBlocked(contentRoot)) return false;
+  return isLlmHtmlAudience(ua);
 }
 
 /** When sitewide indexing is blocked, always return noindex; otherwise use pageRobots or default. */
@@ -2009,7 +2255,48 @@ export function resolveEffectiveRobots(
     : "index, follow";
 }
 
-export function updateRobotsSettings(input: Partial<RobotsSettings>, contentRoot?: string): RobotsSettings {
+/** Set X-Robots-Tag to the same effective robots string as the HTML meta tag. */
+export function applyXRobotsTag(
+  res: { setHeader(name: string, value: string): void },
+  contentRoot?: string,
+  pageRobots?: string | null,
+): void {
+  res.setHeader("X-Robots-Tag", resolveEffectiveRobots(pageRobots, contentRoot));
+}
+
+/** Pull meta name="robots" content from cached HTML when page robots are not otherwise known. */
+export function extractRobotsMetaFromHtml(html: string): string | undefined {
+  const m = html.match(
+    /<meta\s+[^>]*name\s*=\s*["']robots["'][^>]*content\s*=\s*["']([^"']+)["'][^>]*>/i,
+  ) || html.match(
+    /<meta\s+[^>]*content\s*=\s*["']([^"']+)["'][^>]*name\s*=\s*["']robots["'][^>]*>/i,
+  );
+  const value = m?.[1]?.trim();
+  return value || undefined;
+}
+
+/** Prefer site-wide block; else robots meta baked into HTML; else default index,follow. */
+export function applyXRobotsTagFromHtml(
+  res: { setHeader(name: string, value: string): void },
+  html: string,
+  contentRoot?: string,
+): void {
+  if (isIndexingBlocked(contentRoot)) {
+    applyXRobotsTag(res, contentRoot);
+    return;
+  }
+  applyXRobotsTag(res, contentRoot, extractRobotsMetaFromHtml(html));
+}
+
+export type UpdateRobotsSettingsInput = Partial<RobotsSettings> & {
+  /** Legacy boolean; mapped to indexing_block when indexing_block is omitted. */
+  block_indexing?: boolean;
+};
+
+export function updateRobotsSettings(input: UpdateRobotsSettingsInput, contentRoot?: string): RobotsSettings {
+  if (input.indexing_block !== undefined && !isIndexingBlockMode(input.indexing_block)) {
+    throw new Error('indexing_block must be "none", "ai", or "all"');
+  }
   if (input.block_indexing !== undefined && typeof input.block_indexing !== "boolean") {
     throw new Error("block_indexing must be a boolean");
   }
@@ -2050,8 +2337,15 @@ export function updateRobotsSettings(input: Partial<RobotsSettings>, contentRoot
   }
 
   const current = loadSettings(contentRoot).robots;
+  let indexing_block = current.indexing_block;
+  if (isIndexingBlockMode(input.indexing_block)) {
+    indexing_block = input.indexing_block;
+  } else if (typeof input.block_indexing === "boolean") {
+    indexing_block = input.block_indexing ? "all" : "none";
+  }
+
   const updated: RobotsSettings = {
-    block_indexing: typeof input.block_indexing === "boolean" ? input.block_indexing : current.block_indexing,
+    indexing_block,
     include_sitemap: typeof input.include_sitemap === "boolean" ? input.include_sitemap : current.include_sitemap,
     disallow_paths: Array.isArray(input.disallow_paths)
       ? input.disallow_paths.map((p) => p.trim()).filter(Boolean)
@@ -2062,7 +2356,7 @@ export function updateRobotsSettings(input: Partial<RobotsSettings>, contentRoot
   };
 
   existing.robots = {
-    block_indexing: updated.block_indexing,
+    indexing_block: updated.indexing_block,
     include_sitemap: updated.include_sitemap,
     disallow_paths: updated.disallow_paths,
     ai_bots: updated.ai_bots,
@@ -2072,7 +2366,7 @@ export function updateRobotsSettings(input: Partial<RobotsSettings>, contentRoot
   fs.writeFileSync(settingsPath, output, "utf-8");
   resetSettings(resolveSettingsRoot(contentRoot));
   log.info(
-    `[Settings] Updated robots: block_indexing=${updated.block_indexing}, include_sitemap=${updated.include_sitemap}, disallow_paths=${updated.disallow_paths.length}, ai_bots=${updated.ai_bots.length}`
+    `[Settings] Updated robots: indexing_block=${updated.indexing_block}, include_sitemap=${updated.include_sitemap}, disallow_paths=${updated.disallow_paths.length}, ai_bots=${updated.ai_bots.length}`
   );
   return updated;
 }
@@ -2179,6 +2473,7 @@ export function updateSearchConsoleBigQuerySettings(
 export function updateSearchConsoleOrganicMarkets(
   input: unknown,
   contentRoot?: string,
+  researchDefaults?: unknown,
 ): SearchConsoleSettings {
   const settingsPath = getSettingsPath(contentRoot);
   let existing: Record<string, unknown> = {};
@@ -2191,14 +2486,19 @@ export function updateSearchConsoleOrganicMarkets(
 
   const current = parseSearchConsoleSettings(existing.search_console);
   const organic_markets = parseOrganicMarkets(input);
-  const updated: SearchConsoleSettings = { ...current, organic_markets };
+  const research_market_defaults =
+    researchDefaults === undefined
+      ? current.research_market_defaults
+      : parseResearchMarketDefaults(researchDefaults);
+  const updated: SearchConsoleSettings = { ...current, organic_markets, research_market_defaults };
   writeSearchConsoleBlock(existing, updated);
 
   const output = yaml.dump(existing, { lineWidth: 120, noRefs: true });
   fs.writeFileSync(settingsPath, output, "utf-8");
   resetSettings(resolveSettingsRoot(contentRoot));
   log.info(
-    `[Settings] Updated search_console.organic_markets count=${organic_markets.length}`,
+    `[Settings] Updated search_console.organic_markets count=${organic_markets.length} ` +
+      `research_defaults=${JSON.stringify(research_market_defaults)}`,
   );
   return updated;
 }
@@ -2285,6 +2585,7 @@ export function updateAdsSettings(input: AdsSettingsUpdate, contentRoot?: string
     meta: {
       enabled: m.enabled,
       ad_account_ids: m.ad_account_ids,
+      ...(Object.keys(m.account_locations).length > 0 ? { account_locations: m.account_locations } : {}),
       ...(m.known_external_campaigns.length > 0 ? { known_external_campaigns: m.known_external_campaigns } : {}),
       ...(m.lead_conversions.length > 0 ? { lead_conversions: m.lead_conversions } : {}),
       ...(m.lead_conversions_changed_at ? { lead_conversions_changed_at: m.lead_conversions_changed_at } : {}),
@@ -2295,6 +2596,7 @@ export function updateAdsSettings(input: AdsSettingsUpdate, contentRoot?: string
           google: {
             enabled: g.enabled,
             customer_ids: g.customer_ids,
+            ...(Object.keys(g.account_locations).length > 0 ? { account_locations: g.account_locations } : {}),
             bigquery: g.bigquery,
             ...(g.lead_conversion_actions.length > 0 ? { lead_conversion_actions: g.lead_conversion_actions } : {}),
             ...(g.known_external_campaigns.length > 0 ? { known_external_campaigns: g.known_external_campaigns } : {}),
@@ -2345,6 +2647,38 @@ export function updateOpenRushSettings(
   log.info(
     `[Settings] Updated openrush enabled=${merged.enabled} serp_top_n=${merged.serp_top_n} ` +
       `session=${merged.session_credit_limit} daily=${merged.daily_credit_limit} warn%=${merged.budget_warn_percent}`,
+  );
+  return merged;
+}
+
+export function updateDataForSeoSettings(
+  input: Partial<DataForSeoSettings>,
+  contentRoot?: string,
+): DataForSeoSettings {
+  const settingsPath = getSettingsPath(contentRoot);
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const raw = fs.readFileSync(settingsPath, "utf-8");
+      existing = (yaml.load(raw) as Record<string, unknown>) || {};
+    } catch {}
+  }
+
+  const current = parseDataForSeoSettings(existing.dataforseo);
+  const merged = parseDataForSeoSettings({ ...current, ...input }, DEFAULT_DATAFORSEO_SETTINGS);
+  existing.dataforseo = {
+    enabled: merged.enabled,
+    daily_usd_limit: merged.daily_usd_limit,
+    session_usd_limit: merged.session_usd_limit,
+    budget_warn_percent: merged.budget_warn_percent,
+  };
+
+  const output = yaml.dump(existing, { lineWidth: 120, noRefs: true });
+  fs.writeFileSync(settingsPath, output, "utf-8");
+  resetSettings(resolveSettingsRoot(contentRoot));
+  log.info(
+    `[Settings] Updated dataforseo enabled=${merged.enabled} daily_usd=${merged.daily_usd_limit} ` +
+      `session_usd=${merged.session_usd_limit} warn%=${merged.budget_warn_percent}`,
   );
   return merged;
 }
@@ -2458,6 +2792,7 @@ export function updateTrackingSettings(input: {
   login_event_name?: string;
   signup_event_aliases?: string[];
   login_event_aliases?: string[];
+  gtm_payload?: { skip_domains?: unknown };
 }, contentRoot?: string): void {
   if (input.conversion_events !== undefined && !Array.isArray(input.conversion_events)) {
     throw new Error("conversion_events must be an array");
@@ -2619,6 +2954,20 @@ export function updateTrackingSettings(input: {
       .map((t) => t.trim());
     if (cleaned.length > 0) nextTracking.leads_expected_tags = cleaned;
     else delete nextTracking.leads_expected_tags;
+  }
+
+  if (input.gtm_payload !== undefined) {
+    const raw = input.gtm_payload?.skip_domains;
+    if (raw !== undefined && !Array.isArray(raw)) {
+      throw new Error("gtm_payload.skip_domains must be an array of domains");
+    }
+    const invalid = (raw ?? []).filter((d) => typeof d === "string" && d.trim() && !normalizeSkipDomain(d));
+    if (invalid.length > 0) {
+      throw new Error(`Not a domain: ${invalid.map((d) => `"${String(d)}"`).join(", ")}`);
+    }
+    const domains = normalizeSkipDomains(raw ?? []);
+    if (domains.length > 0) nextTracking.gtm_payload = { skip_domains: domains };
+    else delete nextTracking.gtm_payload;
   }
 
   if (input.bigquery !== undefined) {

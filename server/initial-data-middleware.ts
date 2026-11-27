@@ -5,7 +5,7 @@ import * as yaml from "js-yaml";
 import type { Request, Response, NextFunction } from "express";
 import { contentIndex, ContentIndex } from "./content-index";
 import { resolveDynamicEntries } from "./dynamic-entries";
-import { resolveLayout, getAllConfigs, getContentTypeConfig, getLabel, getLayout, getPreviewConfig } from "./content-types";
+import { resolveLayout, getAdsOptimizedTypes, getAllConfigs, getContentTypeConfig, getLabel, getLayout, getPreviewConfig } from "./content-types";
 import {
   applyComponentSectionDefaults,
   applyComponentImageSizes,
@@ -31,6 +31,7 @@ import {
   urlHasContentQuery,
 } from "./html-page-cache";
 import { buildSingleEntryFromContent } from "./build-single-entry";
+import { buildContentTypeConfigPayload, contentTypeConfigQueryKey } from "./content-type-config-payload";
 import { hydrateEntryForDelivery } from "./hydrate-entry-delivery";
 import { databaseManager, type DatabaseManager } from "./database";
 import { applyEntryModulePreload } from "./utils/html-transforms";
@@ -39,6 +40,7 @@ import {
   injectPageTrackingDataLayer,
   injectPageVersionDataLayer,
   insertBefore,
+  removeLinkTagsByRel,
   replaceLiteral,
 } from "./utils/html-inject";
 import { isLlmHtmlAudience } from "../shared/runtime-issues";
@@ -62,6 +64,7 @@ import { isSiteThemedPath, type ThemePaint } from "@shared/theme-palette";
 import { loadSiteTheme } from "./theme-config";
 import { injectThemeOverrides } from "./theme-html";
 import { buildServerPageTracking } from "./tracking-page-context";
+import { collectExternalRedirects, isCheckoutPathContext, siteOwnHosts } from "./outbound-redirects";
 
 const DEFAULT_SRCSET_SIZES =
   "(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw";
@@ -149,7 +152,16 @@ export async function resolvePageQuery(
           data,
         })
       : null;
-    if (tracking) query.data = { ...data, _tracking: tracking };
+    if (tracking) {
+      const externalRedirects = isCheckoutPathContext(tracking)
+        ? collectExternalRedirects(data, ci, siteOwnHosts(site))
+        : {};
+      query.data = {
+        ...data,
+        _tracking: tracking,
+        ...(Object.keys(externalRedirects).length > 0 ? { _external_redirects: externalRedirects } : {}),
+      };
+    }
   }
   return query;
 }
@@ -184,6 +196,7 @@ async function resolvePageQueryInner(
     {
       let probeLocale = cleanUrl.match(/^\/(es)\b/) ? "es" : "en";
       if (resolved.params?.locale) probeLocale = resolved.params.locale;
+      else if (isNonLocalized) probeLocale = ci.localeForResolved(resolved);
       const normalizedProbe = normalizeLocale(probeLocale);
       if (
         isEmptyDetachedLocaleEntry({
@@ -298,11 +311,8 @@ async function resolvePageQueryInner(
     let locale = urlHasLocale ? (urlLocale as string) : "en";
     if (resolved.params?.locale) {
       locale = resolved.params.locale;
-    } else if (!urlHasLocale) {
-      const commonData = ci.loadCommonData(contentType, slug);
-      if (commonData?.locale && typeof commonData.locale === "string") {
-        locale = commonData.locale;
-      }
+    } else if (!cleanUrl.match(/^\/(en|es)\b/)) {
+      locale = ci.localeForResolved(resolved);
     }
 
     if (apiPath) {
@@ -774,10 +784,7 @@ export function injectSsrMetaTags(
       const escaped = escapeAttr(canonicalHref);
       const canonicalTag = `<link rel="canonical" href="${escaped}" />`;
       if (/\brel\s*=\s*["']canonical["']/i.test(html)) {
-        html = html.replace(
-          /<link\b(?:(?!\/>)[\s\S])*?\brel\s*=\s*["']canonical["'](?:(?!\/>)[\s\S])*?\/?>\s*/gi,
-          "",
-        );
+        html = removeLinkTagsByRel(html, "canonical");
       }
       html = insertBefore(html, "</head>", `${canonicalTag}\n`);
 
@@ -837,10 +844,21 @@ export function urlBakesStoredPageQuery(url: string, ci: ContentIndex | undefine
   if (!resolved) return false;
   let locale = clean.startsWith("/es") ? "es" : "en";
   if (resolved.params?.locale) locale = resolved.params.locale;
-  else if (resolved.patternLocale && resolved.patternLocale !== "default") locale = resolved.patternLocale;
+  else if (resolved.patternLocale) locale = ci.localeForResolved(resolved);
   const { data } = ci.loadMergedContent(resolved.contentType, resolved.slug, locale);
   if (!data) return false;
   return requestBakesQueryParamTemplate(url, data, resolved.params ? Object.keys(resolved.params) : undefined);
+}
+
+function isAdsOptimizedUrl(cleanUrl: string, ci: ContentIndex, parsedType?: string): boolean {
+  try {
+    const types = getAdsOptimizedTypes(ci.contentRoot);
+    if (types.length === 0) return false;
+    const contentType = ci.resolveUrl(cleanUrl)?.contentType ?? parsedType;
+    return !!contentType && types.includes(contentType);
+  } catch {
+    return false;
+  }
 }
 
 export async function resolveInitialData(
@@ -868,14 +886,28 @@ export async function resolveInitialData(
   }
   queries.push(variablesQuery);
 
+  if (pageQuery && parsedUrl?.contentType && getContentTypeConfig(parsedUrl.contentType, ci.contentRoot)?.forms?.location) {
+    const payload = buildContentTypeConfigPayload(
+      parsedUrl.contentType,
+      ci.contentRoot,
+      ci.findByType(parsedUrl.contentType).length,
+    );
+    if (payload) queries.push({ queryKey: [contentTypeConfigQueryKey(parsedUrl.contentType)], data: payload });
+  }
+
+  const adsLean = !!pageQuery && pageQuery.queryKey[0] !== "/api/database-single" && isAdsOptimizedUrl(cleanUrl, ci, parsedUrl?.contentType);
+
   // Seed main-navbar and main-footer unconditionally so the header and footer
   // are always present in the server-rendered HTML, even when pageQuery is null
   // (e.g. database-backed pages where the DB query failed or returned no result).
+  // Ads-optimized pages skip this: the layout loop below seeds only the menus they show.
   const defaultLocale = cleanUrl.startsWith("/es") ? "es" : "en";
-  const defaultNavbarQuery = resolveMenuQuery("main-navbar", defaultLocale, ci.contentRoot);
-  if (defaultNavbarQuery) queries.push(defaultNavbarQuery);
-  const defaultFooterQuery = resolveMenuQuery("main-footer", defaultLocale, ci.contentRoot);
-  if (defaultFooterQuery) queries.push(defaultFooterQuery);
+  if (!adsLean) {
+    const defaultNavbarQuery = resolveMenuQuery("main-navbar", defaultLocale, ci.contentRoot);
+    if (defaultNavbarQuery) queries.push(defaultNavbarQuery);
+    const defaultFooterQuery = resolveMenuQuery("main-footer", defaultLocale, ci.contentRoot);
+    if (defaultFooterQuery) queries.push(defaultFooterQuery);
+  }
 
   // If SSR resolved a canonical/base slug but the current URL uses a localized
   // alias slug, hydrate both keys to avoid first-render cache miss on client.
@@ -923,8 +955,9 @@ export async function resolveInitialData(
     // differ (e.g. /landing/foo with no /es prefix but es.yml). The header may
     // switch language after hydrate; the SSR subset must include both.
     const menuLocales = new Set<string>([locale, defaultLocale].filter(Boolean));
-    const topMenuId = layout?.menu?.top ?? "main-navbar";
-    const bottomMenuId = layout?.menu?.bottom ?? "main-footer";
+    // resolveLayout returns null for "no menu"; only a missing layout falls back to the defaults.
+    const topMenuId = layout?.menu ? layout.menu.top : "main-navbar";
+    const bottomMenuId = layout?.menu ? layout.menu.bottom : "main-footer";
     for (const menuLocale of menuLocales) {
       if (topMenuId) {
         const mq = resolveMenuQuery(topMenuId, menuLocale, ci.contentRoot);
@@ -985,7 +1018,7 @@ export async function resolveInitialData(
     });
   }
 
-  const navigationManifest = readNavigationEagerManifest(ci.contentRoot);
+  const navigationManifest = adsLean ? null : readNavigationEagerManifest(ci.contentRoot);
   if (navigationManifest) {
     queries.push({
       queryKey: ["navigation-eager-manifest"],

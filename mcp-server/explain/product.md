@@ -18,14 +18,15 @@ Legacy explain topic name `ecommerce` still resolves here for one changelog wind
 | **Journey membership** | Which pages belong to a product’s funnel | Each page’s `_common.yml` → `funnel.stage` + `funnel.products` as `{ product, persona? }[]` or `"all"`. |
 | **Product scope** | Which product(s) a section is about | Section `ecommerce_products` / `programs[].id` — GA field names kept. |
 | **Plans / SKUs** | Billing packages | **Not in CMS** — external POS |
+| **List price** | Full/list tuition for Course Offer JSON-LD | `_product.yml` → `pricing.list_price_variable` pointing at a `category:price` site var with `price_role: list`. Monthly prices stay tagged vars only — never bound here. |
 
 ## Tools
 
 | Tool | Use |
 |------|-----|
 | `list_products` | Inventory first (selling flag, audience status, persona ids). Removed hidden unless `include_removed: true`. Paused included by default. |
-| `get_product` | Full sidecar for one slug (offer + personas/avatar), including soft-removed (warns not sellable). |
-| `create_or_update_product` | Create/patch sidecar (`confirm: true`). Audience/metadata → `content_edit_structure`. `purchasable` / `actively_selling` → `product_manage`. |
+| `get_product` | Full sidecar for one slug (offer + personas/avatar + `pricing` / `pricing_resolved`), including soft-removed (warns not sellable). Missing binding → warning; Course Offer omitted. |
+| `create_or_update_product` | Create/patch sidecar (`confirm: true`). Audience/metadata/`pricing` → `content_edit_structure`. `purchasable` / `actively_selling` → `product_manage`. |
 | `get_product_funnel` / `get_product_funnel_analytics` | Journey pages / metrics (GA4 BigQuery). Site-wide GA → `get_analytics_report` (topic `analytics`). |
 
 Vague “what is this site about?” → `list_products` then `get_product` on relevant slugs (also summarized on `explain_site` topic `overview`).
@@ -42,6 +43,7 @@ On consequential **previews**, `create_or_update_product` may attach **`discover
 
 ## Audience
 
+- **Ownership (intentional):** 1 persona → 1 product. Personas live only on that product’s `_product.yml`. Do **not** invent a shared/global persona catalog, multi-product membership, or reuse the same persona id across products “because it’s the same buyer.” Same human segment on two offers (e.g. non-tech pro → Flex *or* AI Engineering) ⇒ **two product-specific personas** with different ids, fears, and objections — the constraint forces a personalized funnel per offer. Staff may call them the same *segment*; the CMS must not treat them as one object. **Push back / refuse** architecture that merges personas across products.
 - Minimal: `offer.one_liner`, `offer.who_its_for`, ≥1 persona with `id`, `role`, avatar `fears` (≥1), `internal_dialogue`, `objections` (≥1).
 - Persona **ids are immutable while funnel pages bind** them (including the product’s own page if it binds that persona). Creating a persona on the product does **not** bind any page. Rename (remove old id + add new) is allowed when unbound. Duplicate ids on the same product are rejected. Display `label` is always editable.
 - Cannot remove a persona (or demote below minimal) while pages still bind that persona/product in funnel. **No cascade rename** of page `_common.yml` bindings.
@@ -92,10 +94,16 @@ funnel:
 
 `trackEcommerce`, section `ecommerce_products`, `/api/ecommerce/events`, `ecommerce-settings.yml` stay ecommerce-named.
 
+## List price / Course Offer
+
+- Bind with Store product Strategy → list-price panel, Variables (`price_role: list`), or `create_or_update_product` `pricing.list_price_variable`.
+- `get_product` returns `product.pricing` plus `pricing_resolved` (`amount` / `currency` / `display`) when money resolves.
+- Non-effects: does not edit page YAML or monthly price vars; programs without a binding keep valid Course JSON-LD without `offers`.
+
 ## Key files
 
 - `shared/productAudience.ts`, `shared/funnel.ts`, `shared/tracking-keys.ts`, `shared/tracking-context.ts`
 - `server/product/tracking-key-index.ts`, `tracking-keys-assign.ts`, `tracking-readiness.ts`
 - `server/product/` (index, manager, product-io, funnel gates, products-type-config)
 - `mcp-server/tools/product.ts`
-- Store → product detail → Audience panel / Selling toggle; SEO modal → Product tab; type manage → Sellable products card
+- Store → product detail → Audience panel / list-price panel / Selling toggle; SEO modal → Product tab; type manage → Sellable products card

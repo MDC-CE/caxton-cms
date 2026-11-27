@@ -17,6 +17,7 @@ import { registerExplainTools } from "./tools/explain.js";
 import { registerProductTools } from "./tools/product.js";
 import { registerDatabaseTools } from "./tools/databases.js";
 import { registerRedirectTools } from "./tools/redirects.js";
+import { registerLlmsTxtTools } from "./tools/llms-txt.js";
 import { registerMediaTools } from "./tools/media.js";
 import { registerProposalTools } from "./tools/proposals.js";
 import { registerValidationIssuesTools } from "./tools/validation-issues.js";
@@ -420,6 +421,7 @@ async function createMcpServer(
   registerVariableTools(mcp, mcpToken, grants);
   registerDatabaseTools(mcp, mcpToken);
   registerRedirectTools(mcp, mcpToken, grants);
+  registerLlmsTxtTools(mcp, mcpToken, grants);
   registerMediaTools(mcp, mcpToken, grants);
   registerProposalTools(mcp, mcpToken, grants);
   registerValidationIssuesTools(mcp, mcpToken, grants);
@@ -434,9 +436,12 @@ async function createMcpServer(
 
 // ─── Express server ───────────────────────────────────────────────────────────
 
+/** Headroom for get_or_set_media_to_gallery bytes_base64 (≤15 MB decoded ≈ ~20 MB base64 + JSON-RPC). */
+const MCP_JSON_BODY_LIMIT = "30mb";
+
 const app = express();
 app.use(cors({ exposedHeaders: ["WWW-Authenticate"] }));
-app.use(express.json());
+app.use(express.json({ limit: MCP_JSON_BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true }));
 
 function requestPublicBase(req: express.Request): string {
@@ -502,9 +507,12 @@ async function authMiddleware(
   if (bearerToken && validateToken(bearerToken)) {
     const username = getTokenUsername(bearerToken);
     // Weblify empty-install bootstrap identity (connection-token OAuth) is not a CMS user.
+    const { isConnectionTokenBootstrapUsername } = await import(
+      "@shared/connection-token-owner"
+    );
     if (
       username &&
-      username !== "weblify-local" &&
+      !isConnectionTokenBootstrapUsername(username) &&
       !(await ensureMcpRead(username))
     ) {
       return;
@@ -862,7 +870,18 @@ app.post("/oauth/authorize", async (req, res) => {
       );
       return;
     }
-    updateClientStaffUser(pending.clientId, "Weblify", "Admin", "weblify-local");
+    const { readConnectionOwnerFromDisk } = await import(
+      "@shared/connection-token-owner"
+    );
+    const owner = readConnectionOwnerFromDisk();
+    if (!owner) {
+      await reRender(
+        "Connection-token owner missing. Run `npx caxton-cms token --user <name>` first (docs/local-connection-token.md).",
+        "token",
+      );
+      return;
+    }
+    updateClientStaffUser(pending.clientId, "Local", "Bootstrap", owner);
     let redirectUrl: URL;
     try {
       redirectUrl = new URL(pending.redirectUri);

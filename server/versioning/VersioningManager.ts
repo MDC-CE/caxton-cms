@@ -15,7 +15,16 @@ import {
   hasActiveTraffic,
   pickVariant,
 } from "./assignment";
-import { applyRunTransitions, latestRun, type TestRun, type TestRuns } from "./test-runs";
+import {
+  applyRunTransitions,
+  latestRun,
+  runsFor,
+  setRunGoal,
+  type SetRunGoalResult,
+  type TestRun,
+  type TestRuns,
+} from "./test-runs";
+import type { TestGoal } from "@shared/page-stats";
 
 /** `_draft` is variant-file system metadata, never page content (see draft-meta.ts). */
 function stripDraftMeta(data: Record<string, unknown>): Record<string, unknown> {
@@ -144,6 +153,8 @@ export class VersioningManager {
   };
   private saveTimer: NodeJS.Timeout | null = null;
   private readonly contentRoot: string;
+  /** True once a state file (local or bucket) was loaded, so an empty `runs` means "never tested". */
+  private runHistoryLoaded = false;
 
   constructor(contentRoot?: string) {
     this.contentRoot = contentRoot ?? getContentDir();
@@ -279,6 +290,7 @@ export class VersioningManager {
   }
 
   private applyLoadedState(loaded: any): void {
+    this.runHistoryLoaded = true;
     const loadedEpoch = typeof loaded?.epoch === "number" ? loaded.epoch : 1;
     const runs: TestRuns = loaded?.runs && typeof loaded.runs === "object" ? loaded.runs : {};
     if (loadedEpoch < VERSIONING_STATE_EPOCH) {
@@ -515,7 +527,13 @@ export class VersioningManager {
     }
   }
 
-  private recordRunTransitions(contentType: string, slug: string, before: VersioningFile | null, after: VersioningFile | null): void {
+  private recordRunTransitions(
+    contentType: string,
+    slug: string,
+    before: VersioningFile | null,
+    after: VersioningFile | null,
+    goals?: Record<string, TestGoal>,
+  ): void {
     try {
       const changed = applyRunTransitions(this.state.runs, {
         contentType,
@@ -523,6 +541,7 @@ export class VersioningManager {
         before,
         after,
         today: new Date().toISOString().slice(0, 10),
+        goals,
       });
       if (changed) this.scheduleSave();
     } catch (error) {
@@ -533,6 +552,23 @@ export class VersioningManager {
   /** Running test for a page and language, otherwise the most recently ended one (null = none recorded). */
   public getLatestRun(contentType: string, slug: string, locale: string): (TestRun & { experiment_id: string }) | null {
     return latestRun(this.state.runs, contentType, slug, locale);
+  }
+
+  /** Change a running test's goal (logged on the run). Finished runs return "ended". */
+  public setRunGoal(experimentId: string, goal: TestGoal, author: string | null): SetRunGoalResult {
+    const result = setRunGoal(this.state.runs, experimentId, goal, new Date().toISOString().slice(0, 10), author);
+    if (result === "changed") this.scheduleSave();
+    return result;
+  }
+
+  /** Every recorded run for a page and language, newest first. */
+  public getRuns(contentType: string, slug: string, locale: string): Array<TestRun & { experiment_id: string }> {
+    return runsFor(this.state.runs, contentType, slug, locale);
+  }
+
+  /** False when no state was ever loaded here (fresh checkout, bucket unreachable): run history is unknown. */
+  public hasRunHistory(): boolean {
+    return this.runHistoryLoaded || Object.keys(this.state.runs).length > 0;
   }
 
   /**
@@ -793,7 +829,12 @@ export class VersioningManager {
     contentType: string,
     slug: string,
     data: VersioningFile,
-    opts?: { author?: string | null; contentRoot?: string },
+    opts?: {
+      author?: string | null;
+      contentRoot?: string;
+      /** Goal per locale for tests this write starts. */
+      testGoals?: Record<string, TestGoal>;
+    },
   ): void {
     const configPath = this.getVersioningFilePath(contentType, slug);
     const before = this.readVersioningConfigFromDisk(contentType, slug);
@@ -807,7 +848,7 @@ export class VersioningManager {
     const cacheKey = `${contentType}:${slug}`;
     this.configCache.delete(cacheKey);
     this.contentCache.clear();
-    this.recordRunTransitions(contentType, slug, before, data);
+    this.recordRunTransitions(contentType, slug, before, data, opts?.testGoals);
     markFileAsModified(configPath, opts?.author || "System", undefined, opts?.contentRoot ?? this.contentRoot);
     log.info(`[Versioning] Updated versioning.yml for ${contentType}/${slug} — queued for auto-commit (${configPath})`);
   }

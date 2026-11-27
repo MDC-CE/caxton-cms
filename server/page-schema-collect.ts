@@ -96,6 +96,7 @@ export async function collectDatabaseRecordSchemas(
   locale: string,
   ci: ContentIndex,
   contentRoot: string,
+  opts: { alreadyHydrated?: boolean } = {},
 ): Promise<PageSchemaCollectResult> {
   const baseUrl = getSiteBaseUrl(contentRoot);
   const config = getContentTypeConfig(contentType, contentRoot);
@@ -103,13 +104,14 @@ export async function collectDatabaseRecordSchemas(
 
   record = ensureRecordArticleContent(contentType, { ...record }, locale, contentRoot);
 
-  const hydrated = await hydrateEntryForDelivery(contentType, record, {
-    contentRoot,
-    locale,
-    contentIndex: ci,
-    baseUrl,
-  });
-  record = hydrated;
+  if (!opts.alreadyHydrated) {
+    record = await hydrateEntryForDelivery(contentType, record, {
+      contentRoot,
+      locale,
+      contentIndex: ci,
+      baseUrl,
+    });
+  }
 
   const urlPattern = config.url_pattern[locale] || config.url_pattern["en"];
   if (!urlPattern) return emptyResult();
@@ -157,6 +159,7 @@ export async function collectDatabaseRecordSchemas(
     }) as Array<Record<string, unknown>>;
 
     const withDynamic = (await resolveDynamicEntries(resolvedSections, locale, {
+      db: ci.getDatabase(),
       contentRoot,
       contentIndex: ci,
       singleEntry: record,
@@ -199,15 +202,15 @@ export async function collectStaticPageSchemas(
     let pageData = merged.data ?? loadRawYaml(route.contentType, route.slug, route.locale, ci, contentRoot);
     if (!pageData) return emptyResult();
 
-    if (merged.data && merged.isSharedTemplate) {
-      pageData = resolveAllTemplateVars(pageData, {
-        singleEntry: pageData,
-        contentType: route.contentType,
-        contentRoot,
-        context: { locale: route.locale },
-        skipSiteVars: false,
-      }) as Record<string, unknown>;
-    }
+    // Resolve {{vars}} for JSON-LD emit on every static page (not only shared templates).
+    // Prefills / YAML on disk stay raw; this is the SSR emit path only.
+    pageData = resolveAllTemplateVars(pageData, {
+      singleEntry: pageData,
+      contentType: route.contentType,
+      contentRoot,
+      context: { locale: route.locale },
+      skipSiteVars: false,
+    }) as Record<string, unknown>;
 
     const sections = pageData.sections as Array<Record<string, unknown>> | undefined;
     if (!Array.isArray(sections)) return emptyResult();
@@ -227,6 +230,7 @@ export async function collectStaticPageSchemas(
     };
 
     const withDynamic = (await resolveDynamicEntries(sections, route.locale, {
+      db: ci.getDatabase(),
       contentRoot,
       contentIndex: ci,
       singleEntry,

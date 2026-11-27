@@ -37,7 +37,12 @@ import { SECTION_LAYOUT_DEFAULT_KEYS } from "../section-layout-defaults";
 import { databaseManager, DatabaseManager } from "../database";
 import { TESTIMONIALS_DATABASE } from "@shared/testimonials-listing";
 import { commonYmlPath, readFunnelBlockFromFile } from "../funnel-fields";
-import type { FunnelBlock } from "@shared/funnel";
+import { attachFunnelSuggestionForList } from "./funnel";
+import {
+  normalizeFunnelProducts,
+  type FunnelBlock,
+  type FunnelProductBinding,
+} from "@shared/funnel";
 
 function getDB(res: import("express").Response): DatabaseManager {
   return (res.locals.site as import("../site-manager").SiteContext)?.database ?? databaseManager;
@@ -229,6 +234,7 @@ import {
   isKnownSeoFieldPath,
 } from "../content-types";
 import { diffPublicContentTypes } from "../jobs/definitions/content-type-html-scope";
+import { buildContentTypeConfigPayload } from "../content-type-config-payload";
 import { emitContentTypeChanged } from "../content-events";
 import { resolveFieldValue, applyTransformIfNeeded } from "../transform";
 import { resolveAllTemplateVars, buildContentDeliveryParamBag } from "../resolve-template-vars";
@@ -352,7 +358,13 @@ import {
   resolvePreviewBaseSlug,
   resolveVersioningReadSlug,
 } from "../shared-layout-entry";
-import { detachEntry, reattachEntry, getReattachSectionLossPreview, ReattachRequiredFieldsError } from "../shared-layout-detach";
+import {
+  detachEntry,
+  reattachEntry,
+  markEntriesDetachedPreservingStructure,
+  getReattachSectionLossPreview,
+  ReattachRequiredFieldsError,
+} from "../shared-layout-detach";
 import { resolveCommonTemplatePath } from "../shared-layout-paths";
 import {
   buildLocaleUnavailablePayload,
@@ -593,23 +605,19 @@ export function registerContentRoutes(app: Express): void {
     // (e.g. "4geeks-vs-otros-landing" → folder "4geeks-vs-others-landing")
     const baseSlug = getCI(res).resolveBaseSlug(slug, "landing");
 
-    // Get locale from query param, _common.yml, or default — then verify it exists
+    // Language: explicit ?locale=, else the language whose slug is this address, else
+    // servedLocale (only / first language file). _common.yml `locale` is ignored legacy.
     const queryLocale = req.query.locale as string | undefined;
     const supported = getSupportedLocales();
     const validQueryLocale = queryLocale && supported.includes(queryLocale) ? queryLocale : undefined;
-    const commonData = getCI(res).loadCommonData("landing", baseSlug);
-    let locale = validQueryLocale || (commonData?.locale as string) || getDefaultLocale();
-    const availableLocales = getCI(res).getAvailableLocalesOrVariants("landing" as ContentType, baseSlug);
+    const landingCi = getCI(res);
+    let locale =
+      validQueryLocale ||
+      landingCi.resolveLocaleFromUrlSlug(slug, "landing") ||
+      landingCi.servedLocale("landing", baseSlug, "default");
+    const availableLocales = [...landingCi.getAvailableLocalesOrVariants("landing" as ContentType, baseSlug)].sort();
     if (availableLocales.length > 0 && !availableLocales.includes(locale)) {
-      locale = availableLocales[0];
-    }
-    // If the URL slug is locale-specific (e.g. the ES slug of a bilingual page),
-    // detect which locale it belongs to and override the default locale detection
-    if (!validQueryLocale) {
-      const detectedLocale = getCI(res).resolveLocaleFromUrlSlug(slug, "landing");
-      if (detectedLocale && availableLocales.includes(detectedLocale)) {
-        locale = detectedLocale;
-      }
+      locale = availableLocales[0]!;
     }
 
     let landing: LandingPage | null = null;
@@ -642,6 +650,8 @@ export function registerContentRoutes(app: Express): void {
       return;
     }
 
+    // Locations / layout still come from _common.yml; locale no longer does.
+    const commonData = landingCi.loadCommonData("landing", baseSlug);
     const landingLocations =
       (commonData?.locations as string[] | undefined) || undefined;
     const landingData = landing as unknown as Record<string, unknown>;
@@ -1495,7 +1505,7 @@ export function registerContentRoutes(app: Express): void {
     }
   });
 
-  app.post("/api/content-types", (req, res) => {
+  app.post("/api/content-types", async (req, res) => {
     try {
       const { name, directory, url_pattern } = req.body;
       if (!name || typeof name !== "string") {
@@ -1531,7 +1541,7 @@ export function registerContentRoutes(app: Express): void {
       }
       const dir = directory || name;
 
-      addContentType(name, {
+      await addContentType(name, {
         directory: dir,
         url_pattern: normalizedPattern,
       }, getContentRoot(res));
@@ -1656,38 +1666,12 @@ export function registerContentRoutes(app: Express): void {
   app.get("/api/content-types/:type/config", (req, res) => {
     try {
       const { type } = req.params;
-      const config = getContentTypeConfig(type, ctRoot(res));
-      if (!config) {
+      const payload = buildContentTypeConfigPayload(type, ctRoot(res), getCI(res).findByType(type).length);
+      if (!payload) {
         res.status(404).json({ error: `Content type "${type}" not found` });
         return;
       }
-      res.json({
-        name: type,
-        label: getLabel(type, ctRoot(res)),
-        directory: config.directory,
-        field_mapping: config.field_mapping || null,
-        editor: config.editor || null,
-        indexes: config.indexes || null,
-        unique_fields: config.unique_fields || null,
-        database: config.database || null,
-        url_pattern: config.url_pattern,
-        single_template: !!config.single_template,
-        protected_slugs: config.protected_slugs || [],
-        preview: config.preview || null,
-        schema_org_requirements: config.schema_org_requirements || [],
-        seo_monitoring: config.seo_monitoring || null,
-        funnel: config.funnel || null,
-        products: (() => {
-          const eff = effectiveAllowSellableEntries(type, ctRoot(res));
-          return {
-            allow_sellable_entries: eff.allow_sellable_entries,
-            ...(eff.coerced_from_inventory ? { coerced_from_inventory: true } : {}),
-          };
-        })(),
-        strategy: config.strategy || null,
-        ads: config.ads?.optimize ? { optimize: true } : null,
-        static_entry_count: getCI(res).findByType(type).length,
-      });
+      res.json(payload);
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
@@ -2168,6 +2152,31 @@ export function registerContentRoutes(app: Express): void {
         }
       }
 
+      if (body.forms !== undefined) {
+        if (body.forms === null) {
+          update.forms = null;
+        } else if (typeof body.forms === "object") {
+          const loc = (body.forms as Record<string, unknown>).location;
+          if (loc === null || loc === undefined) {
+            update.forms = null;
+          } else if (typeof loc === "object") {
+            const l = loc as Record<string, unknown>;
+            update.forms = {
+              location: {
+                ...(typeof l.entry_field === "string" && l.entry_field.trim() ? { entry_field: l.entry_field.trim() } : {}),
+                ...(l.autodetect === false ? { autodetect: false } : {}),
+              },
+            };
+          } else {
+            res.status(400).json({ error: "forms.location must be an object or null" });
+            return;
+          }
+        } else {
+          res.status(400).json({ error: "forms must be an object or null" });
+          return;
+        }
+      }
+
       // Gate: required fields need a valid CT strategy (merged post-update view).
       {
         const {
@@ -2268,7 +2277,12 @@ export function registerContentRoutes(app: Express): void {
         updateContentTypeConfig(type, update, getContentRoot(res));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes("Cannot disable shared layout") || msg.includes("requires _slug") || msg.includes("Invalid field_mapping key")) {
+        if (
+          msg.includes("Cannot disable shared layout") ||
+          msg.includes("requires _slug") ||
+          msg.includes("Invalid field_mapping key") ||
+          msg.startsWith("Form location")
+        ) {
           res.status(400).json({ error: msg });
           return;
         }
@@ -2298,6 +2312,22 @@ export function registerContentRoutes(app: Express): void {
         }
       }
 
+      if (
+        body.forms !== undefined &&
+        JSON.stringify(beforeEntry?.forms ?? null) !== JSON.stringify(afterEntry?.forms ?? null)
+      ) {
+        invalidateContentCaches(type, getCI(res));
+        try {
+          const { invalidateHtmlPageCacheForSlug } = await import("../html-page-cache");
+          const { siteIdForContentRoot, contentRootAbsolute } = await import("../product/tracking-key-index");
+          const site = siteIdForContentRoot(contentRootAbsolute(getContentRoot(res)));
+          const slugs = new Set(getCI(res).findByType(type).map((e) => e.slug).filter(Boolean));
+          for (const slug of Array.from(slugs)) invalidateHtmlPageCacheForSlug(site, slug);
+        } catch (cacheErr) {
+          log.warn({ cacheErr, type }, "html cache flush after form location change failed");
+        }
+      }
+
       if (body.seo_monitoring !== undefined) {
         try {
           const { invalidateSeoIndexCache, rebuildSeoIndex } = await import("../seo-index");
@@ -2312,14 +2342,34 @@ export function registerContentRoutes(app: Express): void {
         }
       }
 
-      // When enabling shared layout, dissolve bindings for this type (bindings and templates don't mix)
+      // When enabling shared layout: surgically prune bindings; mark detach exceptions
       let bindingsDissolved: unknown = undefined;
+      let detachResult: unknown = undefined;
       if (enablingShared) {
-        const dissolved = bindingManager.dissolveGroupsForContentType(type);
-        if (dissolved.count > 0) {
+        const detachSlugs = Array.isArray(body.detach_slugs)
+          ? (body.detach_slugs as unknown[]).filter((s): s is string => typeof s === "string" && !!s.trim())
+          : [];
+        const pruned = bindingManager.pruneGroupsForSharedLayoutEnable(
+          type,
+          detachSlugs,
+        );
+        if (pruned.removedCount > 0 || pruned.updatedCount > 0) {
           bindingsDissolved = {
-            count: dissolved.count,
-            groups: dissolved.dissolved.map((g) => ({
+            count: pruned.removedCount,
+            updatedCount: pruned.updatedCount,
+            groups: pruned.removed.map((g) => ({
+              id: g.id,
+              name: g.name,
+              component: g.component,
+              locale: g.locale,
+              memberCount: g.members.length,
+              members: g.members.map((m) => ({
+                contentType: m.contentType,
+                slug: m.slug,
+                sectionId: m.sectionId,
+              })),
+            })),
+            updated: pruned.updated.map((g) => ({
               id: g.id,
               name: g.name,
               component: g.component,
@@ -2332,6 +2382,19 @@ export function registerContentRoutes(app: Express): void {
               })),
             })),
           };
+        }
+        if (detachSlugs.length > 0) {
+          try {
+            detachResult = markEntriesDetachedPreservingStructure({
+              contentType: type,
+              slugs: detachSlugs,
+              contentRoot: getContentRoot(res),
+            });
+            getCI(res).refresh();
+            invalidateContentCaches(type, getCI(res));
+          } catch (detachErr) {
+            log.warn({ err: detachErr, type }, "mark detach exceptions after shared-layout enable failed");
+          }
         }
       }
 
@@ -2360,6 +2423,7 @@ export function registerContentRoutes(app: Express): void {
         success: true,
         ...(alignResult ? { align: alignResult } : {}),
         ...(bindingsDissolved ? { bindingsDissolved } : {}),
+        ...(detachResult ? { detachExceptions: detachResult } : {}),
         ...(enableBootstrap?.ok
           ? {
               shared_layout_enable: {
@@ -3595,6 +3659,18 @@ export function registerContentRoutes(app: Express): void {
         typeof req.query.locale === "string" && req.query.locale.trim()
           ? req.query.locale.trim()
           : "";
+      const funnelStageFilter =
+        typeof req.query.funnel_stage === "string" && req.query.funnel_stage.trim()
+          ? req.query.funnel_stage.trim().toLowerCase()
+          : "";
+      const funnelProductFilter =
+        typeof req.query.funnel_product === "string" && req.query.funnel_product.trim()
+          ? req.query.funnel_product.trim()
+          : "";
+      const funnelPersonaFilter =
+        typeof req.query.funnel_persona === "string" && req.query.funnel_persona.trim()
+          ? req.query.funnel_persona.trim()
+          : "";
       const publishDateRange = parseManagePublishDateRange(
         req.query as Record<string, unknown>,
       );
@@ -3671,8 +3747,64 @@ export function registerContentRoutes(app: Express): void {
         title: string;
         pageTitle: string;
         funnel: FunnelBlock;
+        suggestion?: ReturnType<typeof attachFunnelSuggestionForList>;
         /** Present for YAML draft-only rows */
         status?: "draft" | "published";
+      };
+
+      const isMissingOrUnassigned = (v: string) =>
+        v === "missing" || v === "unassigned";
+
+      const matchesLiveFunnelFilters = (funnel: FunnelBlock): boolean => {
+        const stage =
+          typeof funnel.stage === "string" && funnel.stage.trim() ? funnel.stage.trim() : "";
+        const products = normalizeFunnelProducts(funnel.products as unknown);
+        const hasProducts =
+          products === "all" || (Array.isArray(products) && products.length > 0);
+
+        if (funnelStageFilter) {
+          if (isMissingOrUnassigned(funnelStageFilter)) {
+            if (stage) return false;
+          } else if (stage.toLowerCase() !== funnelStageFilter) {
+            return false;
+          }
+        }
+
+        if (funnelProductFilter) {
+          if (isMissingOrUnassigned(funnelProductFilter)) {
+            if (hasProducts) return false;
+          } else if (funnelProductFilter === "all") {
+            if (products !== "all") return false;
+          } else if (products === "all") {
+            /* site-wide includes every product for inventory filters */
+          } else if (!Array.isArray(products) || !products.some((b) => b.product === funnelProductFilter)) {
+            return false;
+          }
+        }
+
+        if (funnelPersonaFilter) {
+          if (isMissingOrUnassigned(funnelPersonaFilter)) {
+            if (products === "all") return false;
+            if (
+              Array.isArray(products) &&
+              products.some((b: FunnelProductBinding) => !!b.persona)
+            ) {
+              return false;
+            }
+            if (!hasProducts) {
+              /* missing products counts as unassigned persona */
+            }
+          } else if (products === "all") {
+            return false;
+          } else if (
+            !Array.isArray(products) ||
+            !products.some((b) => b.persona === funnelPersonaFilter)
+          ) {
+            return false;
+          }
+        }
+
+        return true;
       };
 
       const finish = (entries: FunnelEntryRow[], source: "yaml" | "db") => {
@@ -3699,6 +3831,18 @@ export function registerContentRoutes(app: Express): void {
               hasUnallocated,
             );
           });
+        }
+        if (funnelStageFilter || funnelProductFilter || funnelPersonaFilter) {
+          filtered = filtered.filter((e) => matchesLiveFunnelFilters(e.funnel));
+        }
+        // Attach suggestions after filters (stale cleanup is best-effort).
+        for (const e of filtered) {
+          e.suggestion = attachFunnelSuggestionForList(
+            type,
+            e.slug,
+            e.funnel,
+            contentRoot,
+          );
         }
         if (!pagination.paginate) {
           res.json({ contentType: type, source, count: filtered.length, entries: filtered });
@@ -5182,6 +5326,7 @@ export function registerContentRoutes(app: Express): void {
           ...(result.brokenInternalLinks?.length
             ? { broken_internal_links: result.brokenInternalLinks }
             : {}),
+          ...(result.formLocationIssues?.length ? { form_location_issues: result.formLocationIssues } : {}),
         });
         return;
       }
@@ -5191,6 +5336,7 @@ export function registerContentRoutes(app: Express): void {
         path: result.relativePath,
         isVariantLayer: result.isVariantLayer,
         ...(result.linkWarnings?.length ? { link_warnings: result.linkWarnings } : {}),
+        ...(result.formLocationWarnings?.length ? { form_location_warnings: result.formLocationWarnings } : {}),
       });
     } catch (err) {
       res.status(500).json({ error: String(err) });

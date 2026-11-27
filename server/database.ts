@@ -1,8 +1,9 @@
 import fs from "fs";
-import { getDefaultContentFolder } from "./site-config";
+import { getDefaultContentFolder, getSiteConfigs } from "./site-config";
 import path from "path";
 import yaml from "js-yaml";
 import { getAllTypes, getContentTypeConfig, getLocaleKey, getFieldMapping, getFullFieldMapping, getRowsFilterFields, RESERVED_IMAGE_FIELD, RESERVED_SLUG_FIELD, RESERVED_LOCALE_FIELD, applyImageAliasToEntry, applySlugAliasToEntry, applyLocaleAliasToEntry } from "./content-types";
+import { assertSourceNameAvailable } from "./source-namespace";
 import { applyRowsFilterFields } from "./database-single-loader";
 import { diffRefreshedDatabaseRows, type RefreshedDatabaseRow } from "./database-refresh-diff";
 import { getValueByPath, resolveFieldValue, isTransformer, compileTransformer, runTransformer } from "./transform";
@@ -16,7 +17,7 @@ import type { MediaGallery } from "./media-gallery";
 import { expandEditorFieldTokens } from "@shared/editor-field-values";
 import { slugify } from "@shared/slug";
 import { resolveCacheTtlMinutes, resolveRefreshRetryMinutes, type DbCacheTtlConfig } from "@shared/db-cache-ttl";
-import type { DatabaseEvidenceConfig } from "@shared/evidence-kinds";
+import { REJECTED_KEY, isRowRejected, type DatabaseEvidenceConfig } from "@shared/evidence-kinds";
 import { stripRowStamp } from "./database-row-stamp";
 import { freezeShared } from "./utils/deepFreeze";
 import { child } from "./logger";
@@ -35,6 +36,38 @@ function getDbDir(contentRoot?: string): string {
   }
 }
 const DB_DIR = path.join(process.cwd(), getDefaultContentFolder(), "db");
+
+/** `db/` of the site named by this site's `fallback_content_folder` in sites.yml (one hop), or null. */
+function getFallbackDbDir(contentRoot: string): string | null {
+  try {
+    const folder = path.basename(contentRoot);
+    const site = getSiteConfigs().find((c) => path.basename(c.contentFolder) === folder);
+    const fallback = site?.fallbackContentFolder?.trim();
+    if (!fallback || path.basename(fallback) === folder) return null;
+    const fallbackRoot = path.isAbsolute(fallback) ? fallback : path.join(process.cwd(), fallback);
+    return path.join(fallbackRoot, "db");
+  } catch {
+    return null;
+  }
+}
+
+function readDbConfigs(dbDir: string): Map<string, DatabaseConfig> {
+  const configs = new Map<string, DatabaseConfig>();
+  if (!fs.existsSync(dbDir)) return configs;
+  const folders = fs.readdirSync(dbDir).filter((f) => {
+    const full = path.join(dbDir, f);
+    return fs.statSync(full).isDirectory() && fs.existsSync(path.join(full, "config.yml"));
+  });
+  for (const folder of folders) {
+    try {
+      const raw = fs.readFileSync(path.join(dbDir, folder, "config.yml"), "utf-8");
+      configs.set(folder, yaml.load(raw) as DatabaseConfig);
+    } catch (err) {
+      log.error({ err: err }, `[DatabaseManager] Failed to load config for "${folder}":`);
+    }
+  }
+  return configs;
+}
 
 export interface VectorSearchConfig {
   enabled: boolean;
@@ -536,7 +569,8 @@ function applyContentTypeMapping(
       applyImageAliasToEntry(mapped, imageValue);
     }
 
-    if (!mapped.slug && mapped.title && typeof mapped.title === "string") {
+    // When `_slug` is mapped, empty means "no page" — do not invent a title slug.
+    if (!mapped.slug && mapped.title && typeof mapped.title === "string" && !fullMapping?.[RESERVED_SLUG_FIELD]) {
       mapped.slug = slugify(mapped.title, { maxLength: 200 });
     }
 
@@ -567,6 +601,17 @@ interface OverridesFile {
   entries: Record<string, Record<string, unknown>>;
 }
 
+/**
+ * Mapped rows minus staff-rejected ones (marked `_rejected: true` when the copy is built).
+ * Stored copies keep every row so stored positions — what edits and deletes address — never shift.
+ */
+export function withoutRejected<T extends Record<string, unknown>>(items: T[]): T[] {
+  return items.some((i) => i?.[REJECTED_KEY] === true) ? items.filter((i) => i?.[REJECTED_KEY] !== true) : items;
+}
+
+/** Read option: include rejected rows (staff Databases page, evidence pairing). Pages never pass it. */
+export type RejectedReadOpts = { includeRejected?: boolean };
+
 export type LastGoodItems = {
   items: Record<string, unknown>[];
   fetchedAt: string;
@@ -577,16 +622,85 @@ export type LastGoodItems = {
 
 export class DatabaseManager {
   private configs = new Map<string, DatabaseConfig>();
+  /**
+   * Read-only databases from the `fallback_content_folder` site, for names this site
+   * has no copy of. Not in `list()`, never warmed, written, or vector-indexed here.
+   */
+  private inherited = new Map<string, { config: DatabaseConfig; dbDir: string }>();
   private memoryCache = new Map<string, { data: CacheEntry; expires: number }>();
   private cache: IDatabaseCache = new SqliteCache();
   /** Parsed mapped copy per database, reused until the stored copy's fetched_at changes. */
-  private mappedMemo = new Map<string, { fetchedAt: string; items: Record<string, unknown>[] }>();
+  private mappedMemo = new Map<
+    string,
+    { fetchedAt: string; items: Record<string, unknown>[]; publicItems: Record<string, unknown>[] }
+  >();
   private memoGeneration = 0;
   /** Listing rows per content type, keyed by the copy's fetched_at + memo generation. */
   private listingMemo = new Map<string, { key: string; items: Record<string, unknown>[] }>();
 
+  private configFor(name: string): DatabaseConfig | undefined {
+    return this.configs.get(name) ?? this.inherited.get(name)?.config;
+  }
+
+  /** config.yml mtime per owned database, as of the last time this process read or wrote it. */
+  private configMtimes = new Map<string, number>();
+
+  private configFileMtime(name: string): number | null {
+    try {
+      return fs.statSync(path.join(this.dbDir, name, "config.yml")).mtimeMs;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Re-read an owned database's config.yml when another process changed it (content pull,
+   * data migration), so the next source fetch uses the new endpoint, params and mapping.
+   * Returns the fresh config, or undefined when nothing changed.
+   */
+  private syncConfigFromDisk(name: string): DatabaseConfig | undefined {
+    if (!this.configs.has(name)) return undefined;
+    const mtime = this.configFileMtime(name);
+    if (mtime == null || mtime === this.configMtimes.get(name)) return undefined;
+    try {
+      const config = yaml.load(fs.readFileSync(path.join(this.dbDir, name, "config.yml"), "utf-8")) as DatabaseConfig;
+      if (!config?.source) return undefined;
+      this.configs.set(name, config);
+      this.configMtimes.set(name, mtime);
+      this.clearMappedMemo(name);
+      log.info(`[DatabaseManager] Re-read changed config for "${name}"`);
+      return config;
+    } catch (err) {
+      log.warn({ err, database: name }, `[DatabaseManager] Could not re-read changed config for "${name}"`);
+      return undefined;
+    }
+  }
+
+  private dirFor(name: string): string {
+    return this.isInherited(name) ? this.inherited.get(name)!.dbDir : this.dbDir;
+  }
+
+  /** True when `name` is served from the fallback site because this site has no copy. */
+  isInherited(name: string): boolean {
+    return !this.configs.has(name) && this.inherited.has(name);
+  }
+
+  /** Content folder that owns the database's files and vector index (the fallback site's when inherited). */
+  getSourceContentRoot(name: string): string {
+    return path.dirname(this.dirFor(name));
+  }
+
+  /** Throws for an inherited database; the message keeps "not found" so write routes still answer 404. */
+  assertOwned(name: string): void {
+    if (!this.isInherited(name)) return;
+    const owner = path.basename(this.getSourceContentRoot(name));
+    throw new Error(
+      `Database "${name}" not found on this site: it is read from ${owner} through fallback_content_folder; edit it on that site`,
+    );
+  }
+
   private overridesPath(dbName: string): string {
-    return path.join(this.dbDir, dbName, "overrides.json");
+    return path.join(this.dirFor(dbName), dbName, "overrides.json");
   }
 
   private loadOverridesFile(dbName: string): OverridesFile | null {
@@ -655,28 +769,24 @@ export class DatabaseManager {
   }
 
   reload(): void {
-    this.configs.clear();
-    if (!fs.existsSync(this.dbDir)) return;
-
-    const folders = fs.readdirSync(this.dbDir).filter((f) => {
-      const full = path.join(this.dbDir, f);
-      return (
-        fs.statSync(full).isDirectory() &&
-        fs.existsSync(path.join(full, "config.yml"))
-      );
+    this.configs = readDbConfigs(this.dbDir);
+    this.configMtimes.clear();
+    this.configs.forEach((_config, name) => {
+      const mtime = this.configFileMtime(name);
+      if (mtime != null) this.configMtimes.set(name, mtime);
     });
-
-    for (const folder of folders) {
-      try {
-        const configPath = path.join(this.dbDir, folder, "config.yml");
-        const raw = fs.readFileSync(configPath, "utf-8");
-        this.configs.set(folder, yaml.load(raw) as DatabaseConfig);
-      } catch (err) {
-        log.error({ err: err }, `[DatabaseManager] Failed to load config for "${folder}":`);
+    this.inherited.clear();
+    const fallbackDir = getFallbackDbDir(this.contentRoot);
+    if (fallbackDir && path.resolve(fallbackDir) !== path.resolve(this.dbDir)) {
+      for (const [name, config] of readDbConfigs(fallbackDir)) {
+        if (!this.configs.has(name)) this.inherited.set(name, { config, dbDir: fallbackDir });
       }
     }
 
-    log.info(`[DatabaseManager] Loaded ${this.configs.size} database(s)`);
+    log.info(
+      `[DatabaseManager] Loaded ${this.configs.size} database(s)` +
+        (this.inherited.size ? ` (+${this.inherited.size} from fallback site)` : ""),
+    );
   }
 
   private validateName(name: string): void {
@@ -696,7 +806,7 @@ export class DatabaseManager {
 
   get(name: string): DatabaseConfig {
     this.validateName(name);
-    const config = this.configs.get(name);
+    const config = this.configFor(name);
     if (!config) {
       throw new Error(`Database "${name}" not found`);
     }
@@ -704,7 +814,7 @@ export class DatabaseManager {
   }
 
   exists(name: string): boolean {
-    return this.configs.has(name);
+    return this.configs.has(name) || this.inherited.has(name);
   }
 
   /**
@@ -725,9 +835,11 @@ export class DatabaseManager {
       fs.mkdirSync(dir, { recursive: true });
     }
     if (!fs.existsSync(filePath)) {
+      const ext = path.extname(filename).toLowerCase();
+      // Empty auto-create is only safe for JSON/YAML — never write YAML into a .csv.
+      if (ext === ".csv") return null;
       const resultsPath = config.source.local.results_path;
       const payload: unknown = resultsPath ? { [resultsPath]: [] } : [];
-      const ext = path.extname(filename).toLowerCase();
       const body =
         ext === ".json"
           ? JSON.stringify(payload, null, 2) + "\n"
@@ -744,7 +856,6 @@ export class DatabaseManager {
     if (this.configs.has(name)) {
       throw new Error(`Database "${name}" already exists`);
     }
-    const { assertSourceNameAvailable } = require("./query-options") as typeof import("./query-options");
     assertSourceNameAvailable(name, "database", this.contentRoot, this);
     this.writeToDisk(name, config);
     markFileAsModified(`db/${name}/config.yml`, author, undefined, this.contentRoot);
@@ -763,6 +874,7 @@ export class DatabaseManager {
     reason: import("./vector-index-queue").VectorIndexReason,
     opts: { rebuild?: boolean } = {},
   ): Promise<import("./vector-index-queue").EnqueueVectorIndexResult> {
+    if (this.isInherited(name)) return Promise.resolve({ queued: false });
     return import("./vector-index-queue")
       .then(({ enqueueVectorIndexSync }) => enqueueVectorIndexSync(this.contentRoot, name, reason, opts))
       .catch((err) => {
@@ -773,6 +885,7 @@ export class DatabaseManager {
 
   update(name: string, config: DatabaseConfig, author = "api"): void {
     this.validateName(name);
+    this.assertOwned(name);
     const previousVs = this.configs.get(name)?.vector_search;
     this.writeToDisk(name, config);
     markFileAsModified(`db/${name}/config.yml`, author, undefined, this.contentRoot);
@@ -794,6 +907,7 @@ export class DatabaseManager {
 
   delete(name: string): void {
     this.validateName(name);
+    this.assertOwned(name);
     const dir = path.join(this.dbDir, name);
     if (fs.existsSync(dir)) {
       fs.rmSync(dir, { recursive: true });
@@ -819,7 +933,7 @@ export class DatabaseManager {
     config: DatabaseConfig,
     items: Record<string, unknown>[],
   ): void {
-    if (!this.mediaGallery) return;
+    if (!this.mediaGallery || this.isInherited(dbName)) return;
     ExternalImageCacher.scheduleItems(dbName, config, items, this.mediaGallery);
   }
 
@@ -833,9 +947,9 @@ export class DatabaseManager {
    * (`fetchItems(name, true)`) skips that wait and a success ends it.
    */
   async refreshIfExpired(name: string): Promise<void> {
-    const config = this.configs.get(name);
+    const config = this.configFor(name);
     if (!config) return;
-    const lastGood = this.getLastGoodItems(name);
+    const lastGood = this.getLastGoodItems(name, { includeRejected: true });
     if (lastGood && !lastGood.stale) return;
     const failedAt = this.refreshFailedAt.get(name);
     if (failedAt !== undefined && Date.now() - failedAt < resolveRefreshRetryMinutes(config.cache) * 60_000) return;
@@ -868,7 +982,7 @@ export class DatabaseManager {
    * A remote source is left alone.
    */
   async reloadLocalFromDisk(name: string): Promise<RefreshedDatabaseRow[] | null> {
-    const config = this.configs.get(name);
+    const config = this.configFor(name);
     if (!config || config.source.type !== "local") return null;
     const previous = this.getLastGoodItems(name)?.items ?? null;
     await this.fetchItems(name, true, { skipRefreshEvent: true });
@@ -877,10 +991,14 @@ export class DatabaseManager {
     return this.changedRefreshRows(name, previous, next);
   }
 
+  /**
+   * Rows of a database. Staff-rejected rows are left out unless `includeRejected`; with it,
+   * `items[i]` is the row stored at position `i` (rejected rows carry `_rejected: true`).
+   */
   async fetchItems(
     name: string,
     forceRefresh = false,
-    opts?: { skipRefreshEvent?: boolean; skipVectorIndex?: boolean },
+    opts?: { skipRefreshEvent?: boolean; skipVectorIndex?: boolean } & RejectedReadOpts,
   ): Promise<{
     items: Record<string, unknown>[];
     raw_count: number;
@@ -888,14 +1006,15 @@ export class DatabaseManager {
     from_cache: boolean;
     facets?: Record<string, string[]>;
   }> {
-    const config = this.get(name);
+    let config = this.get(name);
     const ttlMinutes = resolveCacheTtlMinutes(config.cache);
+    const pick = (items: Record<string, unknown>[]) => (opts?.includeRejected ? items : withoutRejected(items));
 
     if (!forceRefresh) {
       const memEntry = this.memoryCache.get(name);
       if (memEntry && Date.now() < memEntry.expires) {
         this.scheduleExternalImages(name, config, memEntry.data.items);
-        return { ...memEntry.data, from_cache: true };
+        return { ...memEntry.data, items: pick(memEntry.data.items), from_cache: true };
       }
 
       const cached = this.cache.read(name, ttlMinutes);
@@ -923,11 +1042,12 @@ export class DatabaseManager {
           expires: Date.now() + ttlMinutes * 60 * 1000,
         });
         this.scheduleExternalImages(name, config, cached.items);
-        return { ...cached, from_cache: true };
+        return { ...cached, items: pick(cached.items), from_cache: true };
       }
     }
 
     const previousItems = this.getLastGoodItems(name)?.items ?? null;
+    config = this.syncConfigFromDisk(name) ?? config;
 
     let rawItems: unknown[];
 
@@ -937,7 +1057,7 @@ export class DatabaseManager {
     } else if (config.source.type === "local") {
       if (!config.source.local) throw new Error("Local source config missing");
       rawItems = await withFetchJobState(name, () =>
-        fetchFromLocal(name, config.source.local!, this.dbDir),
+        fetchFromLocal(name, config.source.local!, this.dirFor(name)),
       );
     } else if (config.source.type === "remote") {
       if (!config.source.remote) throw new Error("Remote source config missing");
@@ -966,6 +1086,9 @@ export class DatabaseManager {
           )
         )
       : (rawItems as Record<string, unknown>[]).map(stripRowStamp);
+    items = items.map((item, i) =>
+      isRowRejected(rawItems[i] as Record<string, unknown>) ? { ...item, [REJECTED_KEY]: true } : item,
+    );
 
     const overridesFile = this.loadOverridesFile(name);
     if (overridesFile && Object.keys(overridesFile.entries).length > 0) {
@@ -1007,14 +1130,14 @@ export class DatabaseManager {
     });
 
     this.scheduleExternalImages(name, config, items);
-    if (!opts?.skipRefreshEvent) this.noteRefreshDiff(name, previousItems, items);
+    if (!opts?.skipRefreshEvent) this.noteRefreshDiff(name, previousItems, withoutRejected(items));
 
     const vsConfig = (config as DatabaseConfig).vector_search;
     if (!opts?.skipVectorIndex && vsConfig?.enabled && vsConfig.fields?.length > 0) {
       this.queueVectorIndex(name, "fetch");
     }
 
-    return { ...entry, from_cache: false };
+    return { ...entry, items: pick(items), from_cache: false };
   }
 
   async warmup(): Promise<void> {
@@ -1063,7 +1186,7 @@ export class DatabaseManager {
       } else if (sourceConfig.type === "local") {
         if (!sourceConfig.local) throw new Error("Local source config missing");
         if (!dbSlug) throw new Error("Database slug required for local source testing");
-        items = await fetchFromLocal(dbSlug, sourceConfig.local, this.dbDir);
+        items = await fetchFromLocal(dbSlug, sourceConfig.local, this.dirFor(dbSlug));
       } else if (sourceConfig.type === "remote") {
         if (!sourceConfig.remote) throw new Error("Remote source config missing");
         items = await fetchFromRemote(sourceConfig.remote);
@@ -1093,10 +1216,12 @@ export class DatabaseManager {
       fs.mkdirSync(dir, { recursive: true });
     }
     fs.writeFileSync(configPath, yaml.dump(config, { lineWidth: 120 }));
+    const mtime = this.configFileMtime(name);
+    if (mtime != null) this.configMtimes.set(name, mtime);
   }
 
   getFieldCount(name: string): number {
-    const config = this.configs.get(name);
+    const config = this.configFor(name);
     if (!config) return 0;
 
     const memEntry = this.memoryCache.get(name);
@@ -1216,7 +1341,7 @@ export class DatabaseManager {
       };
     }
 
-    const config = this.configs.get(name);
+    const config = this.configFor(name);
     if (!config) return null;
     const ttlMinutes = resolveCacheTtlMinutes(config.cache);
     const cached = this.cache.read(name, ttlMinutes);
@@ -1230,7 +1355,7 @@ export class DatabaseManager {
   }
 
   countTransformErrors(name: string): number {
-    const config = this.configs.get(name);
+    const config = this.configFor(name);
     if (!config) return 0;
     const ttlMinutes = resolveCacheTtlMinutes(config.cache);
     const cached = this.cache.read(name, ttlMinutes);
@@ -1243,7 +1368,7 @@ export class DatabaseManager {
   }
 
   getRawItems(name: string): Record<string, unknown>[] | null {
-    const config = this.configs.get(name);
+    const config = this.configFor(name);
     if (!config) return null;
     const ttlMinutes = resolveCacheTtlMinutes(config.cache);
     const rawEntry = this.cache.read(name, ttlMinutes, true);
@@ -1257,8 +1382,8 @@ export class DatabaseManager {
    * Last stored mapped copy, even when older than the TTL (a broken source keeps
    * serving it). Items are shared and frozen outside production: copy before changing.
    */
-  getLastGoodItems(name: string): LastGoodItems | null {
-    const config = this.configs.get(name);
+  getLastGoodItems(name: string, opts?: RejectedReadOpts): LastGoodItems | null {
+    const config = this.configFor(name);
     if (!config) return null;
     const fetchedAt = this.cache.readFetchedAt(name);
     if (!fetchedAt) {
@@ -1269,16 +1394,27 @@ export class DatabaseManager {
     if (!memo || memo.fetchedAt !== fetchedAt) {
       const entry = this.cache.read(name, Infinity);
       if (!entry) return null;
-      memo = { fetchedAt: entry.fetched_at, items: freezeShared(entry.items) };
+      const items = freezeShared(entry.items);
+      const publicItems = withoutRejected(items);
+      memo = {
+        fetchedAt: entry.fetched_at,
+        items,
+        publicItems: publicItems === items ? items : freezeShared(publicItems),
+      };
       this.mappedMemo.set(name, memo);
     }
     const ageMs = Math.max(0, Date.now() - new Date(memo.fetchedAt).getTime());
     const ttlMs = resolveCacheTtlMinutes(config.cache) * 60 * 1000;
-    return { items: memo.items, fetchedAt: memo.fetchedAt, stale: ageMs > ttlMs, ageMs };
+    return {
+      items: opts?.includeRejected ? memo.items : memo.publicItems,
+      fetchedAt: memo.fetchedAt,
+      stale: ageMs > ttlMs,
+      ageMs,
+    };
   }
 
-  getMappedItems(name: string): Record<string, unknown>[] | null {
-    return this.getLastGoodItems(name)?.items ?? null;
+  getMappedItems(name: string, opts?: RejectedReadOpts): Record<string, unknown>[] | null {
+    return this.getLastGoodItems(name, opts)?.items ?? null;
   }
 
   /** Bumped whenever the memo is cleared; derived per-type memos key on it. */
@@ -1299,7 +1435,7 @@ export class DatabaseManager {
   ): Record<string, unknown> | null {
     const rawItems = this.getRawItems(name);
     if (!rawItems) return null;
-    const config = this.configs.get(name);
+    const config = this.configFor(name);
     const mappedItems = config?.field_mapping
       ? rawItems.map((item) =>
           applyFieldMapping(item as Record<string, unknown>, config.field_mapping!)
@@ -1423,6 +1559,7 @@ export class DatabaseManager {
     author?: string,
     contentRoot?: string
   ): boolean {
+    if (this.isInherited(dbName)) return false;
     try {
       applyEditorialStampToDbMappedUpdates(mappedUpdates, fieldMapping);
       const dbKeyedOverrides: Record<string, unknown> = {};
@@ -1516,6 +1653,7 @@ export class DatabaseManager {
     author?: string,
     contentRoot?: string
   ): boolean {
+    if (this.isInherited(dbName)) return false;
     try {
       this.validateName(dbName);
       const overridesFile = this.loadOverridesFile(dbName);

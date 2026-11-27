@@ -234,6 +234,7 @@ import {
 // =============================================================================
 
 import { registerGeoRoutes } from "./geo";
+import { registerSessionRoutes } from "./session";
 import { registerAuthRoutes } from "./auth";
 import { registerFormsRoutes } from "./forms";
 import { registerSettingsRoutes } from "./settings";
@@ -242,6 +243,7 @@ import { registerDatabasesRoutes } from "./databases";
 import { registerListingsRoutes } from "./listings";
 import { registerCatalogServiceRoutes } from "./catalog-service";
 import { registerSectionsRoutes } from "./sections";
+import { registerFormLocationRoutes } from "./form-location";
 import { registerSeoRoutes } from "./seo";
 import { registerAdminRoutes } from "./admin";
 import { registerSidequestDashboardRoutes } from "./sidequest-dashboard";
@@ -250,6 +252,7 @@ import { registerComponentsRoutes } from "./components";
 import { registerPlaygroundCatalogRoutes } from "./playground-catalog";
 import { registerCatalogSyncRoutes } from "./catalog-sync";
 import { registerVersioningRoutes } from "./versioning";
+import { registerPublicCacheRoutes } from "./public-cache";
 import { registerAbTestingRoutes, scheduleAbTestingBootRecovery } from "./ab-testing";
 import { registerInternalContentRoutes } from "./internal-content";
 import { registerGithubRoutes } from "./github";
@@ -336,6 +339,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
 
   registerGeoRoutes(app);
+  registerSessionRoutes(app);
   registerAuthRoutes(app);
   registerStaffAuthRoutes(app);
   registerFormsRoutes(app);
@@ -348,6 +352,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerListingsRoutes(app);
   registerCatalogServiceRoutes(app);
   registerSectionsRoutes(app);
+  registerFormLocationRoutes(app);
   registerSeoRoutes(app);
   registerIndexNowRoutes(app);
   registerAdminRoutes(app);
@@ -357,6 +362,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerPlaygroundCatalogRoutes(app);
   registerCatalogSyncRoutes(app);
   registerVersioningRoutes(app);
+  registerPublicCacheRoutes(app);
   registerAbTestingRoutes(app);
   scheduleAbTestingBootRecovery();
   registerInternalContentRoutes(app);

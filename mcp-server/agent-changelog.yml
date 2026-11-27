@@ -5,6 +5,427 @@
 window_days: 6
 
 entries:
+  - date: "2026-11-26"
+    summary: "schema_org: @website refs and site-based Organization / WebSite sections"
+    agent_impact:
+      - "\"@website\" in any schema_org property (use isPartOf on WebPage) becomes a nested WebSite ref (@id <website url>/#website, @type, name, url) and adds one standalone WebSite from schema-org.yml, like \"@organization\"."
+      - "A schema_org section whose properties \"@id\" equals the site Organization or WebSite @id starts from that schema-org.yml entity; its own properties replace top-level keys (lists replace, not merge). @type comes from properties.type, else the site file. No standalone duplicate is added."
+      - "Keys outside the snake_case map pass through as written: write isPartOf, not is_part_of. No new MCP tools. Stress N/A."
+    tools_changed: false
+    paths:
+      - server/schema-org.ts
+      - server/schema-components/schema_org.ts
+      - server/schema-components/index.ts
+      - shared/component-registry/schema_org/v1.0/schema.yml
+  - date: "2026-11-24"
+    summary: "Connection-token bootstrap uses chosen local owner (not weblify-local)"
+    agent_impact:
+      - "Local connection-token OAuth/staff paste signs in as the username from `.local/connection-owner` (set via `npx caxton-cms token --user <name>`). Hardcoded weblify-local is gone."
+      - "Production never accepts connection-token staff auth; WEBLIFY_ALLOW_CONNECTION_TOKEN_STAFF is ignored and fails boot if set. Role-connector / MCP-write guides skip the bootstrap owner the same way as before."
+      - "Stress N/A (auth identity only). See docs/local-connection-token.md. Reconnect MCP after pull if connectors cache the old username."
+    tools_changed: false
+    paths:
+      - docs/local-connection-token.md
+      - shared/connection-token-owner.ts
+      - server/weblify-connection-token.ts
+      - mcp-server/index.ts
+      - mcp-server/lib/role-connector-guide.ts
+  - date: "2026-11-20"
+    summary: "News/press page slug from link_url; confirm before moving"
+    agent_impact:
+      - "press_mentions no longer stores slug; news `_slug` is computed from link_url (host+path). Empty URL → no news page; duplicate slug+locale keeps higher priority."
+      - "update_database_item: changing a field that moves a derived page URL returns action_required confirm_page_slug_change (old/new paths). Retry with confirm_page_slug_change:true only after the human agrees — no redirect is created."
+      - "Stress: skip (mutate confirm gate + staff slug-check HTTP). Refresh MCP tools/list after reconnect."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/databases.ts
+      - mcp-server/explain/local_databases.md
+      - server/page-slug-identity.ts
+      - server/entry-layer.ts
+  - date: "2026-11-20"
+    summary: "Platform Ops: Error Log view + errors_manage ignore rules"
+    agent_impact:
+      - "Built-in platform_ops now includes metrics_view and errors_manage. Staff Error Log Ignore/Unignore is UI-only (no new MCP tools); Platform Steward does not get errors_manage by default."
+      - "Ignore rules are global JSON (data/error-log-ignore.json; production GCS multisite-global/error-log-ignore.json). Matching rows stop at ingest after hydrate; Ignore also deletes matching SQLite rows. Stress N/A."
+    tools_changed: false
+    paths:
+      - shared/capabilities.ts
+      - server/user-store.ts
+      - shared/error-log-ignore.ts
+      - server/error-log-ignore-store.ts
+      - client/src/pages/ErrorLogPage.tsx
+  - date: "2026-11-20"
+    summary: "Staff form location: Save asks this form vs whole page"
+    agent_impact:
+      - "Forms tab → Location: pick locations, then section Save. When the content type has forms.location.entry_field, Save asks this form only vs whole page (lists affected forms; clear-others defaults on). Page write runs before section Save; section failure does not roll back the page field. Prefer update_fields on the page Locations field when available."
+      - "Empty + this form only follows the page; empty + whole page clears page Locations. explain_site topic lead-forms → Location. No new MCP tools. Stress N/A."
+    tools_changed: false
+    paths:
+      - mcp-server/explain/lead-forms.md
+      - client/src/components/editing/FormLocationBox.tsx
+      - client/src/components/editing/SectionEditorPanel.tsx
+  - date: "2026-11-20"
+    summary: "SMS/WhatsApp consent country include/exclude filters (form location)"
+    agent_impact:
+      - "Optional SMS/WhatsApp checkboxes can use sms_countries / whatsapp_countries + *_countries_mode (include|exclude), matched to the form-calculated location country_code — not page locale. Empty form countries inherit the conversion event; unknown country hides filtered channels; XX→geo."
+      - "request_more_info defaults: SMS include [US], WhatsApp exclude [US] (world except US). Legacy sms_usa_only: true → include [US]. CRM payload unchanged (display-only filters)."
+      - "explain_site topic lead-forms → Consent checkboxes. No new MCP tools. Stress N/A."
+    tools_changed: false
+    paths:
+      - mcp-server/explain/lead-forms.md
+      - shared/consentCountryFilter.ts
+      - shared/consent-settings.ts
+      - client/src/components/lead_form/variants/LeadFormDefault.tsx
+  - date: "2026-11-19"
+    summary: "session.location from campus DB + shared-layout detach exceptions"
+    agent_impact:
+      - "Visitor session.location is filled from settings.yml session.location.database (campus private DB + IP geo) via GET /api/session/location-catalog — not a hardcoded client list. None / fill_from_ip off → location null; geo still fills. Staff: Settings → Session."
+      - "Known campus slugs for forms/validators prefer the locations DB when present. explain_site topic lead-forms → Location."
+      - "Shared-layout enable may pass detach_slugs (exceptions keep entry-owned shells); bindings prune attached members only. Detached members may bind with each other. explain_site topic shared-layout → enable playbook. No new MCP tools. Stress N/A."
+    tools_changed: false
+    paths:
+      - mcp-server/explain/lead-forms.md
+      - mcp-server/explain/shared-layout.md
+      - shared/session-settings.ts
+      - server/session-location-catalog.ts
+      - client/src/workers/session.worker.ts
+  - date: "2026-11-19"
+    summary: "1 persona → 1 product is intentional policy; refuse shared/multi-product persona designs"
+    agent_impact:
+      - "Personas stay product-owned on `_product.yml` only. Do not invent a shared catalog, multi-product membership, or reuse the same persona id across products because the buyer looks the same."
+      - "Same segment on Flex + AI Engineering (or similar pace vs intensity) = two product-specific personas with different ids/fears/objections. Funnel multi-bind means different product-owned personas, not one persona on two SKUs. explain_site topic product → Audience; funnel-classification-proposals updated."
+      - "Coding agents: .cursor/rules/product-audience.mdc. generatePersona must not reuse ids across products or clone peer avatars. No save-time cross-product id uniqueness; no new MCP tools. Stress N/A."
+    tools_changed: false
+    paths:
+      - mcp-server/explain/product.md
+      - mcp-server/explain/funnel-classification-proposals.md
+      - server/ai/generatePersona.ts
+      - .cursor/rules/product-audience.mdc
+      - AGENTS.md
+  - date: "2026-11-18"
+    summary: "Paid fact-literals warnings on live selling-page edits (prefer variable tokens)"
+    agent_impact:
+      - "Live edits, publish_draft, and promote_variant on consideration/decision pages may return warnings fact_literal_prefer_variable when changed copy hardcodes a catalog fact (price/phone/percent). Write is not blocked — swap for {{ global.* }} via list_variables + update_fields."
+      - "Paid validator fact-literals is cue-invited on on-save only (not default Diagnostics). Fuzzy Jev suspects stay Diagnostics-only. Drafts and awareness/post-enrollment skip the auto path."
+      - "explain topic content_system → Hardcoded fact warnings. Reconnect not required for tool list; stress N/A (warnings on existing mutates)."
+    tools_changed: false
+    paths:
+      - server/fact-literals.ts
+      - server/fact-literals-edit.ts
+      - server/versioning/promote-with-teardown.ts
+      - scripts/validation/validators/fact-literals.ts
+      - mcp-server/explain/content_system.md
+      - mcp-server/lib/fact-literals-mcp.ts
+  - date: "2026-11-17"
+    summary: "Migration 016 emits site_bulk_synced so live HTML cache picks up AI Flex CTA tracking"
+    agent_impact:
+      - "016 still backfills missing ai_flex_path CTA tracking and pushes content. After write (or on idempotent re-run) it emits site_bulk_synced so production ContentIndex + HTML cache rebuild — without that, public pages can stay on stale cache."
+      - "Staff: after deploy, confirm re-run 016 on each site that needs a live refresh (4geeks.com already has YAML; florida may still need CTA writes). No new MCP tools."
+    tools_changed: false
+    paths:
+      - scripts/migrations/016_ai_flex_path_cta_tracking.ts
+      - mcp-server/explain/ecommerce.md
+  - date: "2026-11-17"
+    summary: "Ad account → Locations maps: diagnostics warnings + publish gate when two accounts advertise one landing"
+    agent_impact:
+      - "ads-config meta|google.account_locations (optional; empty = unrestricted). Diagnostics: account_landing_location_mismatch / account_landing_location_missing (after_sync, site_fixable). Agent fix = set page locations via update_fields; Ads maps / pause = staff only."
+      - "Publish/promote blocked when live deliverable ads from 2+ accounts hit the same landing (ADS_ACCOUNT_MULTI_LIVE_ON_LANDING). Draft warns. No new MCP tools."
+      - "explain topic ads → Account → Locations. Stress N/A (no tool contract change)."
+    tools_changed: false
+    paths:
+      - shared/adsAccountLocations.ts
+      - server/ads-account-location-gate.ts
+      - server/ads/account-location-diagnostics.ts
+      - mcp-server/explain/ads.md
+  - date: "2026-11-17"
+    summary: "Micro-events curation, checkout-aware page stats, A/B goal micro_actions; ai_flex_path Ecommerce CTA tracking"
+    agent_impact:
+      - "Optional component-registry micro-events.ts curates Micro tab / page-stats secondary / test_goal micro_actions (never summed into leads or enrollment). explain topics component-behaviors, ecommerce, analytics."
+      - "Decision pages with checkout CTAs use lead_or_enroll_rate headline. ai_flex_path binds cta-picker:tracking; migration 016 sets missing tracking. No new Tag Manager event names."
+      - "Reconnect not required for tool list (docs/goal enum only); stress: explain_site covered, schema covered, micro_actions docs-only skip."
+    tools_changed: false
+    paths:
+      - shared/micro-events.ts
+      - mcp-server/explain/component-behaviors.md
+      - mcp-server/explain/ecommerce.md
+      - mcp-server/explain/analytics.md
+      - scripts/migrations/016_ai_flex_path_cta_tracking.ts
+  - date: "2026-11-17"
+    summary: "llms.txt MCP tools: get/update prompt + regenerate; staff UI under SEO/GEO"
+    agent_impact:
+      - "New tools (seo_settings): get_llms_txt_prompt, update_llms_txt_prompt, regenerate_llms_txt. Read/write llms.regenerate-prompt.md; regenerate enqueues Sidequest (async). None toggles Serve."
+      - "Staff UI moved to Settings → SEO/GEO → llms.txt (/private/settings/seo/llms-txt). Old /private/settings/llms-txt redirects."
+      - "Reconnect the MCP connector so tools/list includes the new tools."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/llms-txt.ts
+      - shared/mcp-tool-catalog.ts
+      - client/src/pages/SeoGeoSettingsPage.tsx
+  - date: "2026-11-16"
+    summary: "Price variables are structured money; products require one product; list role binds product pricing for Course Offer"
+    agent_impact:
+      - "category:price values are { amount, currency, display? }; {{ global.price_* }} still resolves to a formatted string. Legacy strings still read."
+      - "Price vars must have products: [one slug] and optional price_role list|monthly|other. price_role:list writes programs/{slug}/_product.yml → pricing.list_price_variable when a product sidecar exists."
+      - "get_product returns pricing + pricing_resolved (amount/currency/display). create_or_update_product accepts pricing.list_price_variable (null clears)."
+      - "Course JSON-LD Offer uses product binding, or falls back to the list-role price var tagged to that program slug. Do not hardcode tuition in schema_org YAML."
+      - "Organization schema adds telephone, full PostalAddress, hasCredential (CIE #5904). legalName still omitted until staff supplies the registered entity name."
+      - "Stress: list_variables covered by existing scenarios; get_product covered by get_product scenario; create_or_update_product mutate skipped."
+    tools_changed: true
+    paths:
+      - shared/variable-money.ts
+      - server/variable-manager.ts
+      - server/product/product-io.ts
+      - server/schema-components/schema_org.ts
+      - mcp-server/tools/product.ts
+      - mcp-server/tools/variables.ts
+      - mcp-server/explain/product.md
+      - mcp-server/explain/content_system.md
+      - scripts/migrations/015_structure_price_variables.ts
+  - date: "2026-11-16"
+    summary: "get_runtime_issues adds recent_samples; windowed 404 counts are not paid-human totals"
+    agent_impact:
+      - "Each 404 row may include recent_samples (source, referrerHost, click kind+hash). Prefer these plus sources/byHour when proving preview vs person vs shared link; legacy rows may omit fields (before sampling)."
+      - "Windowed count still mixes crawlers/previews/humans. Click ids are no longer stored plaintext in queryAttribution.other."
+      - "broken_url briefs: paste recent_samples note with path/count/sources/referrer/queryAttribution. Details: explain_site topic proposals → broken-url."
+    tools_changed: true
+    paths:
+      - mcp-server/tools/runtime-issues.ts
+      - mcp-server/lib/runtime-issues-mcp.ts
+      - mcp-server/explain/broken-url-proposals.md
+      - shared/runtime-issues.ts
+  - date: "2026-11-13"
+    summary: "list_products rows include locale urls"
+    agent_impact:
+      - "list_products catalog rows add urls: Record<locale, public path> from ContentIndex alternates (relative paths). Prefix SITE_URL when you need absolute links."
+    tools_changed: true
+    paths:
+      - server/product/product-io.ts
+      - mcp-server/tools/product.ts
+  - date: "2026-11-13"
+    summary: "Variable facts: source (internal|external) + products; origin/own renamed"
+    agent_impact:
+      - "list_variables catalog/detail rows include source (internal|external|null) and products (string[] of sellable content_slug; empty = site-wide). Field was briefly origin/own — use source/internal now. Staff set them at /private/variables; agents still cannot write variables."
+      - "Same product identity as funnel/ecommerce_products: content slug (e.g. ai-flex), not product_id. Omit products when the fact is site-wide."
+    tools_changed: false
+    paths:
+      - shared/variable-metadata.ts
+      - server/variable-catalog.ts
+      - server/variable-write-rules.ts
+      - mcp-server/explain/content_system.md
+      - mcp-server/tools/variables.ts
+  - date: "2026-11-12"
+    summary: "Lead form location per content type (forms.location): form → page Locations field → detection only when allowed"
+    agent_impact:
+      - "get_content_type_info adds form_location {entry_field, autodetect} + note (staff-only setting). Order: form fields.location (default = one, allowed = several, visible = visitor picks), then the page field (relation to location, page-level → _common.yml), then detection when autodetect is true."
+      - "With autodetect false, saves touching a form or the page field and publish/promote fail with form_location_missing (or form_location_unknown for bad slugs) + form_location_issues[].fix_field_path; drafts and untouched forms get form_location_* warnings."
+      - "update_fields routes the page field to _common.yml and warns form_location_override when you set fields.location on a form (per language) — prefer the page field. Details: explain_site topic lead-forms → Location."
+    tools_changed: false
+    paths:
+      - shared/formLocationPolicy.ts
+      - server/form-location-gate.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/explain/lead-forms.md
+  - date: "2026-11-12"
+    summary: "A/B tests have a goal: leads, enrollment clicks (add_to_cart / click_begin_checkout), or both; list_variants returns test_goal"
+    agent_impact:
+      - "list_variants adds test_goal {locale: leads | enrollment_clicks | both} for locales with a running test. Runs recorded before goals existed read as leads. Staff-only to set (when starting traffic) or change (logged on the run); finished tests keep theirs. No MCP write tool."
+      - "Enrollment clicks = clicks on buttons whose cta.tracking is not none (signup_card.cta_button.tracking, programs[].summary.cta.tracking) — intent, not purchases. For a page whose main action is enrolling, recommend tracking add_to_cart on that button so the goal can move; tracking none keeps it at zero."
+      - "Details (visit-level leads for both, payment-site rows GA4-only, site's own counts from the recording start day): explain_site topic analytics → \"A/B test goal\"."
+    tools_changed: false
+    paths:
+      - mcp-server/tools/pages.ts
+      - mcp-server/explain/analytics.md
+      - server/analytics/page-stats/test-view.ts
+      - server/versioning/test-runs.ts
+  - date: "2026-11-11"
+    summary: "Links leaving the checkout path carry gtm_payload automatically (product / persona short codes)"
+    agent_impact:
+      - "funnel.stage: decision now also turns on gtm_payload for that page's links to other sites (and no-stage pages right after it, 30 min per tab). Other stages clear it. Value: JSON {v:1, product, persona, product_persona (short codes, same keys as before), funnel_stage, content_key, experiment_id, variant, ts, is_staff}. Off when the product/persona tracking switch is off."
+      - "Hand-written gtm_payload ({{ funnel.products }}, {qs:gtm_payload|…}, {{ entry.funnel_products_encoded_ids }}) is replaced on the checkout path; write gtm_payload only to override keys (gtm_payload={\"persona\":\"cc\"} wins key by key). YAML and page source unchanged."
+      - "Staff exclude domains in settings.yml tracking.gtm_payload.skip_domains (Settings → Tracking → Events). Internal paths that redirect off-site load as a full page with gtm_payload on the checkout path. Contract for learn.4geeks: docs/gtm-analytics-setup.md."
+    tools_changed: false
+    paths:
+      - shared/gtm-payload.ts
+      - client/src/lib/gtmPayload.ts
+      - server/outbound-redirects.ts
+      - mcp-server/explain/ecommerce.md
+      - mcp-server/explain/funnel.md
+      - mcp-server/explain/redirects.md
+      - mcp-server/explain/content_system.md
+  - date: "2026-11-10"
+    summary: "Ideas: idea_seo_target.market records which country the kw_* numbers describe"
+    agent_impact:
+      - "propose_change / update_proposal set_idea_seo_target accept optional idea_seo_target.market (copy data.market.id from get_or_refresh_seo_research, e.g. spain). Unknown ids and rollups (latam, worldwide) → idea_seo_target_market_invalid. Send it whenever you send kw_*."
+      - "Review warnings: idea_seo_target_market_missing (numbers without a market → reviewer add_blocker naming the market); idea_seo_target_market_not_default (market differs from the page language's default, e.g. es→spain) is informational — justify it in the brief. Ideas filed earlier stay valid."
+    tools_changed: false
+    paths:
+      - server/content-proposals/idea-seo-target.ts
+      - server/content-proposals/review-context.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/explain/proposals.md
+  - date: "2026-11-10"
+    summary: "SEO research: keyword_metrics now return real ranking difficulty (DataForSEO) in per-country markets; new market arg"
+    agent_impact:
+      - "get_or_refresh_seo_research keyword_metrics routes to DataForSEO when staff enabled it (else OpenRush): kw_difficulty_source reported = real ranking difficulty (DataForSEO 0–100 log scale, not 1:1 with other tools). No score → kw_difficulty null + seo_research_difficulty_unavailable (never estimate). data.providers {volume, difficulty}; cost_usd when DataForSEO ran (budget.unit usd, separate caps from OpenRush credits). serp / keyword_ideas / competitors / keyword_gaps stay OpenRush."
+      - "New optional market (usa, spain, mexico, …) on every action; default = page locale's research market (en→usa, es→spain). latam / worldwide → market_not_researchable (one country per call). data.market says which market answered. get_entry_seo.keyword_metrics reads the page locale's market too."
+      - "Stop rules: seo_research_provider_unavailable (login / funds / outage) → do not retry or switch source, tell staff. seo_research_sandbox → sample data off the live server, never file ideas from it. Older ad-competition estimates stay cached until expiry; force: true refetches."
+    tools_changed: false
+    paths:
+      - server/dataforseo-client.ts
+      - server/seo-research-providers.ts
+      - server/seo-research-market.ts
+      - mcp-server/lib/seo-research-mcp.ts
+      - mcp-server/tools/seo-clusters.ts
+      - mcp-server/explain/seo.md
+  - date: "2026-11-10"
+    summary: "Render review: no false horizontal_overflow for scroll-snap tracks (overflow auto/scroll), e.g. syllabus program-modules"
+    agent_impact:
+      - "review_page_render / get_render_review: content inside a container that scrolls horizontally on its own (overflow-x auto/scroll) is no longer reported as section overflow when that container fits the viewport — syllabus program-modules (174 sections), testimonials, bento_cards, list_workshops_carousel, dynamic_table. Do not edit content to fix these; re-run the review to clear old findings."
+      - "A scroll container that itself sticks out of the viewport is still reported, and page-level overflow (section_path null) is always reported."
+    tools_changed: false
+    paths:
+      - client/src/lib/pageMeasurements.ts
+      - mcp-server/tools/design.ts
+  - date: "2026-11-10"
+    summary: "Evidence banks (press_mentions…): server refuses duplicate / rejected / redirect links, warns on look-alike stories; staff-rejected rows stay hidden"
+    agent_impact:
+      - "add/update database item on evidence banks → 409 codes in fail details: duplicate_link (same link, same locale; next_actions update_database_item on existing_index), rejected_link (staff rejected the story, any locale; skip), redirect_link (news.google.com / t.co / bit.ly / lnkd.in…; use the publisher URL), similar_rows (retry with acknowledged_similar listing every similar[].index only if it is different coverage). Just add and handle the refusal — do not list the bank first."
+      - "Links compare by original URL (Wayback unwrapped, www/m/amp, tracking params ignored). Same link across locales is allowed only with a matching translation_key. add_database_items reports the codes per row (first wins in the batch); update_database_items records refusals per row without aborting."
+      - "Staff-rejected rows (_rejected, server-only) are hidden from pages, listings, search and evidence; list_database_items hides them (warning rejected_hidden) unless include_rejected:true, get_database_item returns rejected_row. Agents cannot reject, restore, delete a rejected row (rejected_row) or send allow_duplicate (staff_only)."
+    tools_changed: false
+    paths:
+      - shared/evidence-duplicates.ts
+      - server/evidence-duplicates-guard.ts
+      - server/routes/databases.ts
+      - mcp-server/tools/databases.ts
+      - mcp-server/explain/local_databases.md
+  - date: "2026-11-10"
+    summary: "MCP YAML parse uses shared template-var escape; get_entry_fields honors locale"
+    agent_impact:
+      - "get_entry_content / other MCP YAML reads now use the same escapeTemplateVars helper as the app server, so detached locale files with nested liquid defaults (e.g. {{ entry.call_to_action.success | {\"message\": \"...\"} }}) parse instead of silently returning only _common.yml fields."
+      - "get_entry_fields now forwards locale (and variant) on field-provenance — requesting es no longer always inspects en.yml."
+    tools_changed: true
+    paths:
+      - mcp-server/lib/content.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/lib/safe-load-template-vars.test.ts
+  - date: "2026-11-10"
+    summary: "One-address pages (/landing/:slug): language comes from the matched slug's language file; two languages sharing a slug is blocked; _common.yml locale is ignored legacy"
+    agent_impact:
+      - "Language of a one-address page = the language file whose slug matches the URL (resolveUrl fileLocale). /landing/<es-slug> serves es.yml, /landing/<en-slug> serves en.yml. _common.yml `locale` is never read: do not write it (bad practice). locale-slug-uniqueness warns COMMON_LOCALE_IGNORED; migration 012 removes old lines. nonlocalized-common-locale validator retired."
+      - "Every language of a one-address page needs a slug no other language uses. translate_entry without url_slug on a landing that already uses the folder slug → action_required set_locale_url_slug (code locale_url_slug_conflict, details {address, locales, property_path: slug, file}); nothing written. promote_variant / publish_draft and slug renames refuse the same conflict (409). Retry translate_entry with url_slug (a word in the target language)."
+      - "Validation: SLUG_SHARED_SINGLE_ADDRESS (error) when two languages share one address; deploys stop pre-flip until fixed (Page render check). Per-language types keep the SLUG_SHARED_ACROSS_LOCALES warning."
+    tools_changed: false
+    paths:
+      - server/content-index.ts
+      - server/locale-url-slug.ts
+      - server/versioning/promote-with-teardown.ts
+      - server/content-editor.ts
+      - scripts/validation/validators/locale-slug-uniqueness.ts
+      - scripts/migrations/012_remove_common_locale.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/explain/routing.md
+  - date: "2026-11-10"
+    summary: "Render review: no false overflow for clipped carousels; section code loads before measuring; single-address pages report their own language"
+    agent_impact:
+      - "review_page_render / get_render_review: horizontal_overflow now counts only content a visitor can scroll to (carousel tracks clipped by their own container are ignored); page-level overflow (section_path null) is always reported. Older reviews keep their old findings until the page is reviewed again."
+      - "The preview loads every section's code (about 10s cap) before measuring. New findings: section_not_loaded (warning, RENDER_SECTION_NOT_LOADED: code did not arrive; re-run, not a content problem) and section_unknown_type (error, RENDER_SECTION_UNKNOWN_TYPE: no component for the type; fix type via list_components). Neither is reported as empty_section."
+      - "Single-address pages (/landing/:slug) are served in the language of the file whose slug matches the address, in SSR, the ads report, organic-traffic entry keys and the SEO page-sections lookup, instead of defaulting to en (see the entry above)."
+    tools_changed: false
+    paths:
+      - client/src/lib/pageMeasurements.ts
+      - client/src/lib/loadPreviewSectionCode.ts
+      - client/src/pages/PagePreviewPage.tsx
+      - scripts/validation/validators/render-review.issueCodes.ts
+      - mcp-server/tools/design.ts
+      - mcp-server/explain/design.md
+      - server/content-index.ts
+  - date: "2026-11-10"
+    summary: "Daily cleanup deletes abandoned drafts not linked to a proposal (live server); list_variants shows the schedule"
+    agent_impact:
+      - "Unlinked drafts identical to live are deleted after 30 idle days. Drafts with unpublished work (or a language with no live file) get _draft.cleanup {flagged_at, deletes_at} at 60 idle days and are deleted at 90 (never sooner than 30 days after the flag). Never touched: traffic > 0%, running or recently ended test, last draft of an unpublished page, proposal-linked drafts, shared-template drafts."
+      - "list_variants rows add cleanup {tier, flagged_at, deletes_at} | null and warning draft_scheduled_for_cleanup (drafts[] with deletes_at). Any content edit resets the clock (seen by the live server from any source); staff can also press Keep for now (_draft.kept_at). Agents have no keep tool; age reasons add recently_kept and created_source first_seen."
+      - "Events draft_cleanup_flagged / draft_cleanup_flag_cleared / draft_cleanup_deleted (no file text). Deletions push as system:draft-cleanup; recovery is manual from the content repo history on GitHub."
+    tools_changed: false
+    paths:
+      - shared/variant-health.ts
+      - server/versioning/draft-cleanup.ts
+      - server/versioning/draft-activity.ts
+      - server/versioning/variant-info.ts
+      - mcp-server/lib/variant-info-mcp.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/explain/content_system.md
+  - date: "2026-11-09"
+    summary: "Variant age/activity verdict on list_variants rows; delete_variant stops on variants still in use"
+    agent_impact:
+      - "list_variants rows add created_at, updated_at, age_state (new | active | stale | unknown; stale = created and last content edit both > 30 days), verdict (cannot_delete | check_first | probably_safe) + reasons[{code,message}], behind_live, changes_vs_live (date fields ignored; null when no live file) and sibling_locales (same slug in other languages — delete is per locale). Warnings variants_in_use / variants_behind_live."
+      - "delete_variant preflight: open proposal (reason proposal_open) → fail variant_open_proposal, no override (withdraw/reject the proposal or staff unlink it). Other check_first reasons (recently_created, recently_edited, age_unknown, proposal_unverified, test_running, test_ended_recently, test_history_unavailable, changes_not_on_live, last_draft_of_unpublished_page) → action_required confirm_variant_in_use; tell the user, then re-call with the new arg confirm_variant_in_use: true. Success warning variant_in_use_overridden; overridden codes are saved with your report on the delete event."
+      - "New variants record _draft.created_at once (create, convert_to_draft, register). Promote strips _draft, so it never reaches live. Older variants fall back to _draft.based_on.at, else age unknown (never treated as stale)."
+    tools_changed: false
+    paths:
+      - shared/variant-health.ts
+      - server/versioning/variant-info.ts
+      - server/versioning/draft-meta.ts
+      - server/versioning/draft-base.ts
+      - server/routes/versioning.ts
+      - mcp-server/lib/variant-info-mcp.ts
+      - mcp-server/tools/pages.ts
+  - date: "2026-11-09"
+    summary: "Ads-aware URL removal: slug rename, delete_entries, convert_to_draft and update_redirect delete check Meta/Google ads on the URL"
+    agent_impact:
+      - "update_fields slug rename refuses without create_redirect when live ads use the old URL (actionRequired code live_ads_point_to_old_url; ads[] = platform, site, campaign_name, ad_name, status, matched_by, url; no override). Success adds warnings ads_rely_on_redirect / paused_ads_point_to_url / ads_check_unavailable. Live = active and spent or created in the last 7 days; matched by ad link or tagged visits in the last 14 days, across every site by domain."
+      - "delete_entries: new args redirect_to {content_type?, slug}, redirect_to_by_slug, no_redirect_reason (min 10). Pages live 24h or more need one of them or the call is refused with redirect_destination_required (nothing deleted). redirect_to appends each deleted locale's URL + its own old addresses to the destination's same-locale meta.redirects (redirect_destination_missing_locale / redirect_conflict refuse first). Preview adds ads_by_slug + redirect_required_slugs."
+      - "convert_to_draft returns ads_on_url + live_ads_point_to_url warning (never adds a redirect) and is refused on the A/B check page. update_redirect delete: new confirm_ads_impact; without it, removing an address live ads still use returns actionRequired redirect_used_by_live_ads. Ads are never edited in Meta/Google."
+    tools_changed: false
+    paths:
+      - server/ads/ads-by-landing-page.ts
+      - server/url-removal-check.ts
+      - server/content-editor.ts
+      - server/routes/sections.ts
+      - server/routes/versioning.ts
+      - server/routes/admin.ts
+      - mcp-server/tools/pages.ts
+      - mcp-server/tools/redirects.ts
+      - mcp-server/lib/ads-on-url-mcp.ts
+  - date: "2026-11-06"
+    summary: "Reviewer agents approve requested page-level changes; apply refuses agents only for unrequested page-level fields or dropped live values; detached is never proposable"
+    agent_impact:
+      - "There is no rule that reviewer agents must not apply proposals writing _common.yml. Requested funnel.* / authors / published_at publish to _common.yml for every language on apply — approve them like any other field; no STAFF FIX handoff."
+      - "Agent (MCP) apply now refuses, nothing published: agent_apply_unrequested_page_fields (draft changes page-level fields no requested op covers) and agent_apply_drops_live_values (publish would drop a live value; was the display_values_change warning). details.entries[] { entry_key, locale, variant, fields }; dry_run lists them as warnings. Fix = add_blocker so the author revise_entries (drop the fields, or add the live values as requested updates). Staff UI apply is unaffected."
+      - "propose_change / revise_entries / apply refuse any detached update with detached_not_supported (any caller; nothing written). Detach outside proposals with set_entry_attachment. Old-rule STAFF FIX blockers are cleared by staff data migration 011_clear_page_wide_rule_blockers — re-review those proposals."
+    tools_changed: false
+    paths:
+      - server/content-proposals/service.ts
+      - server/content-proposals/page-wide-apply-codes.ts
+      - mcp-server/tools/proposals.ts
+      - mcp-server/agent-conventions.md
+      - mcp-server/explain/proposals.md
+      - mcp-server/explain/funnel-classification-proposals.md
+      - mcp-server/explain/content_system.md
+      - scripts/migrations/011_clear_page_wide_rule_blockers.ts
+  - date: "2026-11-06"
+    summary: "MCP proxy no longer 413s large bytes_base64 uploads (stream-pipe + 30mb JSON limit)"
+    agent_impact:
+      - "get_or_set_media_to_gallery bytes_base64 (≤15 MB decoded) no longer fails with HTTP 413 from the /mcp proxy Express 100kb default."
+      - "Prefer bytes_base64 for gated Drive/Dropbox; url + import:true still ≤50 MB for public URLs. Prefer url import when the file is already on a public CDN."
+      - "Reconnect is not required for this transport fix; tool args are unchanged."
+    tools_changed: false
+    paths:
+      - server/index.ts
+      - mcp-server/index.ts
+      - mcp-server/explain/images.md
+  - date: "2026-11-05"
+    summary: "form_overrides conditions use field_property_slug + match-time form/entry/visitor bags"
+    agent_impact:
+      - "Prefer conditions[].field_property_slug templates such as {{ form.program }}, {{ entry.event_started }}, {{ visitor.id }}. Legacy form_field_slug / entry_field_slug still match."
+      - "Section/SSR resolveDeep does not expand form_overrides[].conditions operand strings; LeadForm resolves them at match time with a form bag (watched values) plus entry and visitor."
+      - "Outcomes remain partial overlays — omit keys that equal the form defaults. Staff Forms tab: Rules that change this form. explain_site topic lead-forms → Continuous form_overrides."
+    tools_changed: false
+    paths:
+      - shared/resolveLeadFormOverride.ts
+      - client/src/lib/variable-manager.ts
+      - mcp-server/explain/lead-forms.md
+      - fixtures/ci/content-4geeks-com/component-registry/lead_form/v1.0/examples/stacked_with_routes.yml
   - date: "2026-11-03"
     summary: "Staff with proposals_review can approve or accept past open blockers from the staff UI; agents still cannot"
     agent_impact:

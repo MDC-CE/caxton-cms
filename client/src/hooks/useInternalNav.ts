@@ -5,6 +5,7 @@ import { isDeviceEmbedPreview, notifyDeviceEmbedNavBlocked, shouldAllowDeviceEmb
 import { scrollToSectionWhenReady } from "@/hooks/useScrollToLocationHashWhenReady";
 import { isNonNavigableHref } from "@shared/safe-href";
 import { awaitNavigationReady } from "@/lib/prefetchNavigation";
+import { getExternalRedirectHost, withGtmPayload, withRedirectGtmPayload } from "@/lib/gtmPayload";
 
 function isInternalHref(href: string): boolean {
   return href.startsWith("/") && !href.startsWith("//");
@@ -242,6 +243,45 @@ function withUtmParams(href: string): string {
   return `${base}${join}${additions.join("&")}${hash}`;
 }
 
+/** UTMs plus `gtm_payload` on the checkout path (outbound links and internal redirects off-site).
+ *  `rawHref` is the authored href, before `{qs:}` tokens resolve. */
+export function withOutboundParams(rawHref: string, prepared: string): string {
+  return withRedirectGtmPayload(withGtmPayload(rawHref, withUtmParams(prepared)));
+}
+
+function isExternalHttpHref(href: string): boolean {
+  if (!/^https?:\/\//i.test(href) || typeof window === "undefined") return false;
+  try {
+    return new URL(href).host !== window.location.host;
+  } catch {
+    return false;
+  }
+}
+
+/** Longest a same-tab page load waits for a tracked click to send. */
+export const LEAVE_WAIT_MAX_MS = 300;
+
+function isSameTabTarget(target: string): boolean {
+  return target === "" || target === "_self";
+}
+
+/** Run `go` once `wait` settles, or after LEAVE_WAIT_MAX_MS, whichever comes first. */
+export function leaveAfter(wait: Promise<unknown> | null, go: () => void): void {
+  if (!wait) {
+    go();
+    return;
+  }
+  let gone = false;
+  const leave = () => {
+    if (gone) return;
+    gone = true;
+    clearTimeout(timer);
+    go();
+  };
+  const timer = setTimeout(leave, LEAVE_WAIT_MAX_MS);
+  void wait.then(leave, leave);
+}
+
 export type CallbackLabels = { en?: string; es?: string };
 
 export type UseInternalNavOptions = {
@@ -284,15 +324,21 @@ export function useInternalNav(
         if (!shouldAllowDeviceEmbedHref(raw)) e.preventDefault();
         return;
       }
-      const resolved = withUtmParams(prepareHref(raw));
+      const resolved = withOutboundParams(raw, prepareHref(raw));
       if (resolved === raw) return;
       e.preventDefault();
       window.open(resolved, "_blank", "noopener,noreferrer");
     });
   }, []);
 
-  const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+  /**
+   * `beforeLeave`: a send in flight (e.g. a tracked enrollment click). When this click loads
+   * another document in the same tab, navigation waits for it, at most LEAVE_WAIT_MAX_MS.
+   * New-tab, in-app and hash navigation never wait.
+   */
+  const handleClick = (e: React.MouseEvent<HTMLAnchorElement>, opts?: { beforeLeave?: Promise<unknown> | null }) => {
     if (e.altKey || e.button !== 0) return;
+    const beforeLeave = opts?.beforeLeave ?? null;
 
     const anchor = e.currentTarget;
     const rawHref = anchor.getAttribute("href");
@@ -302,13 +348,13 @@ export function useInternalNav(
       return;
     }
 
-    const href = withUtmParams(
-      withCallbackParam(
-        prepareHref(rawHref),
-        appendCallback,
-        appendCallback ? getCallbackLabels?.() : undefined,
-      ),
+    const prepared = withCallbackParam(
+      prepareHref(rawHref),
+      appendCallback,
+      appendCallback ? getCallbackLabels?.() : undefined,
     );
+    const href = withOutboundParams(rawHref, prepared);
+    const onlyPayloadAdded = href !== rawHref && withUtmParams(prepared) === rawHref;
 
     if (isDeviceEmbedPreview() && !shouldAllowDeviceEmbedHref(href)) {
       e.preventDefault();
@@ -354,6 +400,23 @@ export function useInternalNav(
       return;
     }
 
+    if (isInternalHref(href) && getExternalRedirectHost(href)) {
+      // The server redirects this path off-site; an in-app route change would never reach it.
+      e.preventDefault();
+      if (anchor.target === "_blank") {
+        window.open(href, "_blank", "noopener,noreferrer");
+        onNavigate?.();
+      } else {
+        leaveAfter(beforeLeave, () => {
+          window.location.assign(href);
+          onNavigate?.();
+        });
+      }
+      return;
+    }
+
+    const sameTabLoad = !!beforeLeave && isSameTabTarget(anchor.target) && /^https?:\/\//i.test(href);
+
     if (isInternalHref(href)) {
       e.preventDefault();
       const hashIdx = href.indexOf("#");
@@ -367,6 +430,16 @@ export function useInternalNav(
         }
         onNavigate?.();
       })();
+    } else if (sameTabLoad && (onlyPayloadAdded || href === rawHref)) {
+      e.preventDefault();
+      leaveAfter(beforeLeave, () => {
+        window.location.assign(href);
+        onNavigate?.();
+      });
+    } else if (onlyPayloadAdded) {
+      // Swap the href for this click so the link keeps its own target (same tab or new tab).
+      anchor.setAttribute("href", href);
+      setTimeout(() => anchor.setAttribute("href", rawHref), 0);
     } else if (href !== rawHref) {
       // External URL had {qs:} tokens and/or callback — browser would use the raw href.
       e.preventDefault();
@@ -389,7 +462,7 @@ export function useInternalNav(
   ): Record<string, unknown> | null => {
     if (!url || isNonNavigableHref(url)) return null;
 
-    const resolved = withUtmParams(prepareHref(url));
+    const resolved = withOutboundParams(url, prepareHref(url));
 
     if (isDeviceEmbedPreview() && !shouldAllowDeviceEmbedHref(resolved)) {
       notifyDeviceEmbedNavBlocked();
@@ -426,6 +499,12 @@ export function useInternalNav(
       return null;
     }
 
+    if (isInternalHref(resolved) && getExternalRedirectHost(resolved)) {
+      window.location.assign(resolved);
+      onNavigate?.();
+      return null;
+    }
+
     if (isInternalHref(resolved)) {
       const hashIdx = resolved.indexOf("#");
       const hashId = hashIdx === -1 ? "" : resolved.slice(hashIdx + 1).split("?")[0];
@@ -453,8 +532,17 @@ export function useInternalNav(
     const anchor = e.currentTarget;
     const rawHref = anchor.getAttribute("href");
     if (!rawHref) return;
-    if (!appendCallback && !rawHref.includes("{qs:") && !rawHref.includes("{{")) return;
-    const href = withUtmParams(
+    if (
+      !appendCallback &&
+      !rawHref.includes("{qs:") &&
+      !rawHref.includes("{{") &&
+      !isExternalHttpHref(rawHref) &&
+      !getExternalRedirectHost(rawHref)
+    ) {
+      return;
+    }
+    const href = withOutboundParams(
+      rawHref,
       withCallbackParam(
         prepareHref(rawHref),
         appendCallback,

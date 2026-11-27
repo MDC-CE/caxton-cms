@@ -6,11 +6,14 @@ export type EditorType =
   | "text-input"
   | "string-picker"
   | "rich-text-editor"
-  | "markdown";
+  | "markdown"
+  | "video-picker";
 
 export const fieldEditors: Record<string, EditorType> = {
   "left.image": "image-with-style-picker",
   "right.image": "image-with-style-picker",
+  "left.video.url": "video-picker",
+  "right.video.url": "video-picker",
   "left.heading": "rich-text-editor",
   "right.heading": "rich-text-editor",
   "left.description": "rich-text-editor",
@@ -24,6 +27,6 @@ export const fieldEditors: Record<string, EditorType> = {
   "benefit_items[].icon": "icon-picker",
   "cta_button.text": "text-input",
   "cta_button.url": "link-picker",
-  "cta_button.variant": "string-picker:primary,secondary,outline",
+  "cta_button.variant": "string-picker:primary,secondary,outline,accent",
   "cta_button.icon": "icon-picker",
 };

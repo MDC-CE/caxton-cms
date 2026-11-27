@@ -104,7 +104,7 @@ import {
 import { mediaGallery } from "../media-gallery";
 import { media } from "../media";
 import multer from "multer";
-import { contentIndex, type ContentType } from "../content-index";
+import { contentIndex, type ContentIndex, type ContentType } from "../content-index";
 import { runScan as runComponentInsightsScan, readInsightsFile, suggestNext as suggestNextComponent } from "../component-insights";
 import { validateFieldSource, validateFieldMapping, extractByDotPath } from "../../scripts/validation/shared/fieldMappingValidator";
 import {
@@ -180,6 +180,7 @@ import { getCapabilityScopeKind } from "../user-store";
 import { resolveOwnedStaffSession } from "../staff-session-resolve";
 import { child } from "../logger";
 import { buildServerPageTracking } from "../tracking-page-context";
+import { collectExternalRedirects, isCheckoutPathContext, siteOwnHosts } from "../outbound-redirects";
 import { getDefaultContentRoot } from "../site-config";
 import { isMcpLoopbackRequest } from "../mcp-loopback-auth";
 export { isMcpLoopbackRequest };
@@ -890,7 +891,7 @@ export function markServedPage(res: Response, contentType: string, slug: string)
  * Express middleware: add `_tracking` when the handler marked a served page.
  * Same object the first HTML load already seeds. Unmarked (list/admin) responses stay as-is.
  */
-export function attachTrackingToJson(_req: Request, res: Response, next: () => void): void {
+export function attachTrackingToJson(req: Request, res: Response, next: () => void): void {
   const original = res.json.bind(res);
   res.json = ((body: unknown) => {
     const ref = (res.locals as { servedPage?: ServedPageRef }).servedPage;
@@ -902,7 +903,9 @@ export function attachTrackingToJson(_req: Request, res: Response, next: () => v
       !Array.isArray(body) &&
       !("_tracking" in (body as Record<string, unknown>))
     ) {
-      const site = res.locals.site as { contentRoot?: string } | undefined;
+      const site = res.locals.site as
+        | { contentRoot?: string; contentIndex?: ContentIndex; config?: { domain?: string; aliases?: string[] } }
+        | undefined;
       const tracking = buildServerPageTracking({
         contentRoot: site?.contentRoot ?? getDefaultContentRoot(),
         contentType: ref.contentType,
@@ -910,7 +913,14 @@ export function attachTrackingToJson(_req: Request, res: Response, next: () => v
         data: body as Record<string, unknown>,
       });
       if (tracking) {
-        return original({ ...(body as Record<string, unknown>), _tracking: tracking });
+        const externalRedirects = isCheckoutPathContext(tracking)
+          ? collectExternalRedirects(body, site?.contentIndex ?? contentIndex, siteOwnHosts(site, req.headers.host))
+          : {};
+        return original({
+          ...(body as Record<string, unknown>),
+          _tracking: tracking,
+          ...(Object.keys(externalRedirects).length > 0 ? { _external_redirects: externalRedirects } : {}),
+        });
       }
     }
     return original(body);
@@ -1299,7 +1309,8 @@ export function listCareerPrograms(
 }
 
 export function loadLandingPage(slug: string, locale?: string, ci: typeof contentIndex = contentIndex): LandingPage | null {
-  const effectiveLocale = locale || ((ci.loadCommonData("landing", slug)?.locale as string) || getDefaultLocale());
+  const effectiveLocale =
+    locale || ci.resolveLocaleFromUrlSlug(slug, "landing") || ci.servedLocale("landing", ci.resolveBaseSlug(slug, "landing"), "default");
   const result = ci.loadContent<LandingPage>({
     contentType: "landing",
     slug,
@@ -1328,11 +1339,12 @@ export function listLandingPages(ci: typeof contentIndex = contentIndex): Array<
   const slugs = ci.listContentSlugs("landing");
   const landings: Array<{ slug: string; title: string; locale: string }> = [];
 
+  // One row per live language (each language of a landing has its own address).
   for (const slug of slugs) {
-    const commonData = ci.loadCommonData("landing", slug);
-    const locale = (commonData?.locale as string) || getDefaultLocale();
-    const landing = loadLandingPage(slug, locale, ci);
-    if (landing) {
+    const locales = [...ci.getAvailableLocalesOrVariants("landing", slug)].sort();
+    for (const locale of locales) {
+      const landing = loadLandingPage(slug, locale, ci);
+      if (!landing) continue;
       const landingSlug = landing.slug || slug;
       const landingTitle = landing.title || "";
       if (landingTitle) {

@@ -27,16 +27,27 @@ import {
   FUNNEL_STAGE_TAPER,
 } from "@/lib/funnel-stage-ui";
 import { FUNNEL_STAGES, type FunnelStage } from "@shared/funnel";
-import type { Finding, FindingLink, PageAdvice, PageStatsResponse, PageStatsScope, PageStatsTestView, TrafficSource } from "@shared/page-stats";
+import type {
+  Finding,
+  FindingLink,
+  PageAdvice,
+  PageStatsResponse,
+  PageStatsScope,
+  PageStatsTestView,
+  TestGoal,
+  TrafficSource,
+} from "@shared/page-stats";
 import { shortDay } from "./format";
 import { AdvicePanel, ObjectiveCard, ObjectiveFunnel } from "./ObjectivePanel";
-import { CompareTable, TestViewHeader, VersionView, versionLabel } from "./PageStatsTestView";
+import { CompareTable, TestGoalPicker, TestViewHeader, VersionView, versionLabel } from "./PageStatsTestView";
 import { TEST_VIEW_QUERY_KEY } from "./test-view-context";
 import {
+  EnrollClicksSection,
   EngagementSection,
   JourneySection,
   LeadsSection,
   LinksSection,
+  MicroActionsSection,
   PaidSection,
   SearchSection,
   SourcesSection,
@@ -76,9 +87,15 @@ async function fetchPageStats(
 
 class NoTestError extends Error {}
 
-async function fetchTestView(path: string, refresh: boolean, source: TrafficSource): Promise<PageStatsTestView> {
+async function fetchTestView(
+  path: string,
+  refresh: boolean,
+  source: TrafficSource,
+  previewGoal: TestGoal | null,
+): Promise<PageStatsTestView> {
   const params = new URLSearchParams({ path, scope: "url", view: "test", source });
   if (refresh) params.set("refresh", "1");
+  if (previewGoal) params.set("goal", previewGoal);
   const res = await apiFetch(`/api/analytics/page-stats?${params}`);
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
@@ -330,8 +347,12 @@ export function PageStatsDrawer({
   const tab = tabs.includes(requestedTab) ? requestedTab : "all";
   const missingVersion = tab !== requestedTab && requestedTab !== "compare" ? requestedTab : null;
   const forceTestRefresh = useRef(false);
+  // Finished tests only: read the results by another goal (not saved). Resets with the page or test.
+  const previewKey = `${path ?? ""}|${test?.experiment_id ?? ""}`;
+  const [previewState, setPreviewState] = useState<{ key: string; goal: TestGoal } | null>(null);
+  const previewGoal = previewState?.key === previewKey && test?.status === "ended" ? previewState.goal : null;
   const testQuery = useQuery({
-    queryKey: [TEST_VIEW_QUERY_KEY, path, data?.source ?? null],
+    queryKey: [TEST_VIEW_QUERY_KEY, path, data?.source ?? null, previewGoal],
     enabled: open && !!path && !!test && tab !== "all" && !!data,
     staleTime: 10 * 60 * 1000,
     gcTime: 15 * 60 * 1000,
@@ -339,7 +360,7 @@ export function PageStatsDrawer({
     queryFn: () => {
       const force = forceTestRefresh.current;
       forceTestRefresh.current = false;
-      return fetchTestView(path!, force, data!.source);
+      return fetchTestView(path!, force, data!.source, previewGoal);
     },
   });
 
@@ -391,18 +412,30 @@ export function PageStatsDrawer({
         const engagement = (
           <EngagementSection key="engagement" section={s.traffic} onCompareVersions={test ? () => setTab("compare") : undefined} />
         );
+        const enroll =
+          data.actions && (data.actions.checkout_buttons > 0 || (s.traffic.data?.current.enroll_sessions ?? 0) > 0) ? (
+            <EnrollClicksSection
+              key="enroll"
+              section={s.traffic}
+              checkoutButtons={data.actions.checkout_buttons}
+            />
+          ) : null;
+        const micro =
+          data.actions && (data.actions.micro.event_names.length > 0 || data.actions.micro.broken) ? (
+            <MicroActionsSection key="micro" section={s.traffic} actions={data.actions} />
+          ) : null;
         const links = <LinksSection key="links" section={s.links} />;
         switch (stage) {
           case "awareness":
-            return [search, journey("Where readers go next"), links, sources, engagement, paid, leads];
+            return [search, journey("Where readers go next"), links, sources, engagement, micro, paid, leads].filter(Boolean);
           case "consideration":
-            return [journey("Path to a decision"), sources, engagement, leads, paid, search, links];
+            return [journey("Path to a decision"), sources, engagement, leads, enroll, micro, paid, search, links].filter(Boolean);
           case "decision":
-            return [leads, paid, journey("Where non-converters go"), sources, engagement, search, links];
+            return [leads, enroll, micro, paid, journey("Where non-converters go"), sources, engagement, search, links].filter(Boolean);
           case "post-enrollment":
-            return [engagement, journey("Where students go next"), sources, links];
+            return [engagement, micro, journey("Where students go next"), sources, links].filter(Boolean);
           default:
-            return [sources, journey("Journey"), leads, search, paid, engagement, links];
+            return [sources, journey("Journey"), leads, enroll, micro, search, paid, engagement, links].filter(Boolean);
         }
       })()
     : null;
@@ -519,7 +552,16 @@ export function PageStatsDrawer({
                 <>
                   <TestViewHeader data={testQuery.data} onLink={handleLink} />
                   {tab === "compare" ? (
-                    <CompareTable data={testQuery.data} />
+                    <CompareTable
+                      data={testQuery.data}
+                      goalControl={
+                        <TestGoalPicker
+                          data={testQuery.data}
+                          entry={data.entry}
+                          onPreview={(goal) => setPreviewState(goal ? { key: previewKey, goal } : null)}
+                        />
+                      }
+                    />
                   ) : (
                     <VersionView
                       data={testQuery.data}

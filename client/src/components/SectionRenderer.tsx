@@ -12,9 +12,13 @@ import { useMenuVisualContext } from "@/contexts/MenuVisualContext";
 import { VariableHighlightProvider } from "@/components/editing/VariableHighlight";
 import { useVariableDefinitions, useVariableContext } from "@/hooks/useVariables";
 import { resolveDeep, patchVariableFieldHighlights, type ResolveOptions, type VariableDefinition } from "@/lib/variable-manager";
+import { reapplyFormOverrideConditionOperands } from "@shared/preserveFormOverrideOperands";
 import { useLlmAudience } from "@/contexts/LlmAudienceContext";
 import { describePageSection, llmLocationCatalog } from "@/lib/llmAudienceCatalog";
-import { expandLlmVariablesDeep, type LlmVariableDef } from "@shared/llm-html-audience";
+import {
+  expandLlmVariablesDeep,
+  type LlmVariableDef,
+} from "@shared/llm-html-audience";
 import { findReplaceableTextRange } from "@/lib/cm-variable-highlight";
 import { SectionContextProvider } from "@/contexts/SectionContext";
 import {
@@ -712,11 +716,23 @@ export function SectionRenderer({ sections, settings, contentType, slug, locale,
           const context = part.kind === "region"
             ? { region: part.region, locale: llmLocale }
             : { location: part.slug, region: part.region ?? undefined, locale: llmLocale };
-          return resolveDeep(section, (varDefinitions || {}) as Record<string, VariableDefinition>, context, resolveOptions).data as Section;
+          const resolved = resolveDeep(
+            section,
+            (varDefinitions || {}) as Record<string, VariableDefinition>,
+            context,
+            resolveOptions,
+          ).data as Section;
+          return reapplyFormOverrideConditionOperands(section, resolved);
         }
         const parts = audience.kind === "labeled" ? audience.parts : null;
         const expanded = expandLlmVariablesDeep(section, defs, llmLocale, parts, llmLocationCatalog);
-        return resolveDeep(expanded, (varDefinitions || {}) as Record<string, VariableDefinition>, { locale: llmLocale }, resolveOptions).data as Section;
+        const resolved = resolveDeep(
+          expanded,
+          (varDefinitions || {}) as Record<string, VariableDefinition>,
+          { locale: llmLocale },
+          resolveOptions,
+        ).data as Section;
+        return reapplyFormOverrideConditionOperands(expanded as Section, resolved);
       });
     }
 
@@ -742,7 +758,7 @@ export function SectionRenderer({ sections, settings, contentType, slug, locale,
         funnel: funnelBag,
       },
     );
-    let result = data as Section[];
+    let result = reapplyFormOverrideConditionOperands(sections, data as Section[]);
     if (isEditMode && singleEntry) {
       result = result.map((resolvedSection, i) => {
         const rawSection = sections[i] as Record<string, unknown>;

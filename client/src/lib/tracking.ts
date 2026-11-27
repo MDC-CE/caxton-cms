@@ -32,6 +32,17 @@ export function isPageContextSet(pathname: string): boolean {
   return pageContextPath === pathname;
 }
 
+/** True when the page on screen has product / persona context (switch on, not cleared). */
+export function hasPageTrackingContext(): boolean {
+  return pageContext !== null && pageContextPath === currentPathname();
+}
+
+/** Called every time a page sets or clears its context. Returns an unsubscribe. */
+export function subscribePageContext(listener: (pathname: string) => void): () => void {
+  contextListeners.add(listener);
+  return () => contextListeners.delete(listener);
+}
+
 /**
  * Set the product / persona values for the page at `pathname` (null = this page has none).
  * Pushes every key, with `undefined` for missing ones, so GTM drops the previous page's values.
@@ -172,6 +183,16 @@ export const ECOMMERCE_EVENTS_WIRED = [
 
 export type EcommerceWiredEventName = (typeof ECOMMERCE_EVENTS_WIRED)[number];
 
+/** CTA clicks that count toward the "Enrollment clicks" A/B test goal (intent, not purchases). */
+export const ENROLLMENT_CLICK_EVENTS = ["add_to_cart", "click_begin_checkout"] as const;
+
+export function isEnrollmentClickEvent(name: string): boolean {
+  return (ENROLLMENT_CLICK_EVENTS as readonly string[]).includes(name);
+}
+
+/** Longest a tracked enrollment click waits for GTM before the page may leave. */
+export const ENROLLMENT_CLICK_SEND_TIMEOUT_MS = 300;
+
 // All valid event names
 export type EventName = ConversionName | TrackingEventName | EcommerceEventName;
 
@@ -226,9 +247,15 @@ export function resolveEcommerceProduct(
   return { product_id: p.product_id, name: p.name, content_type: p.content_type };
 }
 
+function gtmLoaded(): boolean {
+  return typeof window !== "undefined" && !!(window as unknown as { google_tag_manager?: unknown }).google_tag_manager;
+}
+
 /**
  * Track an ecommerce funnel event. No-ops unless a purchasable product resolves
- * (via program_id / item_id + registered product lookup).
+ * (via program_id / item_id + registered product lookup). Enrollment clicks resolve once
+ * GTM reports the event sent (at most {@link ENROLLMENT_CLICK_SEND_TIMEOUT_MS}), so an
+ * off-site link can wait for it; without GTM they resolve right after the push.
  */
 export async function trackEcommerce(
   eventName: EcommerceWiredEventName,
@@ -260,17 +287,38 @@ export async function trackEcommerce(
     return;
   }
 
-  pushToDataLayer({
+  const enrollmentClick = isEnrollmentClickEvent(eventName);
+  if (enrollmentClick) notifyTrackListeners(eventName, payload as Record<string, unknown>, "event");
+
+  const data: Record<string, unknown> = {
     event: eventName,
     user_id: getUserIdFromCookie() ?? undefined,
+    ...(enrollmentClick ? visitExperimentFields() : {}),
     ...getPageTrackingContext(),
     ...payload,
     item_id: itemId,
     item_name: itemName,
     item_category: itemCategory,
     program_id: programId || payload.program_id,
-  });
+  };
 
+  if (!enrollmentClick || !gtmLoaded()) {
+    pushToDataLayer(data);
+    console.log(`[Tracking] Ecommerce: ${eventName}`, { ...payload, item_id: itemId });
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, ENROLLMENT_CLICK_SEND_TIMEOUT_MS);
+    pushToDataLayer({ ...data, eventCallback: finish, eventTimeout: ENROLLMENT_CLICK_SEND_TIMEOUT_MS });
+  });
   console.log(`[Tracking] Ecommerce: ${eventName}`, { ...payload, item_id: itemId });
 }
 
@@ -340,12 +388,16 @@ export interface ConsentDefaults {
   sms?: boolean;
   whatsapp?: boolean;
   sms_usa_only?: boolean;
+  sms_countries?: string[];
+  sms_countries_mode?: "include" | "exclude";
+  whatsapp_countries?: string[];
+  whatsapp_countries_mode?: "include" | "exclude";
   marketing_text?: string;
   sms_text?: string;
   show_terms?: boolean;
   terms_url?: string;
   privacy_url?: string;
-  [key: string]: boolean | string | undefined;
+  [key: string]: boolean | string | string[] | undefined;
 }
 
 export interface SuccessDefaults {
@@ -385,6 +437,7 @@ export interface TrackingSettingsResponse {
   login_event_name?: string;
   signup_event_aliases?: string[];
   login_event_aliases?: string[];
+  gtm_payload?: { skip_domains: string[] };
 }
 
 // Extend Window to include dataLayer

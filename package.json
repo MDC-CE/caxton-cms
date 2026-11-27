@@ -1,10 +1,10 @@
 {
-  "name": "caxton",
+  "name": "caxton-cms",
   "version": "1.0.0",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "weblify": "./dist/cli.js"
+    "caxton-cms": "./dist/cli.js"
   },
   "files": [
     "dist",
@@ -30,6 +30,7 @@
     "check:api-rate": "tsx scripts/check-api-rate-policy.ts",
     "check:section-spacing": "tsx scripts/section-spacing/check.ts",
     "content:pull": "tsx scripts/content-pull.ts",
+    "fixtures:refresh-ci": "tsx scripts/refresh-ci-fixture.ts",
     "ensure:registry": "tsx scripts/ensure-registry.ts",
     "schema:sync": "tsx scripts/schema-sync/sync-schemas.ts",
     "schema:sync:check": "tsx scripts/schema-sync/sync-schemas.ts --check",
@@ -37,17 +38,20 @@
     "variant-metadata:backfill": "tsx scripts/backfill-variant-metadata.ts",
     "ensure:pipeline-db": "tsx --import ./shared/register-site-schema-stub.mjs scripts/ensure-pipeline-db.ts",
     "generate:icon-map": "tsx scripts/generate-icon-map.ts",
+    "docs:mcp-examples": "tsx scripts/docs/mcp-response-examples.ts",
     "predev": "npm run check:sites && npm run ensure:registry && npm run ensure:schema-yml && npm run generate:icon-map",
     "prebuild": "npm run check:sites-yml && npm run ensure:registry && npm run ensure:schema-yml && npm run check:section-spacing && npm run generate:icon-map",
     "prepack": "node scripts/prepare-site-schemas-for-pack.mjs",
     "postpack": "node scripts/prepare-site-schemas-for-pack.mjs --restore",
     "dev": "NODE_ENV=development tsx --import ./shared/register-site-schema-stub.mjs server/index.ts",
     "weblify": "tsx cli/src/index.ts",
+    "caxton": "tsx cli/src/index.ts",
     "sidequest": "NODE_ENV=development tsx --import ./shared/register-site-schema-stub.mjs server/jobs/sidequest-worker.ts",
     "mcp": "tsx --import ./shared/register-site-schema-stub.mjs mcp-server/index.ts",
     "build:cli": "node scripts/build-bundles.mjs --cli-only",
     "build:server": "node scripts/build-bundles.mjs",
-    "build": "vite build && vite build --ssr src/entry-server.tsx && npm run build:server",
+    "build": "vite build && vite build --ssr src/entry-server.tsx && npm run build:server && npm run precompress:assets",
+    "precompress:assets": "node scripts/precompress-assets.mjs",
     "start": "bash scripts/start-production.sh",
     "check": "tsx scripts/ensure-ci-content-fixture.ts && tsc",
     "check:mcp": "tsx scripts/check-mcp-types.ts",

@@ -26,6 +26,8 @@
 #           SIDEQUEST_SERVICE_NAME (default caxton-sidequest), HEALTH_PORT (default PORT or 5000).
 # Optional: SKIP_CONTENT_FLUSH=1 (deploy even with unpushed server content; copies saved to
 #   persistent/unpushed-content/<release>/). See "Content check" below and docs/vps.md.
+# Optional: SKIP_RENDER_GATE=1 (go live even when the page render check fails; it still reports).
+# Optional: DEPLOY_RUN_URL (Actions run link stored with the render check result).
 set -euo pipefail
 
 APP_ROOT="${APP_ROOT:-/opt/caxton}"
@@ -767,6 +769,8 @@ rm -rf "$PERSISTENT/data/html-page-cache/$RELEASE_NAME" \
   "$RELEASE/data/html-page-cache/$RELEASE_NAME" 2>/dev/null || true
 
 echo "[deploy] prebuilding public HTML (before traffic flip)"
+# Also the page render check: exits 1 (current untouched) when a content type with 5+
+# pages renders over 10% empty, unless SKIP_RENDER_GATE=1. RENDER_GATE lines → Actions summary.
 NODE_ENV=production node dist/prebuild-html-cache.js
 abort_requested && handle_abort
 

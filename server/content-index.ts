@@ -532,6 +532,7 @@ export class ContentIndex {
       }
     }
 
+    this.scanSchemaOrgVariableReferences(baseDir);
     this.scanCustomRedirects(baseDir, nextRedirects);
     this.warnMissingSlugMappings();
 
@@ -667,6 +668,18 @@ export class ContentIndex {
   private extractVariableReferences(rawContent: string, filePath: string): void {
     for (const name of extractTemplateVariableNames(rawContent)) {
       this.addVariableRef(name, filePath);
+    }
+  }
+
+  /** Index `{{ }}` tokens in site-root schema-org.yml (Organization / Website). */
+  private scanSchemaOrgVariableReferences(baseDir: string): void {
+    const schemaPath = path.join(baseDir, "schema-org.yml");
+    if (!fs.existsSync(schemaPath)) return;
+    try {
+      const raw = fs.readFileSync(schemaPath, "utf-8");
+      this.extractVariableReferences(raw, `${this.contentRootName}/schema-org.yml`);
+    } catch (err) {
+      log.warn({ err }, "[ContentIndex] Failed to scan schema-org.yml variable refs");
     }
   }
 
@@ -909,6 +922,15 @@ export class ContentIndex {
       if (!row) delete urls[locale];
     }
     if (Object.keys(urls).length === 0) this.alternateByKey.delete(key);
+  }
+
+  /**
+   * Live languages of an entry whose public slug is `urlSlug`, sorted by code. On a
+   * one-address type (/landing/:slug) that is the language the address serves; more
+   * than one is a slug conflict (first by code is served until it is fixed).
+   */
+  private localesWithSlug(entry: ContentEntry, urlSlug: string): string[] {
+    return entry.locales.filter((loc) => this.localeSlugFromFile(entry, loc) === urlSlug).sort();
   }
 
   /** Public slug for one language: the language's own slug, else the `_common.yml` slug, else the page ID. */
@@ -1667,17 +1689,12 @@ export class ContentIndex {
     return index;
   }
 
+  /** Language whose public slug is `urlSlug` (also when it equals the folder name); first by code on a conflict. */
   resolveLocaleFromUrlSlug(urlSlug: string, contentType: string): string | undefined {
     this.ensureInitialized();
     const folderSlug = this.resolveBaseSlug(urlSlug, contentType);
-    if (folderSlug === urlSlug) return undefined;
-    const available = this.getAvailableLocalesOrVariants(contentType as ContentType, folderSlug);
-    for (const loc of available) {
-      if (this.getLocaleSlug(folderSlug, contentType, loc) === urlSlug) {
-        return loc;
-      }
-    }
-    return undefined;
+    const available = [...this.getAvailableLocalesOrVariants(contentType as ContentType, folderSlug)].sort();
+    return available.find((loc) => this.getLocaleSlug(folderSlug, contentType, loc) === urlSlug);
   }
 
   /** Public slug for one language: the language's own slug, else the `_common.yml` slug, else the page ID. */
@@ -1983,20 +2000,34 @@ export class ContentIndex {
     return null;
   }
 
-  resolveUrl(url: string): { contentType: string; slug: string; entry: ContentEntry; fromDatabase?: boolean; params?: Record<string, string>; patternLocale?: string } | null {
+  /**
+   * `patternLocale` is the url_pattern key that matched ("default" for one-address
+   * types like /landing/:slug). `fileLocale` is the language of the file that owns the
+   * matched address on those types — the language the page is served in.
+   */
+  resolveUrl(url: string): { contentType: string; slug: string; entry: ContentEntry; fromDatabase?: boolean; params?: Record<string, string>; patternLocale?: string; fileLocale?: string } | null {
     this.ensureInitialized();
     const cleanUrl = url.split("?")[0].split("#")[0];
+    const urlSlug = cleanUrl.split("/").filter(Boolean).pop() ?? "";
 
     // Exact public URL from the scan. YAML hits are not database pages.
     const indexed = this.byUrl.get(cleanUrl);
     if (indexed) {
+      // The index keeps the file locale (alternates need it); callers expect the
+      // pattern key, so a single-address type (/landing/:slug) reports "default".
+      const urlPattern = this.contentTypeConfigs[indexed.contentType]?.url_pattern;
+      const singleAddress = !!(urlPattern && !urlPattern[indexed.patternLocale] && urlPattern["default"]);
+      const fileLocale = singleAddress
+        ? (indexed.source === "yaml" ? this.localesWithSlug(indexed.entry, urlSlug)[0] : undefined) ?? indexed.patternLocale
+        : undefined;
       return {
         contentType: indexed.contentType,
         slug: indexed.slug,
         entry: indexed.entry,
         fromDatabase: indexed.source === "yaml" ? undefined : true,
         params: indexed.params,
-        patternLocale: indexed.patternLocale,
+        patternLocale: singleAddress ? "default" : indexed.patternLocale,
+        ...(fileLocale ? { fileLocale } : {}),
       };
     }
 
@@ -2037,7 +2068,8 @@ export class ContentIndex {
               );
               if (mismatch) continue;
             }
-            return { contentType, slug, entry: found[0], params, patternLocale: localeKey };
+            const fileLocale = localeKey === "default" ? this.localesWithSlug(found[0], slug)[0] : undefined;
+            return { contentType, slug, entry: found[0], params, patternLocale: localeKey, ...(fileLocale ? { fileLocale } : {}) };
           }
 
           const resolvedSlug = this.resolveBaseSlug(slug, contentType);
@@ -2056,7 +2088,15 @@ export class ContentIndex {
                 );
                 if (mismatch) continue;
               }
-              return { contentType, slug: resolvedSlug, entry: foundResolved[0], params, patternLocale: localeKey };
+              const fileLocale = localeKey === "default" ? this.localesWithSlug(foundResolved[0], slug)[0] : undefined;
+              return {
+                contentType,
+                slug: resolvedSlug,
+                entry: foundResolved[0],
+                params,
+                patternLocale: localeKey,
+                ...(fileLocale ? { fileLocale } : {}),
+              };
             }
           }
 
@@ -2279,13 +2319,21 @@ export class ContentIndex {
   }
 
   /**
-   * Language a matched address is served in: the URL pattern's locale, else (one
-   * address for every language, e.g. /landing/:slug) the entry's `_common.yml` `locale`, else en.
+   * Language a matched address is served in: the URL pattern's locale; on one-address
+   * types (/landing/:slug) the language of the file that owns the address (`fileLocale`
+   * from resolveUrl), else the only language file, else the first by code, else en.
+   * `_common.yml` `locale` is ignored legacy and never read.
    */
-  servedLocale(contentType: string, slug: string, patternLocale?: string): string {
+  servedLocale(contentType: string, slug: string, patternLocale?: string, fileLocale?: string): string {
     if (patternLocale && patternLocale !== "default") return patternLocale;
-    const common = this.loadCommonData(contentType as ContentType, slug)?.locale;
-    return typeof common === "string" && common ? common : "en";
+    if (fileLocale) return fileLocale;
+    const locales = [...(this.findBySlug(slug, { contentType })[0]?.locales ?? [])].sort();
+    return locales[0] ?? "en";
+  }
+
+  /** {@link servedLocale} for a resolveUrl() result. */
+  localeForResolved(resolved: { contentType: string; slug: string; patternLocale?: string; fileLocale?: string }): string {
+    return this.servedLocale(resolved.contentType, resolved.slug, resolved.patternLocale, resolved.fileLocale);
   }
 
   loadMergedContent(
@@ -2302,11 +2350,12 @@ export class ContentIndex {
       }
 
       const folder = this.getFolderName(contentType);
+      const resolvedSlug = this.resolveBaseSlug(slug, contentType);
       const singleCommonPath = resolveCommonTemplatePath(path.join(this.contentRoot, folder));
       const typeCommonPath = path.join(this.contentRoot, folder, "_common.yml");
       const useSingleTemplate =
         !!getContentTypeConfig(contentType, this.contentRoot)?.single_template &&
-        !isEntryDetached(contentType, slug, this.contentRoot);
+        !isEntryDetached(contentType, resolvedSlug, this.contentRoot);
 
       let baseData: Record<string, unknown> = {};
       if (fs.existsSync(singleCommonPath)) {

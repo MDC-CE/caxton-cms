@@ -65,8 +65,11 @@ const ci = {
   getContentTypeConfig: () => ({ directory: "blog" }),
   getAlternateUrls: () => ({ en: "/en/blog/news/post" }),
   buildUrl: () => "/en/blog/news/post",
-  getVariableUsage: (name: string) =>
-    name === "brand.title" ? ["site_test/blog/post/en.yml"] : [],
+  getVariableUsage: (name: string) => {
+    if (name === "brand.title") return ["site_test/blog/post/en.yml"];
+    if (name === "global.global_review_rating") return ["site_test/schema-org.yml"];
+    return [];
+  },
   getContentTypes: () => [] as string[],
   refresh: vi.fn(),
   listAttachedEntries: () => [],
@@ -164,6 +167,16 @@ describe("scheduleHtmlFromEvent", () => {
     expect(scheduleHotHtmlRebuild).not.toHaveBeenCalled();
   });
 
+  it("hot-rebuilds when a named variable is used in schema-org.yml", () => {
+    scheduleHtmlFromEvent(
+      event("variables_changed", { payload: { names: ["global.global_review_rating"] } }),
+      site,
+    );
+    expect(scheduleHotHtmlRebuild).toHaveBeenCalledWith("variables-schema-org", {
+      siteIds: ["site_test"],
+    });
+  });
+
   it("rebuilds stored pages of this site when variable names are unknown", () => {
     scheduleHtmlFromEvent(event("variables_changed"), site);
     expect(scheduleHotHtmlRebuild).toHaveBeenCalledWith("variables", { siteIds: ["site_test"] });
@@ -252,6 +265,50 @@ describe("scheduleHtmlFromEvent", () => {
     expect(scheduleSavedHtmlPaths).toHaveBeenCalledWith(
       "site_test",
       ["/en/workshop/live-one"],
+      "/tmp/site_test",
+      { deleteIfSlow: false },
+    );
+    ci.getContentTypes = () => [];
+    ci.getContentTypeConfig = () => ({ directory: "blog" });
+    ci.buildUrl = () => "/en/blog/news/post";
+    delete (ci as { getDatabase?: unknown }).getDatabase;
+  });
+
+  it("treats a list of filter values as any-of, like the page lookup", () => {
+    ci.getContentTypes = () => ["workshop"];
+    ci.getContentTypeConfig = () => ({
+      directory: "workshop",
+      url_pattern: { en: "/en/workshop/:slug" },
+      database: { slug: "workshops" },
+      entry_filters: [{ item_property_slug: "status", value: ["ACTIVE", "FINISHED"] }],
+    });
+    ci.buildUrl = (_type: string, locale: string, slug: string) => `/${locale}/workshop/${slug}`;
+    (ci as { getDatabase: () => { getLastGoodItems: () => { items: Record<string, unknown>[] } } }).getDatabase =
+      () => ({
+        getLastGoodItems: () => ({
+          items: [
+            { slug: "live-one", lang: "en", status: "ACTIVE" },
+            { slug: "done-one", lang: "en", status: "FINISHED" },
+            { slug: "draft-one", lang: "en", status: "DRAFT" },
+          ],
+        }),
+      });
+    scheduleHtmlFromEvent(
+      event("database_refreshed", {
+        payload: {
+          dbName: "workshops",
+          rows: [
+            { slug: "live-one", locale: "en", params: {} },
+            { slug: "done-one", locale: "en", params: {} },
+            { slug: "draft-one", locale: "en", params: {} },
+          ],
+        },
+      }),
+      site,
+    );
+    expect(scheduleSavedHtmlPaths).toHaveBeenCalledWith(
+      "site_test",
+      ["/en/workshop/live-one", "/en/workshop/done-one"],
       "/tmp/site_test",
       { deleteIfSlow: false },
     );

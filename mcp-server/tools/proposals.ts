@@ -28,6 +28,11 @@ import {
   resolveStrategyForContentType,
 } from "../lib/proposal-discovery-path.js";
 import { BLOCKER_STAFF_SUMMARY_HINT } from "../../server/content-proposals/blocker-staff-summary.js";
+import {
+  AGENT_APPLY_DROPS_LIVE_VALUES_CODE,
+  AGENT_APPLY_UNREQUESTED_PAGE_FIELDS_CODE,
+  DETACHED_NOT_SUPPORTED_CODE,
+} from "../../server/content-proposals/page-wide-apply-codes.js";
 
 function stripDecisionDebugFromProposal(proposal: unknown): unknown {
   if (!proposal || typeof proposal !== "object") return proposal;
@@ -129,6 +134,12 @@ const IDEA_SEO_TARGET_SCHEMA = z.object({
     .max(100)
     .optional()
     .describe("Keyword difficulty 0–100 for main_keyword, from the same research. Reviewers expect it. Stays on the idea; not written to the page's seo block."),
+  market: z
+    .string()
+    .optional()
+    .describe(
+      "Country market id the kw_* numbers came from (data.market.id of get_or_refresh_seo_research, e.g. spain, usa). Reviewers expect it whenever kw_* are set; rollups (latam, worldwide) refused.",
+    ),
 });
 
 const SEO_TARGET_OVERRIDE_SCHEMA = z.object({
@@ -145,6 +156,7 @@ const IDEA_SEO_TARGET_CODES = new Set([
   "idea_seo_target_keyword_taken",
   "idea_seo_target_conflict",
   "idea_seo_target_hub_gone",
+  "idea_seo_target_market_invalid",
   "seo_target_override_invalid",
   "seo_optout_idea_born",
   "seo_index_unavailable",
@@ -689,6 +701,63 @@ function draftFirstFailure(
           },
         ],
       });
+    case DETACHED_NOT_SUPPORTED_CODE: {
+      const onApply = ctx.tool === "update_proposal" && !!ctx.proposal_id && data.proposal != null;
+      return fail(String(data.error ?? code), {
+        code,
+        details,
+        warnings: [
+          {
+            code: "nothing_written",
+            message:
+              "Proposals never change `detached` (stored in {slug}/_common.yml, every language). Nothing was saved or published. " +
+              "Supported detach path outside proposals: set_entry_attachment action detach + confirm (cap content_edit_structure) — it bakes the template into every live language first.",
+          },
+        ],
+        next_actions: onApply
+          ? [
+              {
+                tool: "update_proposal",
+                reason: "The draft carries a detached change, which proposals cannot publish. Reject it (not implementable) so the author re-files without it.",
+                priority: "required",
+                args_hint: {
+                  proposal_id: ctx.proposal_id,
+                  action: "reject",
+                  confirm_reject: true,
+                  reject_kind: "not_implementable",
+                  ...siteArg,
+                },
+              },
+            ]
+          : [],
+      });
+    }
+    case AGENT_APPLY_UNREQUESTED_PAGE_FIELDS_CODE:
+    case AGENT_APPLY_DROPS_LIVE_VALUES_CODE:
+      return fail(String(data.error ?? code), {
+        code,
+        details,
+        warnings: [
+          {
+            code: "nothing_published",
+            message:
+              code === AGENT_APPLY_UNREQUESTED_PAGE_FIELDS_CODE
+                ? "Agent apply refused: details.entries[].fields are page-level ({slug}/_common.yml, every language) and no requested op covers them. Staff can still approve in the UI. Requested funnel.* / authors / published_at changes are approvable by agents."
+                : "Agent apply refused: publishing would drop live page-level values (display_values_change; details.entries[].fields live only in a language file). Staff can still approve in the UI.",
+          },
+        ],
+        next_actions: [
+          {
+            tool: "update_proposal",
+            reason:
+              code === AGENT_APPLY_UNREQUESTED_PAGE_FIELDS_CODE
+                ? "add_blocker asking the author to revise_entries without the unrequested page-level fields (details.entries[].fields). This is an author fix, not a staff handoff."
+                : "add_blocker asking the author to revise_entries adding the current live values of details.entries[].fields as requested updates, so publishing keeps them. This is an author fix, not a staff handoff.",
+            priority: "required",
+            args_hint: { proposal_id: ctx.proposal_id, action: "add_blocker", ...siteArg },
+          },
+        ],
+      });
     default:
       return null;
   }
@@ -973,7 +1042,7 @@ export function registerProposalTools(
       "Ideas: optional one demand label — anticipated_demand (launch → lasting queries; empty volume OK), existing_demand (current search rank/cite; author documents SERP maturity/weight class/asset in brief), fast_decay_news (announcement only → expect reject), broken_url (missing address; call get_runtime_issues first and paste path/count/sources/referrer/queryAttribution; only roles with that tool). " +
       "idea_opportunity_harm is always on for ideas — do not file it. Omit review_situations on ideas that are not those three. " +
       "New-URL ideas: optional idea_funnel { stage, products } (products \"all\" only with stage awareness). Soft warning idea_funnel_missing when omitted; accept refuses until set (set_idea_funnel). " +
-      "New-URL ideas on SEO-monitored types: idea_seo_target { main_keyword, cluster: join|hub|standalone, kw_monthly_volume, kw_difficulty } — soft warnings idea_seo_target_missing / idea_seo_target_metrics_missing; accept refuses until set (set_idea_seo_target); locks at accept and seeds the new draft's seo block (keyword + hub only; kw_* stay on the idea). Implementing edits whose seo ops differ from the lock need seo_target_override.reason. " +
+      "New-URL ideas on SEO-monitored types: idea_seo_target { main_keyword, cluster: join|hub|standalone, kw_monthly_volume, kw_difficulty, market } — soft warnings idea_seo_target_missing / idea_seo_target_metrics_missing / idea_seo_target_market_missing (numbers without market) / idea_seo_target_market_not_default (informational); accept refuses until set (set_idea_seo_target); locks at accept and seeds the new draft's seo block (keyword + hub only; kw_* stay on the idea). Implementing edits whose seo ops differ from the lock need seo_target_override.reason. " +
       "New language of a page already live in another language: the draft needs its own slug (this language's address; folder name stays the page ID). An implemented idea's locked accepted_entry.url_slug is seeded (warning idea_url_slug_locked); a different { field_path: \"slug\" } update needs url_slug_override.reason (idea_url_slug_conflict); with no locked address, file a slug update or refuse locale_url_slug_required. " +
       "Hub/internal links → prefer review_situations:[\"internal_links\"] (subtopic internal-links); a hub link to a new page chains with applies_after_proposal_id = that page's proposal. " +
       "Original-hub rewrite after a split → review_situations:[\"hub_split\"] + applies_after_proposal_id = the new hub's proposal (subtopic hub-split). " +
@@ -2390,7 +2459,7 @@ export function registerProposalTools(
           "For set_related_entries (open ideas, proposer): full replacement. contentType must be a content-types.yml key (not a folder name); slug may not exist yet. Empty array clears.",
         ),
       idea_seo_target: IDEA_SEO_TARGET_SCHEMA.optional().describe(
-        "For set_idea_seo_target (open ideas, proposer/staff): main_keyword + cluster (join live same-locale hub | hub with named live members | standalone for fast_decay_news / broken_url, reason min 40) + kw_monthly_volume and kw_difficulty from your keyword research. Send the whole target (replaces the stored one). Frozen after accept.",
+        "For set_idea_seo_target (open ideas, proposer/staff): main_keyword + cluster (join live same-locale hub | hub with named live members | standalone for fast_decay_news / broken_url, reason min 40) + kw_monthly_volume and kw_difficulty from your keyword research + market (the country those numbers came from). Send the whole target (replaces the stored one). Frozen after accept.",
       ),
       seo_target_override: SEO_TARGET_OVERRIDE_SCHEMA.optional().describe(
         "For revise_entries on edits implementing an idea: reason (min 40) when seo.main_keyword / seo.pillar_path differ from the locked target, or when setting seo.pillar_path: null on an idea-born page (news / broken-URL only).",

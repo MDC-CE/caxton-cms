@@ -50,7 +50,6 @@ import { unknownKeysValidator } from "./unknown-keys";
 import { relationTargetsValidator } from "./relation-targets";
 import { updatedAtValidator } from "./updated-at";
 import { urlParamLocaleValidator } from "./url-param-locale";
-import { nonlocalizedCommonLocaleValidator } from "./nonlocalized-common-locale";
 import { localeSlugUniquenessValidator } from "./locale-slug-uniqueness";
 import { slugIdentityValidator } from "./slug-identity";
 import { siteLinkIndexValidator } from "./site-link-index";
@@ -61,6 +60,7 @@ import { funnelCompletenessValidator } from "./funnel-completeness";
 import { draftIntegrityValidator } from "./draft-integrity";
 import { corruptedTemplateValuesValidator } from "./corrupted-template-values";
 import { textLimitsValidator } from "./text-limits";
+import { factLiteralsValidator } from "./fact-literals";
 
 export const validators: Validator[] = [
   redirectValidator,
@@ -99,7 +99,6 @@ export const validators: Validator[] = [
   relationTargetsValidator,
   staticFieldOverridesValidator,
   urlParamLocaleValidator,
-  nonlocalizedCommonLocaleValidator,
   localeSlugUniquenessValidator,
   slugIdentityValidator,
   orphanedFilesValidator,
@@ -118,6 +117,7 @@ export const validators: Validator[] = [
   variablesMetadataValidator,
   draftIntegrityValidator,
   corruptedTemplateValuesValidator,
+  factLiteralsValidator,
 ];
 
 /** @deprecated Lighthouse removed from platform diagnostics — use external tools. */
@@ -153,6 +153,8 @@ export function listValidators(): ValidatorMetadata[] {
     estimatedDuration: v.estimatedDuration,
     category: v.category,
     runClass: v.runClass ?? getValidatorRunClass(v.name),
+    ...(v.cost ? { cost: v.cost } : {}),
+    ...(v.onSaveInvite ? { onSaveInvite: v.onSaveInvite } : {}),
     ...(v.issueCodes ? { issueCodes: v.issueCodes } : {}),
   }));
 }

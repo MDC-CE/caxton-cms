@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
-import { AlertTriangle, Check, ChevronDown, CloudUpload, Code, Copy, Database, ExternalLink, EyeOff, HelpCircle, Image, Info, Laptop, Link, Unlink, Loader2, MapPin, Monitor, Pencil, Plus, Redo2, RefreshCw, Save, Search, Settings, Smartphone, Trash2, Undo2, Upload, Video, X } from "lucide-react";
-import { IconGitBranch, IconTargetArrow, IconFileCode, IconPencil, IconX, IconShieldCheck, IconShoppingCart } from "@tabler/icons-react";
+import { AlertTriangle, Check, ChevronDown, CloudUpload, Code, Copy, Database, ExternalLink, EyeOff, HelpCircle, Image, Info, Link, Unlink, Loader2, Pencil, Plus, Redo2, RefreshCw, Save, Search, Settings, Trash2, Undo2, Upload, Video, X } from "lucide-react";
+import { IconGitBranch, IconTargetArrow, IconFileCode, IconPencil, IconX, IconShieldCheck, IconShoppingCart, IconClick } from "@tabler/icons-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { BindingConfirmDialog } from "./BindingConfirmDialog";
 import { getIcon } from "@/lib/icons";
@@ -68,6 +68,11 @@ import {
 import { FaqItemsPicker } from "./FaqItemsPicker";
 import { FaqSectionEditorField } from "./FaqSectionEditorField";
 import { ListCardsSectionEditorField } from "./ListCardsSectionEditorField";
+import { FormAppearanceEditorField } from "./FormAppearanceEditorField";
+import {
+  resolveFormAppearanceAnchor,
+  splitFormAppearanceEntries,
+} from "@shared/form-appearance";
 import type { ListCardsPreviewItem } from "./ListCardsItemsPicker";
 import { normalizeListingSearchConfig, type ListingDynamicMeta } from "@shared/listing-search-config";
 import { SchemaOrgSectionEditorField } from "./SchemaOrgSectionEditorField";
@@ -77,7 +82,20 @@ import { ReplaceBindingModal } from "./ReplaceBindingModal";
 import { VariableTypeChooserModal } from "./VariableTypeChooserModal";
 import { SingleVariablePickerModal } from "./SingleVariablePickerModal";
 import { VariableDetailModal } from "./VariableDetailModal";
-import { SearchableMultiSelect } from "@/components/ui/searchable-multi-select";
+import {
+  FormLocationBox,
+  locationSlugsFromFormConfig,
+  nextFormLocationConfig,
+  type FormLocationPendingSelection,
+} from "@/components/editing/FormLocationBox";
+import { SectionVisibilityCard } from "@/components/editing/SectionVisibilityCard";
+import { resolveBoundFormSettingsPath } from "@shared/wipeOnDuplicate";
+import {
+  formSetsLocation,
+  pageLocationValues,
+  parseFormLocationPolicy,
+} from "@shared/formLocationPolicy";
+import { Checkbox } from "@/components/ui/checkbox";
 import { RichTextArea } from "./RichTextArea";
 import { MarkdownEditorField } from "./MarkdownEditorField";
 import { SectionBindingDialog } from "./SectionBindingDialog";
@@ -85,7 +103,6 @@ import { SectionYamlContentFields } from "./SectionYamlContentFields.tsx";
 import { LinkPicker } from "./LinkPicker";
 import { ImageWithStylePicker } from "./ImageWithStylePicker";
 import type { Section, SectionLayout, ImageRegistry } from "@shared/schema";
-import { locations as allLocations, getLocationBySlug } from "@/lib/locations";
 import type { Location } from "@shared/session";
 import { Badge } from "@/components/ui/badge";
 import { normalizeFaqEntries, resolveFaqHardcodedEntries, resolveFaqSearchPhrase } from "@/lib/faqConstants";
@@ -118,6 +135,13 @@ import { ConsentCard } from "./ConsentCard";
 import type { ConsentValues } from "./ConsentCard";
 import { WebhookCard, type WebhookSource } from "./WebhookCard";
 import { SuccessCard } from "./SuccessCard";
+import {
+  ConditionalRulesCard,
+  countRulesChangingAnyKey,
+  countRulesChangingKey,
+  type FormOverrideRule,
+} from "./ConditionalRulesCard";
+import { OverrideRulesBadge } from "./OverrideRulesBadge";
 import { RequireSignupCard } from "./RequireSignupCard";
 import { applyRawValuesAtPaths } from "./applyRawValueAtPath";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -147,9 +171,19 @@ import {
   joinFormSettingsPath,
   normalizeFormSettingsPath,
 } from "@shared/joinFormSettingsPath";
-import { collectExtraConsentYamlFields, consentCardChannels, parseConsentSettingsResponse } from "@shared/consent-settings";
+import {
+  collectExtraConsentYamlFields,
+  consentCardChannels,
+  eventConsentToCardValues,
+  parseConsentSettingsResponse,
+} from "@shared/consent-settings";
 import { resolveBoundCtaPaths } from "@shared/validateCtaTracking";
 import { showEcommerceEditorTab } from "@shared/wipeOnDuplicate";
+import {
+  resolveMicroTabState,
+  type MicroEventsMap,
+} from "@shared/micro-events";
+import { detectSectionVideoKind } from "@shared/section-video-kind";
 
 function safeYamlLoad(yamlStr: string): unknown {
   const { escaped, map } = escapeTemplateVars(yamlStr);
@@ -346,105 +380,6 @@ interface SectionEditorPanelProps {
   allowEntryStructuralOverrides?: boolean;
 }
 
-interface ShowOnPickerProps {
-  value: string;
-  onChange: (value: string) => void;
-}
-
-function ShowOnPicker({ value, onChange }: ShowOnPickerProps) {
-  const options = [
-    { id: "all", label: "Both", icon: Laptop },
-    { id: "desktop", label: "Desktop", icon: Monitor },
-    { id: "mobile", label: "Mobile", icon: Smartphone },
-  ];
-
-  const currentValue = value || "all";
-
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <Label className="text-sm font-medium whitespace-nowrap">Show on</Label>
-      <div className="flex rounded-md border border-border overflow-hidden">
-        {options.map((option) => {
-          const Icon = option.icon;
-          const isSelected = currentValue === option.id;
-          return (
-            <button
-              key={option.id}
-              type="button"
-              onClick={() => onChange(option.id === "all" ? "" : option.id)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-sm transition-colors ${
-                isSelected
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-transparent text-muted-foreground hover:bg-muted"
-              } ${option.id !== "all" ? "border-l border-border" : ""}`}
-              data-testid={`props-showon-${option.id}`}
-            >
-              <Icon className="h-4 w-4" />
-              <span>{option.label}</span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function countryCodeToFlag(code: string): string {
-  return code
-    .toUpperCase()
-    .split("")
-    .map((c) => String.fromCodePoint(0x1f1e6 + c.charCodeAt(0) - 65))
-    .join("");
-}
-
-interface ShowOnLocationsPickerProps {
-  value: string[];
-  onChange: (value: string[]) => void;
-}
-
-function ShowOnLocationsPicker({
-  value,
-  onChange,
-}: ShowOnLocationsPickerProps) {
-  const options = allLocations
-    .filter((loc) => loc.visibility === "listed")
-    .map((loc) => ({
-      value: loc.slug,
-      label: `${loc.name}, ${loc.country}`,
-      group: loc.region,
-      prefix: (
-        <span className="text-base leading-none">
-          {countryCodeToFlag(loc.country_code)}
-        </span>
-      ),
-      badgeLabel: loc.name,
-      searchTerms: [loc.slug, loc.country],
-    }));
-
-  return (
-    <SearchableMultiSelect
-      options={options}
-      value={value}
-      onChange={onChange}
-      label={
-        <>
-          <MapPin className="h-3.5 w-3.5" />
-          Show on locations
-        </>
-      }
-      searchPlaceholder="Search locations..."
-      groupLabels={{
-        "usa-canada": "USA & Canada",
-        latam: "Latin America",
-        europe: "Europe",
-        online: "Online",
-      }}
-      testIdPrefix="location"
-      emptyMessage="No locations found"
-    />
-  );
-}
-
 interface VariantPickerProps {
   value: string;
   onChange: (value: string) => void;
@@ -630,6 +565,13 @@ export function SectionEditorPanel({
   const [activeTab, setActiveTab] = useState("code");
   const [scopeDialogOpen, setScopeDialogOpen] = useState(false);
   const [templateSaveConfirmOpen, setTemplateSaveConfirmOpen] = useState(false);
+  const [formLocationPending, setFormLocationPending] = useState<FormLocationPendingSelection | null>(null);
+  const [locationScopeDialogOpen, setLocationScopeDialogOpen] = useState(false);
+  const [locationScopeClearOthers, setLocationScopeClearOthers] = useState(true);
+  /** After a successful whole-page location write in this Save, skip form-locale sync. */
+  const formLocationPageWriteDoneRef = useRef(false);
+  /** YAML to save after page location write (setState may not flush before executeSave). */
+  const yamlContentForSaveRef = useRef<string | null>(null);
   /** Cleared `{{ entry.* }}` paths approved via the shared-template confirm. */
   const [pendingClearedTemplatePaths, setPendingClearedTemplatePaths] = useState<string[]>([]);
   /** Unbound paths → static literals for shared-template save confirm. */
@@ -772,7 +714,6 @@ export function SectionEditorPanel({
   const [bindingConfirmOpen, setBindingConfirmOpen] = useState(false);
   const [exampleDialogOpen, setExampleDialogOpen] = useState(false);
   const [exampleCopied, setExampleCopied] = useState(false);
-  const [locationsPickerOpen, setLocationsPickerOpen] = useState(false);
   const [conversionNameEditing, setConversionNameEditing] = useState(false);
   const [newConversionEventConfirmOpen, setNewConversionEventConfirmOpen] = useState(false);
   const [tocShareApplying, setTocShareApplying] = useState(false);
@@ -2417,6 +2358,16 @@ export function SectionEditorPanel({
     queryKey: ["/api/component-registry/field-editors"],
   });
 
+  type MicroEventsCatalogEntry =
+    | { status: "ok"; map: MicroEventsMap }
+    | { status: "error"; error: string }
+    | { status: "missing" };
+
+  const { data: allMicroEvents } = useQuery<Record<string, MicroEventsCatalogEntry>>({
+    queryKey: ["/api/component-registry/micro-events"],
+    staleTime: 60000,
+  });
+
   const { data: themeConfig } = useQuery<{
     button_variants?: { id: string; label: string }[];
     fontSizes?: { id: string; label: string; value: string; tailwind: string }[];
@@ -2469,6 +2420,53 @@ export function SectionEditorPanel({
     return globalPath;
   })();
 
+  // Other forms on this page that set their own location (offered for clearing on "Whole page").
+  const otherFormLocationOverrideIndexes = useMemo(() => {
+    const out: number[] = [];
+    (allSections ?? []).forEach((raw, i) => {
+      if (i === sectionIndex || !raw || typeof raw !== "object") return;
+      const sec = raw as Record<string, unknown>;
+      const editors = (allFieldEditors?.[String(sec.type ?? "")] ?? {}) as Record<string, string>;
+      const path = resolveBoundFormSettingsPath(editors, typeof sec.variant === "string" ? sec.variant : undefined);
+      if (path == null) return;
+      const form = path ? getValueAtFieldPath(sec, path) : sec;
+      if (form && typeof form === "object" && formSetsLocation(form as Record<string, unknown>)) out.push(i);
+    });
+    return out;
+  }, [allSections, allFieldEditors, sectionIndex]);
+
+  const { data: formLocationTypeConfig } = useQuery<Record<string, unknown>>({
+    queryKey: [`/api/content-types/${contentType}/config`],
+    enabled: !!contentType,
+    staleTime: 5 * 60 * 1000,
+  });
+  const formLocationPolicy = parseFormLocationPolicy(formLocationTypeConfig);
+  const formLocationEntryField = formLocationPolicy?.entryField ?? null;
+
+  const formLocationFormLabels = useMemo(() => {
+    const labels: Array<{ index: number; label: string; overrides: boolean }> = [];
+    (allSections ?? []).forEach((raw, i) => {
+      if (!raw || typeof raw !== "object") return;
+      const sec = raw as Record<string, unknown>;
+      const editors = (allFieldEditors?.[String(sec.type ?? "")] ?? {}) as Record<string, string>;
+      const path = resolveBoundFormSettingsPath(editors, typeof sec.variant === "string" ? sec.variant : undefined);
+      if (path == null) return;
+      const form = (path ? getValueAtFieldPath(sec, path) : sec) as Record<string, unknown> | undefined;
+      if (!form || typeof form !== "object") return;
+      const conv =
+        typeof form.conversion_name === "string" && form.conversion_name.trim()
+          ? form.conversion_name.trim()
+          : null;
+      const type = String(sec.type ?? "form");
+      labels.push({
+        index: i,
+        label: conv ?? `${type} · section ${i + 1}`,
+        overrides: formSetsLocation(form),
+      });
+    });
+    return labels;
+  }, [allSections, allFieldEditors]);
+
   const sectionFieldEditors = allFieldEditors?.[sectionType] || {};
   const currentEditorVariant = (parsedSection as Record<string, unknown>)?.variant as
     | string
@@ -2490,6 +2488,15 @@ export function SectionEditorPanel({
   const showFormsTab = formSettingsPath !== null;
   const showEcommerceTab = showEcommerceEditorTab(sectionFieldEditors, currentEditorVariant);
 
+  const microEntry = allMicroEvents?.[sectionType];
+  const videoKind = detectSectionVideoKind(parsedSection);
+  const {
+    microBroken,
+    microActiveRows,
+    showYoutubeMicroWarning,
+    showMicroTab,
+  } = resolveMicroTabState(microEntry, currentEditorVariant, videoKind);
+
   useEffect(() => {
     if (activeTab === "ecommerce" && !showEcommerceTab) {
       setActiveTab("props");
@@ -2497,8 +2504,12 @@ export function SectionEditorPanel({
     }
     if (activeTab === "conversion" && !showFormsTab) {
       setActiveTab("props");
+      return;
     }
-  }, [activeTab, showEcommerceTab, showFormsTab]);
+    if (activeTab === "micro" && !showMicroTab) {
+      setActiveTab("props");
+    }
+  }, [activeTab, showEcommerceTab, showFormsTab, showMicroTab]);
 
   const { data: ecommerceProductsData } = useQuery<{
     products: Array<{
@@ -2513,10 +2524,28 @@ export function SectionEditorPanel({
     staleTime: 60000,
     enabled: showEcommerceTab,
   });
-  const editorTabCount = 2 + (showFormsTab ? 1 : 0) + (showEcommerceTab ? 1 : 0);
+  const editorTabCount =
+    2 + (showFormsTab ? 1 : 0) + (showEcommerceTab ? 1 : 0) + (showMicroTab ? 1 : 0);
 
   // Join helper: "" means form settings at section root (lead_form).
   const formProp = (relative: string) => joinFormSettingsPath(formSettingsPath, relative);
+
+  const formOverridesRules: FormOverrideRule[] = (() => {
+    if (formSettingsPath == null || !parsedSection) return [];
+    const formNode =
+      formSettingsPath === ""
+        ? parsedSection
+        : getValueAtFieldPath(parsedSection, formSettingsPath);
+    if (!formNode || typeof formNode !== "object" || Array.isArray(formNode)) return [];
+    const overrides = (formNode as Record<string, unknown>).form_overrides;
+    return Array.isArray(overrides) ? (overrides as FormOverrideRule[]) : [];
+  })();
+
+  const scrollToFormRules = () => {
+    document
+      .getElementById("card-conditional-rules-anchor")
+      ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  };
 
   /** Nested form-settings may be absent (CTA-only). Root bind always has a form object (the section). */
   const boundFormObjectPresent = (() => {
@@ -2557,7 +2586,7 @@ export function SectionEditorPanel({
   })();
 
   // Get configured fields for current section type, filtering by variant
-  const configuredFields = (() => {
+  const variantFieldEditors = (() => {
     const rawFields = allFieldEditors?.[sectionType] || {};
     const result: Record<string, EditorType> = {};
 
@@ -2583,6 +2612,40 @@ export function SectionEditorPanel({
     }
 
     return result;
+  })();
+
+  // form-appearance keys render only inside the Form box, never as loose Props rows.
+  const {
+    entries: formAppearanceEntries,
+    rest: configuredFields,
+    unknown: unknownFormAppearanceTags,
+  } = splitFormAppearanceEntries(variantFieldEditors);
+
+  useEffect(() => {
+    if (import.meta.env.DEV && unknownFormAppearanceTags.length > 0) {
+      console.warn("unknown form-appearance roles", unknownFormAppearanceTags);
+    }
+  }, [unknownFormAppearanceTags.join("|")]);
+
+  const formAppearanceAnchor = resolveFormAppearanceAnchor(
+    formAppearanceEntries.map((e) => e.path),
+    formSettingsPath,
+  );
+  const formAppearancePresent = (() => {
+    if (formAppearanceAnchor === "") return true;
+    const node = getValueAtFieldPath(parsedSection, formAppearanceAnchor);
+    return node != null && typeof node === "object" && !Array.isArray(node);
+  })();
+  const formAppearanceIsAuth = (() => {
+    if (formSettingsPath == null || !boundFormObjectPresent) return false;
+    if (getValueAtFieldPath(parsedSection, formProp("is_signup")) === true) return true;
+    const conversionName = getValueAtFieldPath(parsedSection, formProp("conversion_name"));
+    if (typeof conversionName !== "string" || !conversionName) return false;
+    const authCfg = parseAuthConversionEventConfig(
+      (trackingSettings ?? {}) as Record<string, unknown>,
+    );
+    const kind = resolveAuthConversionKind(conversionName, authCfg);
+    return kind === "signup" || kind === "login";
   })();
 
   // Render icon from name using shared icon utility
@@ -2623,14 +2686,18 @@ export function SectionEditorPanel({
     warning?: string;
     shared_template_html_cache?: string;
     link_warning?: string;
+    fact_literal_warning?: string;
   }> => {
     if (!contentType || !slug || !locale) {
       return { success: false };
     }
 
+    const yamlToSave = yamlContentForSaveRef.current ?? yamlContent;
+    yamlContentForSaveRef.current = null;
+
     let parsed: Section;
     try {
-      parsed = safeYamlLoad(yamlContent) as Section;
+      parsed = safeYamlLoad(yamlToSave) as Section;
       if (!parsed || typeof parsed !== "object") {
         setParseError("Invalid section structure");
         return { success: false };
@@ -2698,19 +2765,99 @@ export function SectionEditorPanel({
             "Server did not return updated section, using local parsed data",
           );
         }
+        const savedSection = (confirmedSection || parsed) as Record<string, unknown>;
         onUpdate(
           mergeSavedSectionForLivePreview(
             section as Record<string, unknown>,
-            (confirmedSection || parsed) as Record<string, unknown>,
+            savedSection,
           ) as Section,
         );
+
+        // Other languages: sync this form's location when it changed (this locale already saved).
+        // Skip when this Save already wrote page Locations (other locales handled there).
+        if (
+          formSettingsPath != null &&
+          boundFormObjectPresent &&
+          !formLocationPageWriteDoneRef.current
+        ) {
+          const locPath = formProp("fields.location");
+          const nextLoc = getValueAtFieldPath(savedSection, locPath);
+          let prevLoc: unknown;
+          try {
+            const initial = safeYamlLoad(initialYamlRef.current ?? "") as Record<string, unknown> | null;
+            prevLoc =
+              initial && typeof initial === "object"
+                ? getValueAtFieldPath(initial, locPath)
+                : undefined;
+          } catch {
+            prevLoc = undefined;
+          }
+          const nextSlugs = locationSlugsFromFormConfig(nextLoc);
+          const prevSlugs = locationSlugsFromFormConfig(prevLoc);
+          const locationChanged =
+            nextSlugs.join(",") !== prevSlugs.join(",") ||
+            (prevLoc != null && nextLoc == null) ||
+            (prevLoc == null && nextLoc != null);
+          if (locationChanged) {
+            try {
+              const sectionId =
+                typeof savedSection.section_id === "string"
+                  ? savedSection.section_id
+                  : typeof (savedSection as { id?: unknown }).id === "string"
+                    ? ((savedSection as { id: string }).id)
+                    : null;
+              const res = await apiRequest("POST", "/api/content/form-location", {
+                contentType,
+                slug,
+                locale,
+                ...(effectiveVariant ? { variant: effectiveVariant } : {}),
+                scope: "form",
+                locations: nextSlugs,
+                section: {
+                  index: sectionIndex,
+                  type: String(savedSection.type ?? sectionType ?? ""),
+                  id: sectionId,
+                },
+              });
+              const out = (await res.json()) as {
+                updated_locales?: string[];
+                unmatched_locales?: string[];
+              };
+              const updated = out.updated_locales ?? [];
+              const unmatched = out.unmatched_locales ?? [];
+              if (updated.length || unmatched.length) {
+                toast({
+                  title: "Form location saved",
+                  description: [
+                    updated.length ? `Also updated: ${updated.join(", ")}.` : "",
+                    unmatched.length
+                      ? `Couldn't find this form in: ${unmatched.join(", ")} — set it there by hand.`
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" "),
+                });
+              }
+            } catch (err) {
+              toast({
+                title: "Could not update form location in other languages",
+                description: String(err),
+                variant: "destructive",
+              });
+            }
+          }
+        }
+
         setHasChanges(false);
         setPendingClearedTemplatePaths([]);
         setPendingUnboundTemplateDetails([]);
         sessionUnboundPathsRef.current = new Set();
+        setFormLocationPending(null);
+        formLocationPageWriteDoneRef.current = false;
 
         // Update initial state reference so next undo session starts from saved state
-        initialYamlRef.current = yamlContent;
+        initialYamlRef.current = yamlToSave;
+        if (yamlToSave !== yamlContent) setYamlContent(yamlToSave);
 
         // Shared-template editor loads YAML from a cached query — refresh so
         // reopening the editor shows what was actually written to the template.
@@ -2719,12 +2866,18 @@ export function SectionEditorPanel({
         // Emit event to trigger page refresh
         emitContentUpdated({ contentType, slug, locale });
 
+        const factMsgs = Array.isArray(result.fact_literal_warnings)
+          ? result.fact_literal_warnings
+              .map((w) => (w && typeof w.message === "string" ? w.message : ""))
+              .filter(Boolean)
+          : [];
         // Return warning if present (for GitHub sync failures)
         return {
           success: true,
           warning: result.warning,
           shared_template_html_cache: result.shared_template_html_cache,
           link_warning: linkWarningsToastText(result.link_warnings) ?? undefined,
+          fact_literal_warning: factMsgs.length ? factMsgs.slice(0, 3).join(" ") : undefined,
         };
       } else if (result.code === BROKEN_INTERNAL_LINKS_CODE && result.broken_internal_links?.length) {
         setBrokenLinks(result.broken_internal_links);
@@ -2851,13 +3004,20 @@ export function SectionEditorPanel({
   };
 
   // Save without closing editor
-  const executeSave = async () => {
+  const executeSave = async (): Promise<{ success: boolean }> => {
     const result = await saveToServer();
-    if (result && result.success) {
+    const ok = !!(result && result.success);
+    if (ok) {
       if (result.link_warning) {
         toast({
           title: "Check the links on this page",
           description: result.link_warning,
+        });
+      }
+      if (result.fact_literal_warning) {
+        toast({
+          title: "Prefer a site variable for this number",
+          description: result.fact_literal_warning,
         });
       }
       if (result.warning) {
@@ -2879,7 +3039,16 @@ export function SectionEditorPanel({
           description: "Your section has been updated successfully.",
         });
       }
+    } else if (formLocationPageWriteDoneRef.current) {
+      toast({
+        title: "Page locations saved, but this section did not save",
+        description:
+          "The page Locations field was updated. Fix the section error and Save again (location scope will not re-ask unless you change locations).",
+        variant: "destructive",
+      });
+      formLocationPageWriteDoneRef.current = false;
     }
+    return { success: ok };
   };
 
   // Save section only for this specific DB entry (per-entry override)
@@ -2940,25 +3109,19 @@ export function SectionEditorPanel({
     }
   };
 
-  const handleSave = async () => {
+  const continueSaveAfterLocationScope = async () => {
     const isPerEntrySection = !!(section as Record<string, unknown>)._perEntrySource;
     if (isSharedTemplate && singleEntry && !isPerEntrySection) {
       if (!allowEntryStructuralOverrides) {
-        // Attached shared-layout: only template saves — confirm blast radius first
         openSharedTemplateConfirm();
         return;
       }
-      // Skip the scope dialog when previewing a variant — destination is already the variant file.
       const _vp = new URLSearchParams(window.location.search);
       const inVariantPreview = !!(_vp.get("force_variant") || _vp.get("variant"));
       if (!inVariantPreview) {
-        // On a DB entry page with a shared-template section: ask scope first.
-        // Binding confirmation (if needed) is handled inside the scope dialog's
-        // "Update shared template" branch.
         setScopeDialogOpen(true);
         return;
       }
-      // Variant preview: still confirm when unbinding template fields.
       const cleared = computeClearedTemplatePaths();
       const unbound = computeUnboundTemplateDetails();
       if (cleared.length > 0 || unbound.length > 0) {
@@ -2967,13 +3130,138 @@ export function SectionEditorPanel({
         setTemplateSaveConfirmOpen(true);
         return;
       }
-      // Fall through to executeSave, which writes to the variant template.
     }
     if (boundSiblings.length > 0) {
       setBindingConfirmOpen(true);
       return;
     }
     await executeSave();
+  };
+
+  const writeFormLocationPage = async (locations: string[]) => {
+    if (!contentType || !slug || !locale) return false;
+    const _urlParams = new URLSearchParams(window.location.search);
+    const draft =
+      _urlParams.get("force_variant") || _urlParams.get("variant") || variant || null;
+    try {
+      const res = await apiRequest("POST", "/api/content/form-location", {
+        contentType,
+        slug,
+        locale,
+        ...(draft ? { variant: draft } : {}),
+        scope: "page",
+        locations,
+        clearOverrideIndexes: locationScopeClearOthers ? otherFormLocationOverrideIndexes : [],
+      });
+      const out = (await res.json()) as { cleared_overrides?: number };
+
+      // Clear this form's override so it follows the page; flush YAML for the upcoming section Save.
+      if (formSettingsPath != null) {
+        try {
+          const parsed = safeYamlLoad(yamlContent) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            applyRawValuesAtPaths(parsed, {
+              [formProp("fields.location")]: nextFormLocationConfig(
+                getValueAtFieldPath(parsed, formProp("fields.location")),
+                [],
+              ),
+              [formProp("locations")]: undefined,
+            });
+            const newYaml = safeYamlDump(parsed, {
+              lineWidth: -1,
+              noRefs: true,
+              quotingType: '"',
+            });
+            setYamlContent(newYaml);
+            yamlContentForSaveRef.current = newYaml;
+            setHasChanges(true);
+            if (onPreviewChange) onPreviewChange(parsed as Section);
+          }
+        } catch (err) {
+          console.error("Error clearing form location after page write:", err);
+        }
+      }
+
+      formLocationPageWriteDoneRef.current = true;
+      setFormLocationPending(null);
+      emitContentUpdated({ contentType, slug, locale });
+      toast({
+        title: draft ? "Page locations saved in this draft" : "Page locations saved",
+        description: [
+          draft
+            ? "Goes live for every language when the draft is published."
+            : locations.length
+              ? "Every form on this page without its own location uses it now."
+              : "Page Locations were cleared.",
+          out.cleared_overrides ? `Cleared ${out.cleared_overrides} form override(s).` : "",
+        ]
+          .filter(Boolean)
+          .join(" "),
+      });
+      return true;
+    } catch (err) {
+      toast({
+        title: "Could not save page locations",
+        description: String(err),
+        variant: "destructive",
+      });
+      return false;
+    }
+  };
+
+  const handleSave = async () => {
+    formLocationPageWriteDoneRef.current = false;
+
+    // Location scope first (before shared-template / binding dialogs) when the
+    // content type has a page Locations field and locations changed.
+    if (formSettingsPath != null && boundFormObjectPresent && formLocationEntryField) {
+      const locPath = formProp("fields.location");
+      let prevLoc: unknown;
+      try {
+        const initial = safeYamlLoad(initialYamlRef.current ?? "") as Record<string, unknown> | null;
+        prevLoc =
+          initial && typeof initial === "object" ? getValueAtFieldPath(initial, locPath) : undefined;
+      } catch {
+        prevLoc = undefined;
+      }
+      const prevFormSlugs = locationSlugsFromFormConfig(prevLoc);
+      const pageVals = pageLocationValues(singleEntry, formLocationEntryField);
+      const pending = formLocationPending;
+
+      const baselineSlugs =
+        pending?.baselineLayer === "entry"
+          ? pending.baselinePageValues
+          : pending?.baselineLayer === "form"
+            ? prevFormSlugs
+            : prevFormSlugs.length
+              ? prevFormSlugs
+              : pageVals;
+      const nextSlugs = pending
+        ? pending.locations
+        : locationSlugsFromFormConfig(getValueAtFieldPath(parsedSection, locPath));
+
+      const locationChanged =
+        nextSlugs.join("\0") !== baselineSlugs.join("\0") ||
+        (pending == null &&
+          (prevLoc != null) !==
+            (getValueAtFieldPath(parsedSection, locPath) != null) &&
+          prevFormSlugs.join("\0") !== nextSlugs.join("\0"));
+
+      // Follow the page / clear form override only: no scope dialog.
+      const followPageOnly =
+        pending != null &&
+        pending.locations.length === 0 &&
+        pending.baselineLayer === "form" &&
+        (pending.baselinePageValues.length > 0 || pageVals.length > 0);
+
+      if (locationChanged && !followPageOnly) {
+        setLocationScopeClearOthers(true);
+        setLocationScopeDialogOpen(true);
+        return;
+      }
+    }
+
+    await continueSaveAfterLocationScope();
   };
 
   // Handle close with unsaved changes warning
@@ -3223,11 +3511,13 @@ export function SectionEditorPanel({
       >
         <ToggleButtonBarList
           className={`grid w-full rounded-none border-x-0 border-t-0 ${
-            editorTabCount === 4
-              ? "grid-cols-4"
-              : editorTabCount === 3
-                ? "grid-cols-3"
-                : "grid-cols-2"
+            editorTabCount >= 5
+              ? "grid-cols-5"
+              : editorTabCount === 4
+                ? "grid-cols-4"
+                : editorTabCount === 3
+                  ? "grid-cols-3"
+                  : "grid-cols-2"
           }`}
         >
           <ToggleButtonBarTrigger value="code" className="gap-1.5" data-testid="tab-code">
@@ -3260,6 +3550,16 @@ export function SectionEditorPanel({
             >
               <IconShoppingCart className="h-3.5 w-3.5" />
               Ecommerce
+            </ToggleButtonBarTrigger>
+          )}
+          {showMicroTab && (
+            <ToggleButtonBarTrigger
+              value="micro"
+              className="gap-1.5"
+              data-testid="tab-micro"
+            >
+              <IconClick className="h-3.5 w-3.5" />
+              Micro
             </ToggleButtonBarTrigger>
           )}
         </ToggleButtonBarList>
@@ -3377,15 +3677,13 @@ export function SectionEditorPanel({
               </div>
             )}
 
-            <ShowOnLocationsPicker
-              value={currentShowOnLocations}
-              onChange={(value) =>
+            <SectionVisibilityCard
+              showOn={currentShowOn}
+              showOnLocations={currentShowOnLocations}
+              onShowOnChange={(value) => updateProperty("showOn", value)}
+              onShowOnLocationsChange={(value) =>
                 updateArrayProperty("showOnLocations", value)
               }
-            />
-            <ShowOnPicker
-              value={currentShowOn}
-              onChange={(value) => updateProperty("showOn", value)}
             />
 
             {(
@@ -3576,6 +3874,7 @@ export function SectionEditorPanel({
                         { id: "primary", label: "Primary" },
                         { id: "secondary", label: "Secondary" },
                         { id: "outline", label: "Outline" },
+                        { id: "accent", label: "Accent" },
                       ]}
                     />
                   </div>
@@ -3913,6 +4212,34 @@ export function SectionEditorPanel({
               saveAs="id"
               testIdPrefix="props-background"
             />
+            {formAppearanceEntries.length > 0 && (
+              <div className="mt-3">
+                <FormAppearanceEditorField
+                  entries={formAppearanceEntries}
+                  section={parsedSection as Record<string, unknown> | null}
+                  onChange={(path, value) => updatePropertyWithValue(path, value)}
+                  onChangeMany={updatePropertiesWithValues}
+                  onPickIcon={(path, label, currentIcon) => {
+                    setIconPickerTarget({
+                      arrayField: "",
+                      index: 0,
+                      field: path,
+                      label,
+                      currentIcon,
+                      simpleFieldPath: path,
+                    });
+                    setIconPickerOpen(true);
+                  }}
+                  formPresent={formAppearancePresent}
+                  formPath={formSettingsPath}
+                  formObjectPresent={boundFormObjectPresent}
+                  isAuthForm={formAppearanceIsAuth}
+                  locale={locale}
+                  allSections={allSections}
+                  data-testid="props-form-appearance"
+                />
+              </div>
+            )}
             {/* Render top-level (non-array) color-picker field editors */}
             {Object.entries(configuredFields)
               .filter(([fieldPath, editorTypeRaw]) => {
@@ -4154,6 +4481,8 @@ export function SectionEditorPanel({
                     fieldPath === "video.url");
                 const currentOpenModalOnClick = getVideoSiblingValue("open_modal_on_click");
                 const openModalChecked = currentOpenModalOnClick !== false;
+                const currentShowControlsOnAutoplay =
+                  getVideoSiblingValue("show_controls_on_autoplay") === true;
                 const currentOverlayOnMuted = getVideoSiblingValue("overlay_on_muted");
                 const overlayEnabled =
                   currentOverlayOnMuted != null && typeof currentOverlayOnMuted === "object";
@@ -4399,6 +4728,7 @@ export function SectionEditorPanel({
                                       updatePropertiesWithValues({
                                         [parentPrefix + "autoplay"]: undefined,
                                         [parentPrefix + "overlay_on_muted"]: undefined,
+                                        [parentPrefix + "show_controls_on_autoplay"]: undefined,
                                       });
                                     }
                                   }}
@@ -4407,6 +4737,25 @@ export function SectionEditorPanel({
                               </div>
                               {currentAutoplay === true && (
                                 <div className="space-y-3 rounded-md border border-border bg-muted/40 p-3">
+                                  <div className="space-y-1">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <Label className="text-sm">Show controls on autoplay</Label>
+                                      <Switch
+                                        checked={currentShowControlsOnAutoplay}
+                                        onCheckedChange={(checked) =>
+                                          updatePropertyWithValue(
+                                            parentPrefix + "show_controls_on_autoplay",
+                                            checked ? true : undefined,
+                                          )
+                                        }
+                                        data-testid={`props-video-${fieldLabel}-show-controls-autoplay`}
+                                      />
+                                    </div>
+                                    <p className="text-xs text-muted-foreground pr-12">
+                                      Local files only (.mp4, .webm, …). Shows the native player bar
+                                      while autoplaying. Does not apply to YouTube.
+                                    </p>
+                                  </div>
                                   <div className="flex items-center justify-between gap-2">
                                     <div className="min-w-0 space-y-0.5">
                                       <Label className="text-sm">Muted overlay</Label>
@@ -6554,6 +6903,14 @@ export function SectionEditorPanel({
                 }
 
                 if (isSimpleField && editorType === "string-picker") {
+                  // Writing a nested form prop would create an empty form object that save rejects.
+                  if (
+                    formSettingsPath &&
+                    !boundFormObjectPresent &&
+                    fieldPath.startsWith(`${formSettingsPath}.`)
+                  ) {
+                    return null;
+                  }
                   const parsedOptions = variant ? parseStringPickerOptions(variant) : [];
                   const options = parsedOptions.map((o) => o.value);
                   const getSimpleStringValue = () => {
@@ -8072,6 +8429,9 @@ export function SectionEditorPanel({
                             parentPrefix + "open_modal_on_click",
                           );
                           const openModalChecked = currentOpenModalOnClick !== false;
+                          const currentShowControlsOnAutoplay =
+                            resolveNestedValue(item, parentPrefix + "show_controls_on_autoplay") ===
+                            true;
                           const currentOverlayOnMuted = resolveNestedValue(
                             item,
                             parentPrefix + "overlay_on_muted",
@@ -8312,6 +8672,8 @@ export function SectionEditorPanel({
                                                 updateArrayItemFieldsRaw(arrayPath, index, {
                                                   [parentPrefix + "autoplay"]: undefined,
                                                   [parentPrefix + "overlay_on_muted"]: undefined,
+                                                  [parentPrefix + "show_controls_on_autoplay"]:
+                                                    undefined,
                                                 });
                                               }
                                             }}
@@ -8320,6 +8682,30 @@ export function SectionEditorPanel({
                                         </div>
                                         {currentAutoplay === true && (
                                           <div className="space-y-3 rounded-md border border-border bg-muted/40 p-3">
+                                            <div className="space-y-1">
+                                              <div className="flex items-center justify-between gap-2">
+                                                <Label className="text-sm">
+                                                  Show controls on autoplay
+                                                </Label>
+                                                <Switch
+                                                  checked={currentShowControlsOnAutoplay}
+                                                  onCheckedChange={(checked) =>
+                                                    updateArrayItemField(
+                                                      arrayPath,
+                                                      index,
+                                                      parentPrefix + "show_controls_on_autoplay",
+                                                      checked ? true : undefined,
+                                                    )
+                                                  }
+                                                  data-testid={`props-video-${arrayFieldLabel}-${index}-show-controls-autoplay`}
+                                                />
+                                              </div>
+                                              <p className="text-xs text-muted-foreground pr-12">
+                                                Local files only (.mp4, .webm, …). Shows the native
+                                                player bar while autoplaying. Does not apply to
+                                                YouTube.
+                                              </p>
+                                            </div>
                                             <div className="flex items-center justify-between gap-2">
                                               <div className="min-w-0 space-y-0.5">
                                                 <Label className="text-sm">Muted overlay</Label>
@@ -8635,6 +9021,9 @@ export function SectionEditorPanel({
                   >
                     <p className="text-sm text-amber-800 dark:text-amber-200">
                       This form looks incomplete (conversion name or form data without fields). Clear orphaned form data, or add fields.
+                      {formOverridesRules.length > 0
+                        ? ` This will also remove ${formOverridesRules.length} form rule(s).`
+                        : ""}
                     </p>
                     <Button
                       type="button"
@@ -8642,6 +9031,15 @@ export function SectionEditorPanel({
                       variant="outline"
                       data-testid="button-clear-form"
                       onClick={() => {
+                        const ruleCount = formOverridesRules.length;
+                        if (
+                          ruleCount > 0 &&
+                          !window.confirm(
+                            `Clear this form and remove ${ruleCount} rule(s) that change it?`,
+                          )
+                        ) {
+                          return;
+                        }
                         if (formSettingsPath === "" || formSettingsPath == null) {
                           updatePropertiesWithValues({
                             conversion_name: undefined,
@@ -8663,6 +9061,34 @@ export function SectionEditorPanel({
                   </div>
                 );
               })()}
+              <FormLocationBox
+                contentType={contentType ?? ""}
+                slug={slug ?? ""}
+                locale={locale ?? ""}
+                variant={variant ?? null}
+                section={{
+                  index: sectionIndex,
+                  id:
+                    typeof (parsedSection as Record<string, unknown> | null)?.section_id === "string"
+                      ? ((parsedSection as Record<string, unknown>).section_id as string)
+                      : null,
+                  type: sectionType,
+                }}
+                formLocation={getValueAtFieldPath(parsedSection, formProp("fields.location"))}
+                singleEntry={singleEntry}
+                otherOverrideIndexes={otherFormLocationOverrideIndexes}
+                formOptions={formOptions}
+                formOptionsLoading={formOptionsLoading}
+                pendingSelection={formLocationPending}
+                onPendingSelectionChange={setFormLocationPending}
+                onFormLocationChange={(next) =>
+                  updatePropertiesWithValues({
+                    [formProp("fields.location")]: next,
+                    // Legacy Locations-box list (never read by the form).
+                    [formProp("locations")]: undefined,
+                  })
+                }
+              />
               {(() => {
                 const formNode =
                   formSettingsPath === ""
@@ -8725,6 +9151,10 @@ export function SectionEditorPanel({
                       : isOff
                         ? "Conversion tracking is off for this form."
                         : "GTM event fired on form submission. Must match a configured conversion event.";
+                const conversionRuleCount = countRulesChangingKey(
+                  formOverridesRules,
+                  "conversion_name",
+                );
                 return (
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
@@ -8735,30 +9165,37 @@ export function SectionEditorPanel({
                       >
                         Conversion goal
                       </Label>
-                      {(storedConversionName || isOff) && !showPicker && (
-                        <Button
-                          type="button"
-                          size="icon"
-                          variant="ghost"
-                          className="h-6 w-6"
-                          onClick={() => setConversionNameEditing(true)}
-                          data-testid="button-edit-conversion-name"
-                        >
-                          <IconPencil className="h-3.5 w-3.5" />
-                        </Button>
-                      )}
-                      {showPicker && (storedConversionName || isOff) && (
-                        <Button
-                          type="button"
-                          size="icon"
-                          variant="ghost"
-                          className="h-6 w-6"
-                          onClick={() => setConversionNameEditing(false)}
-                          data-testid="button-cancel-edit-conversion-name"
-                        >
-                          <IconX className="h-3.5 w-3.5" />
-                        </Button>
-                      )}
+                      <div className="flex items-center gap-1 shrink-0">
+                        <OverrideRulesBadge
+                          count={conversionRuleCount}
+                          onClick={scrollToFormRules}
+                          testId="badge-conversion-changed-by-rules"
+                        />
+                        {(storedConversionName || isOff) && !showPicker && (
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="h-6 w-6"
+                            onClick={() => setConversionNameEditing(true)}
+                            data-testid="button-edit-conversion-name"
+                          >
+                            <IconPencil className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                        {showPicker && (storedConversionName || isOff) && (
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="h-6 w-6"
+                            onClick={() => setConversionNameEditing(false)}
+                            data-testid="button-cancel-edit-conversion-name"
+                          >
+                            <IconX className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      </div>
                     </div>
 
                     {!showPicker ? (
@@ -8923,32 +9360,37 @@ export function SectionEditorPanel({
                 const convEvent = convName
                   ? trackingSettings?.conversion_events?.find((e) => e.name === convName)
                   : undefined;
+                const successRuleCount = countRulesChangingKey(formOverridesRules, "success");
                 return (
-                  <SuccessCard
-                    message={successMessage}
-                    url={successUrl}
-                    editing={successEditing}
-                    onEditingChange={setSuccessEditing}
-                    locale={locale}
-                    allSections={allSections}
-                    inheritedMessage={convEvent?.success?.message}
-                    inheritedUrl={convEvent?.success?.url}
-                    showReloadEntryFields
-                    reloadEntryFields={reloadEntryFields}
-                    onChange={(field, value) => {
-                      if (field === "reload_entry_fields") {
-                        updatePropertyWithValue(
-                          formProp("success.reload_entry_fields"),
-                          value === true ? true : undefined,
-                        );
-                        return;
-                      }
-                      // updateProperty deletes the key on empty values and prunes
-                      // empty parents, so clearing both removes `success` entirely
-                      // and falls back to the conversion event default.
-                      updateProperty(formProp(`success.${field}`), value as string);
-                    }}
-                  />
+                  <div className="space-y-2">
+                    <SuccessCard
+                      message={successMessage}
+                      url={successUrl}
+                      editing={successEditing}
+                      onEditingChange={setSuccessEditing}
+                      locale={locale}
+                      allSections={allSections}
+                      inheritedMessage={convEvent?.success?.message}
+                      inheritedUrl={convEvent?.success?.url}
+                      showReloadEntryFields
+                      reloadEntryFields={reloadEntryFields}
+                      overrideRulesCount={successRuleCount}
+                      onOverrideRulesClick={scrollToFormRules}
+                      onChange={(field, value) => {
+                        if (field === "reload_entry_fields") {
+                          updatePropertyWithValue(
+                            formProp("success.reload_entry_fields"),
+                            value === true ? true : undefined,
+                          );
+                          return;
+                        }
+                        // updateProperty deletes the key on empty values and prunes
+                        // empty parents, so clearing both removes `success` entirely
+                        // and falls back to the conversion event default.
+                        updateProperty(formProp(`success.${field}`), value as string);
+                      }}
+                    />
+                  </div>
                 );
               })()}
 
@@ -9016,64 +9458,72 @@ export function SectionEditorPanel({
                 const automationOverridden = rawAutomationVal !== undefined;
                 const rawTagsVal = getValueAtFieldPath(parsedSection, formProp("tags"));
                 const tagsOverridden = rawTagsVal !== undefined;
+                const automationsTagsRuleCount = countRulesChangingAnyKey(formOverridesRules, [
+                  "tags",
+                  "automations",
+                ]);
                 return (
-                  <AutomationsTagsCard
-                    automation={
-                      rawAutomationVal && !Array.isArray(rawAutomationVal)
-                        ? String(rawAutomationVal)
-                        : ""
-                    }
-                    tags={(() => {
-                      if (Array.isArray(rawTagsVal)) return rawTagsVal as string[];
-                      return rawTagsVal && !Array.isArray(rawTagsVal)
-                        ? String(rawTagsVal).split(",").map((t) => t.trim()).filter(Boolean)
-                        : [];
-                    })()}
-                    onAutomationChange={(val) => {
-                      if (automationOverridden && !val) {
-                        updatePropertyWithValue(formProp("automations"), []);
-                      } else {
-                        updateProperty(formProp("automations"), val);
+                  <div className="space-y-2">
+                    <AutomationsTagsCard
+                      overrideRulesCount={automationsTagsRuleCount}
+                      onOverrideRulesClick={scrollToFormRules}
+                      automation={
+                        rawAutomationVal && !Array.isArray(rawAutomationVal)
+                          ? String(rawAutomationVal)
+                          : ""
                       }
-                    }}
-                    onTagsChange={(vals) => {
-                      if (vals.length > 0) {
-                        updatePropertyWithValue(formProp("tags"), vals);
-                      } else if (tagsOverridden) {
-                        updatePropertyWithValue(formProp("tags"), []);
-                      } else {
-                        updatePropertyWithValue(formProp("tags"), undefined);
-                      }
-                    }}
-                    automationSuggestions={formStateSuggestions?.automations ?? []}
-                    tagSuggestions={formStateSuggestions?.tags ?? []}
-                    inheritedAutomation={inheritedAutomation}
-                    inheritedTags={inheritedTags}
-                    automationOverridden={automationOverridden}
-                    tagsOverridden={tagsOverridden}
-                    onAutomationOverrideChange={(override) => {
-                      if (override) {
-                        if (inheritedAutomation) {
-                          updateProperty(formProp("automations"), inheritedAutomation);
-                        } else {
+                      tags={(() => {
+                        if (Array.isArray(rawTagsVal)) return rawTagsVal as string[];
+                        return rawTagsVal && !Array.isArray(rawTagsVal)
+                          ? String(rawTagsVal).split(",").map((t) => t.trim()).filter(Boolean)
+                          : [];
+                      })()}
+                      onAutomationChange={(val) => {
+                        if (automationOverridden && !val) {
                           updatePropertyWithValue(formProp("automations"), []);
-                        }
-                      } else {
-                        updatePropertyWithValue(formProp("automations"), undefined);
-                      }
-                    }}
-                    onTagsOverrideChange={(override) => {
-                      if (override) {
-                        if (inheritedTags && inheritedTags.length > 0) {
-                          updatePropertyWithValue(formProp("tags"), inheritedTags);
                         } else {
-                          updatePropertyWithValue(formProp("tags"), []);
+                          updateProperty(formProp("automations"), val);
                         }
-                      } else {
-                        updatePropertyWithValue(formProp("tags"), undefined);
-                      }
-                    }}
-                  />
+                      }}
+                      onTagsChange={(vals) => {
+                        if (vals.length > 0) {
+                          updatePropertyWithValue(formProp("tags"), vals);
+                        } else if (tagsOverridden) {
+                          updatePropertyWithValue(formProp("tags"), []);
+                        } else {
+                          updatePropertyWithValue(formProp("tags"), undefined);
+                        }
+                      }}
+                      automationSuggestions={formStateSuggestions?.automations ?? []}
+                      tagSuggestions={formStateSuggestions?.tags ?? []}
+                      inheritedAutomation={inheritedAutomation}
+                      inheritedTags={inheritedTags}
+                      automationOverridden={automationOverridden}
+                      tagsOverridden={tagsOverridden}
+                      onAutomationOverrideChange={(override) => {
+                        if (override) {
+                          if (inheritedAutomation) {
+                            updateProperty(formProp("automations"), inheritedAutomation);
+                          } else {
+                            updatePropertyWithValue(formProp("automations"), []);
+                          }
+                        } else {
+                          updatePropertyWithValue(formProp("automations"), undefined);
+                        }
+                      }}
+                      onTagsOverrideChange={(override) => {
+                        if (override) {
+                          if (inheritedTags && inheritedTags.length > 0) {
+                            updatePropertyWithValue(formProp("tags"), inheritedTags);
+                          } else {
+                            updatePropertyWithValue(formProp("tags"), []);
+                          }
+                        } else {
+                          updatePropertyWithValue(formProp("tags"), undefined);
+                        }
+                      }}
+                    />
+                  </div>
                 );
               })()}
 
@@ -9201,14 +9651,20 @@ export function SectionEditorPanel({
                   const rawMarketing   = getValueAtFieldPath(parsedSection, formProp("consent.marketing"));
                   const rawSms         = getValueAtFieldPath(parsedSection, formProp("consent.sms"));
                   const rawWhatsapp    = getValueAtFieldPath(parsedSection, formProp("consent.whatsapp"));
-                  const rawSmsUsaOnly  = getValueAtFieldPath(parsedSection, formProp("consent.sms_usa_only"));
+                  const rawSmsCountries = getValueAtFieldPath(parsedSection, formProp("consent.sms_countries"));
+                  const rawSmsMode = getValueAtFieldPath(parsedSection, formProp("consent.sms_countries_mode"));
+                  const rawWaCountries = getValueAtFieldPath(parsedSection, formProp("consent.whatsapp_countries"));
+                  const rawWaMode = getValueAtFieldPath(parsedSection, formProp("consent.whatsapp_countries_mode"));
                   const rawShowTerms   = getValueAtFieldPath(parsedSection, formProp("show_terms"));
 
                   const specificFields: Partial<Record<string, boolean>> = {
                     marketing:  rawMarketing  !== null && rawMarketing  !== undefined,
                     sms:        rawSms        !== null && rawSms        !== undefined,
                     whatsapp:   rawWhatsapp   !== null && rawWhatsapp   !== undefined,
-                    smsUsaOnly: rawSmsUsaOnly !== null && rawSmsUsaOnly !== undefined,
+                    smsCountries: Array.isArray(rawSmsCountries) && rawSmsCountries.length > 0,
+                    smsCountriesMode: rawSmsMode !== null && rawSmsMode !== undefined,
+                    whatsappCountries: Array.isArray(rawWaCountries) && rawWaCountries.length > 0,
+                    whatsappCountriesMode: rawWaMode !== null && rawWaMode !== undefined,
                     showTerms:  rawShowTerms  !== null && rawShowTerms  !== undefined,
                     termsUrl:   false,
                     privacyUrl: false,
@@ -9228,12 +9684,38 @@ export function SectionEditorPanel({
                     extraConsentFields.map((field) => [field, !!convEvent?.consent?.[field]]),
                   );
 
+                  const asStringList = (raw: unknown): string[] =>
+                    Array.isArray(raw)
+                      ? raw.filter((el): el is string => typeof el === "string" && el.trim() !== "").map((el) => el.trim().toUpperCase())
+                      : [];
+                  const cardFromConsent = (consent: Record<string, unknown> | null | undefined) => {
+                    const fromEvent = eventConsentToCardValues(consent ?? undefined);
+                    return {
+                      smsCountries: fromEvent.smsCountries,
+                      smsCountriesMode: fromEvent.smsCountriesMode,
+                      whatsappCountries: fromEvent.whatsappCountries,
+                      whatsappCountriesMode: fromEvent.whatsappCountriesMode,
+                      smsUsaOnly: fromEvent.smsUsaOnly,
+                    };
+                  };
+                  const resolvedConsentObj = {
+                    marketing: getValueAtFieldPath(resolvedParsedSection, formProp("consent.marketing")),
+                    sms: getValueAtFieldPath(resolvedParsedSection, formProp("consent.sms")),
+                    whatsapp: getValueAtFieldPath(resolvedParsedSection, formProp("consent.whatsapp")),
+                    sms_countries: getValueAtFieldPath(resolvedParsedSection, formProp("consent.sms_countries")),
+                    sms_countries_mode: getValueAtFieldPath(resolvedParsedSection, formProp("consent.sms_countries_mode")),
+                    whatsapp_countries: getValueAtFieldPath(resolvedParsedSection, formProp("consent.whatsapp_countries")),
+                    whatsapp_countries_mode: getValueAtFieldPath(resolvedParsedSection, formProp("consent.whatsapp_countries_mode")),
+                    sms_usa_only: getValueAtFieldPath(resolvedParsedSection, formProp("consent.sms_usa_only")),
+                  };
+                  const resolvedCardCountries = cardFromConsent(resolvedConsentObj as Record<string, unknown>);
+
                   const inheritedValues: Partial<ConsentValues> | undefined = convEvent
                     ? {
                         marketing:  !!convEvent.consent?.marketing,
                         sms:        !!convEvent.consent?.sms,
                         whatsapp:   !!convEvent.consent?.whatsapp,
-                        smsUsaOnly: !!convEvent.consent?.sms_usa_only,
+                        ...cardFromConsent(convEvent.consent as Record<string, unknown> | undefined),
                         showTerms:  !!convEvent.consent?.show_terms,
                         termsUrl:   convEvent.consent?.terms_url ?? "",
                         privacyUrl: convEvent.consent?.privacy_url ?? "",
@@ -9248,7 +9730,7 @@ export function SectionEditorPanel({
                         marketing: !!getValueAtFieldPath(resolvedParsedSection, formProp("consent.marketing")),
                         sms: !!getValueAtFieldPath(resolvedParsedSection, formProp("consent.sms")),
                         whatsapp: !!getValueAtFieldPath(resolvedParsedSection, formProp("consent.whatsapp")),
-                        smsUsaOnly: !!getValueAtFieldPath(resolvedParsedSection, formProp("consent.sms_usa_only")),
+                        ...resolvedCardCountries,
                         showTerms: !!getValueAtFieldPath(resolvedParsedSection, formProp("show_terms")),
                         termsUrl: String(getValueAtFieldPath(resolvedParsedSection, formProp("terms_url")) ?? ""),
                         privacyUrl: String(getValueAtFieldPath(resolvedParsedSection, formProp("privacy_url")) ?? ""),
@@ -9264,12 +9746,24 @@ export function SectionEditorPanel({
                           marketing: formProp("consent.marketing"),
                           sms: formProp("consent.sms"),
                           whatsapp: formProp("consent.whatsapp"),
-                          smsUsaOnly: formProp("consent.sms_usa_only"),
+                          smsCountries: formProp("consent.sms_countries"),
+                          smsCountriesMode: formProp("consent.sms_countries_mode"),
+                          whatsappCountries: formProp("consent.whatsapp_countries"),
+                          whatsappCountriesMode: formProp("consent.whatsapp_countries_mode"),
                           showTerms: formProp("show_terms"),
                           termsUrl: formProp("terms_url"),
                           privacyUrl: formProp("privacy_url"),
                         };
                         const path = pathMap[field] ?? formProp(`consent.${field}`);
+                        if (field === "smsCountries" || field === "whatsappCountries") {
+                          const list = asStringList(value);
+                          if (list.length === 0) {
+                            updatePropertyWithValue(path, undefined);
+                          } else {
+                            updatePropertyWithValue(path, list);
+                          }
+                          return;
+                        }
                         if (typeof value === "boolean") {
                           updatePropertyWithValue(path, value);
                         } else {
@@ -9296,7 +9790,16 @@ export function SectionEditorPanel({
                             setProp(formProp("consent.marketing"),    !!eff(formProp("consent.marketing")));
                             setProp(formProp("consent.sms"),          !!eff(formProp("consent.sms")));
                             setProp(formProp("consent.whatsapp"),     !!eff(formProp("consent.whatsapp")));
-                            setProp(formProp("consent.sms_usa_only"), !!eff(formProp("consent.sms_usa_only")));
+                            const smsCountries = asStringList(eff(formProp("consent.sms_countries")));
+                            const waCountries = asStringList(eff(formProp("consent.whatsapp_countries")));
+                            if (smsCountries.length > 0) {
+                              setProp(formProp("consent.sms_countries"), smsCountries);
+                              setProp(formProp("consent.sms_countries_mode"), eff(formProp("consent.sms_countries_mode")) || "include");
+                            }
+                            if (waCountries.length > 0) {
+                              setProp(formProp("consent.whatsapp_countries"), waCountries);
+                              setProp(formProp("consent.whatsapp_countries_mode"), eff(formProp("consent.whatsapp_countries_mode")) || "include");
+                            }
                             setProp(formProp("show_terms"),           !!eff(formProp("show_terms")));
                             for (const field of extraConsentFields) {
                               setProp(formProp(`consent.${field}`), !!eff(formProp(`consent.${field}`)));
@@ -9305,6 +9808,10 @@ export function SectionEditorPanel({
                             setProp(formProp("consent.marketing"),    undefined);
                             setProp(formProp("consent.sms"),          undefined);
                             setProp(formProp("consent.whatsapp"),     undefined);
+                            setProp(formProp("consent.sms_countries"), undefined);
+                            setProp(formProp("consent.sms_countries_mode"), undefined);
+                            setProp(formProp("consent.whatsapp_countries"), undefined);
+                            setProp(formProp("consent.whatsapp_countries_mode"), undefined);
                             setProp(formProp("consent.sms_usa_only"), undefined);
                             setProp(formProp("show_terms"),           undefined);
                             for (const field of extraConsentFields) {
@@ -9321,87 +9828,6 @@ export function SectionEditorPanel({
                     />
                   );
                 })()}
-
-              {/* Locations */}
-              {(() => {
-                const rawLocs = getValueAtFieldPath(parsedSection, formProp("locations"));
-                const selectedLocs: string[] = Array.isArray(rawLocs)
-                  ? (rawLocs as string[])
-                  : rawLocs
-                  ? [String(rawLocs)]
-                  : [];
-                // Purely data-driven: auto when no locations stored
-                const isAutoDetect = selectedLocs.length === 0;
-
-                const locationOptions = (formOptions?.locations ?? []).map((loc) => ({
-                  value: loc.slug,
-                  label: `${loc.name} — ${loc.city}`,
-                  group: loc.region,
-                  badgeLabel: loc.city,
-                  searchTerms: [loc.city, loc.country, loc.slug, loc.name],
-                }));
-
-                const groupLabels = Object.fromEntries(
-                  (formOptions?.regions ?? []).map((r) => [r.slug, r.label])
-                );
-
-                return (
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <Label className="text-sm font-medium" data-testid="label-conversion-locations">
-                        Locations
-                      </Label>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-muted-foreground">
-                          {isAutoDetect ? "Auto-detect" : "Manual"}
-                        </span>
-                        <Switch
-                          checked={isAutoDetect}
-                          onCheckedChange={(checked) => {
-                            if (checked) {
-                              // ON → clear locations, back to auto-detect
-                              updatePropertyWithValue(formProp("locations"), undefined);
-                              setLocationsPickerOpen(false);
-                            } else {
-                              // OFF → open picker so user can choose campuses immediately
-                              setLocationsPickerOpen(true);
-                            }
-                          }}
-                          data-testid="switch-locations-auto-detect"
-                        />
-                      </div>
-                    </div>
-                    {isAutoDetect && !locationsPickerOpen ? (
-                      <p className="text-xs text-muted-foreground">
-                        Location is auto-detected from the visitor's IP address.
-                      </p>
-                    ) : (
-                      <SearchableMultiSelect
-                        options={locationOptions}
-                        value={selectedLocs}
-                        onChange={(vals) => {
-                          updatePropertyWithValue(
-                            formProp("locations"),
-                            vals.length > 0 ? vals : undefined
-                          );
-                          if (vals.length === 0) setLocationsPickerOpen(false);
-                        }}
-                        open={locationsPickerOpen && isAutoDetect ? locationsPickerOpen : undefined}
-                        onOpenChange={(o) => {
-                          // Only manage externally when in the transient "picker open, no selections" state
-                          if (isAutoDetect) setLocationsPickerOpen(o);
-                        }}
-                        label="Select campuses"
-                        searchPlaceholder="Search locations…"
-                        groupLabels={groupLabels}
-                        isLoading={formOptionsLoading}
-                        testIdPrefix="location"
-                        emptyMessage="No locations found"
-                      />
-                    )}
-                  </div>
-                );
-              })()}
 
               {/* Webhook */}
               {(() => {
@@ -9456,77 +9882,289 @@ export function SectionEditorPanel({
                   session,
                   { singleEntry },
                 );
+                const webhookRuleCount = countRulesChangingKey(formOverridesRules, "webhook");
                 return (
-                  <WebhookCard
-                    url={rawSectionWebhookUrl}
-                    method={
-                      (getValueAtFieldPath(
-                        parsedSection,
-                        formProp("webhook.method")
-                      ) as "POST" | "GET") ?? "POST"
-                    }
-                    headers={sectionHeaders}
-                    failSilently={sectionFailSilently}
-                    editing={webhookEditing}
-                    onEditingChange={setWebhookEditing}
-                    onChange={(field, value) => {
-                      if (field === "url") {
-                        if (!value) {
-                          updatePropertyWithValue(formProp("webhook"), undefined);
-                        } else {
-                          updateProperty(formProp("webhook.url"), value as string);
-                        }
-                      } else if (field === "method") {
-                        updateProperty(formProp("webhook.method"), value as string);
-                      } else if (field === "headers") {
-                        const next = value as Record<string, string>;
-                        if (!next || Object.keys(next).length === 0) {
-                          updatePropertyWithValue(formProp("webhook.headers"), undefined);
-                        } else {
-                          updatePropertyWithValue(formProp("webhook.headers"), next);
-                        }
-                      } else if (field === "failSilently") {
-                        if (value === true) {
-                          updatePropertyWithValue(formProp("webhook.fail_silently"), true);
-                        } else {
+                  <div className="space-y-2">
+                    <WebhookCard
+                      url={rawSectionWebhookUrl}
+                      method={
+                        (getValueAtFieldPath(
+                          parsedSection,
+                          formProp("webhook.method")
+                        ) as "POST" | "GET") ?? "POST"
+                      }
+                      headers={sectionHeaders}
+                      failSilently={sectionFailSilently}
+                      editing={webhookEditing}
+                      onEditingChange={setWebhookEditing}
+                      overrideRulesCount={webhookRuleCount}
+                      onOverrideRulesClick={scrollToFormRules}
+                      onChange={(field, value) => {
+                        if (field === "url") {
+                          if (!value) {
+                            updatePropertyWithValue(formProp("webhook"), undefined);
+                          } else {
+                            updateProperty(formProp("webhook.url"), value as string);
+                          }
+                        } else if (field === "method") {
+                          updateProperty(formProp("webhook.method"), value as string);
+                        } else if (field === "headers") {
+                          const next = value as Record<string, string>;
+                          if (!next || Object.keys(next).length === 0) {
+                            updatePropertyWithValue(formProp("webhook.headers"), undefined);
+                          } else {
+                            updatePropertyWithValue(formProp("webhook.headers"), next);
+                          }
+                        } else if (field === "failSilently") {
                           updatePropertyWithValue(
                             formProp("webhook.fail_silently"),
-                            undefined,
+                            value === true ? true : undefined,
                           );
                         }
+                      }}
+                      hint={webhookHint}
+                      source={webhookSource}
+                      inheritedUrl={
+                        webhookSource === "event"
+                          ? eventWebhookUrl
+                          : webhookSource === "global"
+                          ? globalWebhookUrl
+                          : undefined
                       }
-                    }}
-                    hint={webhookHint}
-                    source={webhookSource}
-                    inheritedUrl={
-                      webhookSource === "event"
-                        ? eventWebhookUrl
-                        : webhookSource === "global"
-                        ? globalWebhookUrl
-                        : undefined
-                    }
-                    samplePayload={webhookSamplePayload}
-                    onTest={async () => {
-                      try {
-                        const res = await apiRequest("POST", "/api/tracking/webhook/test", {
-                          payload: webhookSamplePayload,
-                        });
-                        const data = await res.json().catch(() => ({}));
-                        if (!res.ok || !(data as any).ok) {
-                          return { ok: false, error: (data as any).error || `HTTP ${res.status}` };
+                      samplePayload={webhookSamplePayload}
+                      onTest={async () => {
+                        try {
+                          const res = await apiRequest("POST", "/api/tracking/webhook/test", {
+                            payload: webhookSamplePayload,
+                          });
+                          const data = await res.json().catch(() => ({}));
+                          if (!res.ok || !(data as any).ok) {
+                            return { ok: false, error: (data as any).error || `HTTP ${res.status}` };
+                          }
+                          return { ok: true, status: (data as any).status };
+                        } catch (e: any) {
+                          return { ok: false, error: e.message };
                         }
-                        return { ok: true, status: (data as any).status };
-                      } catch (e: any) {
-                        return { ok: false, error: e.message };
-                      }
-                    }}
-                    testIdPrefix="section-webhook"
-                  />
+                      }}
+                      testIdPrefix="section-webhook"
+                    />
+                  </div>
+                );
+              })()}
+
+              {/* Rules that change this form (form_overrides) */}
+              {(() => {
+                const rawTags = getValueAtFieldPath(parsedSection, formProp("tags"));
+                const tagsDefault = Array.isArray(rawTags)
+                  ? (rawTags as string[]).join(",")
+                  : rawTags != null
+                    ? String(rawTags)
+                    : "";
+                const rawAutomation = getValueAtFieldPath(
+                  parsedSection,
+                  formProp("automations"),
+                );
+                const automationsDefault =
+                  rawAutomation != null && !Array.isArray(rawAutomation)
+                    ? String(rawAutomation)
+                    : "";
+                const successDefault = {
+                  message: String(
+                    getValueAtFieldPath(parsedSection, formProp("success.message")) ?? "",
+                  ),
+                  url: String(
+                    getValueAtFieldPath(parsedSection, formProp("success.url")) ?? "",
+                  ),
+                  reload_entry_fields:
+                    getValueAtFieldPath(
+                      parsedSection,
+                      formProp("success.reload_entry_fields"),
+                    ) === true
+                      ? true
+                      : undefined,
+                };
+                const webhookHeadersRaw = getValueAtFieldPath(
+                  parsedSection,
+                  formProp("webhook.headers"),
+                );
+                const webhookDefault = {
+                  url: String(
+                    getValueAtFieldPath(parsedSection, formProp("webhook.url")) ?? "",
+                  ),
+                  method:
+                    (getValueAtFieldPath(
+                      parsedSection,
+                      formProp("webhook.method"),
+                    ) as "POST" | "GET") ?? "POST",
+                  headers:
+                    webhookHeadersRaw &&
+                    typeof webhookHeadersRaw === "object" &&
+                    !Array.isArray(webhookHeadersRaw)
+                      ? (webhookHeadersRaw as Record<string, string>)
+                      : undefined,
+                  fail_silently:
+                    getValueAtFieldPath(
+                      parsedSection,
+                      formProp("webhook.fail_silently"),
+                    ) === true
+                      ? true
+                      : undefined,
+                };
+                const messagesRaw = getValueAtFieldPath(
+                  parsedSection,
+                  formProp("messages"),
+                );
+                const conversionRaw = getValueAtFieldPath(
+                  parsedSection,
+                  formProp("conversion_name"),
+                );
+                return (
+                  <div id="card-conditional-rules-anchor">
+                    <ConditionalRulesCard
+                      rules={formOverridesRules}
+                      onChange={(next) => {
+                        const hasIncomplete = next.some(
+                          (r) =>
+                            !(r.conditions ?? []).some((c) => {
+                              const left =
+                                typeof c.field_property_slug === "string"
+                                  ? c.field_property_slug.trim()
+                                  : "";
+                              return Boolean(left);
+                            }),
+                        );
+                        if (hasIncomplete) {
+                          // Keep drafts in the editor; still write so staff can iterate
+                          updatePropertyWithValue(
+                            formProp("form_overrides"),
+                            next.length > 0 ? next : undefined,
+                          );
+                          return;
+                        }
+                        updatePropertyWithValue(
+                          formProp("form_overrides"),
+                          next.length > 0 ? next : undefined,
+                        );
+                      }}
+                      formDefaults={{
+                        conversion_name:
+                          conversionRaw === null
+                            ? null
+                            : typeof conversionRaw === "string"
+                              ? conversionRaw
+                              : "",
+                        success: successDefault,
+                        tags: tagsDefault,
+                        automations: automationsDefault,
+                        webhook: webhookDefault,
+                        messages:
+                          messagesRaw &&
+                          typeof messagesRaw === "object" &&
+                          !Array.isArray(messagesRaw)
+                            ? (messagesRaw as Record<string, unknown>)
+                            : undefined,
+                      }}
+                      conversionEventNames={(trackingSettings?.conversion_events ?? []).map(
+                        (e) => e.name,
+                      )}
+                      automationSuggestions={formStateSuggestions?.automations ?? []}
+                      tagSuggestions={formStateSuggestions?.tags ?? []}
+                      contentType={contentType || ""}
+                      singleEntry={singleEntry as Record<string, unknown> | undefined}
+                      allSections={allSections}
+                      locale={locale}
+                    />
+                  </div>
                 );
               })()}
             </div>
           )}
         </TabsContent>
+
+        {/* Micro-conversions Tab */}
+        {showMicroTab && (
+          <TabsContent
+            value="micro"
+            className="flex-1 overflow-auto p-4 mt-0 data-[state=inactive]:hidden"
+          >
+            <div className="space-y-6" data-testid="micro-tab-content">
+              <div className="rounded-md border bg-muted/30 p-3 space-y-2 text-sm text-muted-foreground">
+                <p className="text-foreground font-medium">Other visitor actions</p>
+                <p>
+                  This tab lists actions this block already records that are not leads (Forms) and not
+                  payment (Ecommerce). Can be chosen as an A/B test goal (Micro actions).
+                </p>
+                <details className="text-xs">
+                  <summary className="cursor-pointer text-foreground font-medium">
+                    Read more (advanced)
+                  </summary>
+                  <ul className="mt-2 list-disc pl-5 font-mono space-y-1">
+                    <li>component-registry/…/micro-events.ts</li>
+                    <li>client/src/lib/section-tracking.ts (cta_click)</li>
+                    <li>client/src/components/UniversalVideo.tsx (file video)</li>
+                    <li>YouTube uses Tag Manager gtm.video — not site video_* pushes</li>
+                  </ul>
+                </details>
+              </div>
+
+              {microBroken && (
+                <div
+                  className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
+                  data-testid="micro-map-broken-warning"
+                >
+                  <p className="font-medium text-foreground">
+                    Micro-conversions map couldn&apos;t be loaded — tell engineering.
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {microEntry?.status === "error" ? microEntry.error : "Invalid micro-events.ts"}
+                  </p>
+                </div>
+              )}
+
+              {showYoutubeMicroWarning && (
+                <div
+                  className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
+                  data-testid="micro-youtube-warning"
+                >
+                  <p className="font-medium text-foreground">YouTube isn&apos;t tracked by the site</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Uploaded files send video start/complete from this site. YouTube is counted in Tag
+                    Manager as <code className="text-[10px]">gtm.video</code> only.
+                  </p>
+                </div>
+              )}
+
+              {microActiveRows.length > 0 && (
+                <div className="space-y-3">
+                  <h3 className="text-sm font-medium">Recorded on this block</h3>
+                  {microActiveRows.map((row) => (
+                    <div
+                      key={`${row.event}-${row.source}-${row.label ?? ""}`}
+                      className="rounded-md border p-3 space-y-1"
+                      data-testid={`micro-row-${row.event}`}
+                    >
+                      <p className="text-sm text-foreground">
+                        {row.label || row.event.replace(/_/g, " ")}
+                      </p>
+                      <p className="text-xs text-muted-foreground font-mono">
+                        {row.event} · {row.source}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Can be chosen as an A/B test goal (Micro actions).
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {!microBroken && !showYoutubeMicroWarning && microActiveRows.length === 0 && (
+                <p className="text-sm text-muted-foreground">
+                  No active micro-conversions for this block right now.
+                </p>
+              )}
+            </div>
+          </TabsContent>
+        )}
 
         {/* Ecommerce Tab */}
         {showEcommerceTab && (
@@ -11062,6 +11700,200 @@ export function SectionEditorPanel({
               data-testid="button-template-save-confirm"
             >
               Update shared template
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={locationScopeDialogOpen}
+        onOpenChange={(o) => {
+          if (!o && !isSaving) setLocationScopeDialogOpen(false);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {formLocationPending &&
+              formLocationPending.locations.length === 0 &&
+              formLocationPending.baselineLayer === "entry" &&
+              formLocationPending.baselinePageValues.length > 0
+                ? "Clear locations for the whole page?"
+                : "Where should these locations apply?"}
+            </DialogTitle>
+            <DialogDescription asChild>
+              <div className="space-y-2 text-sm text-muted-foreground">
+                {(() => {
+                  const pending = formLocationPending;
+                  const nextLocs = pending?.locations ?? [];
+                  const isPageClear =
+                    !!pending &&
+                    pending.locations.length === 0 &&
+                    pending.baselineLayer === "entry" &&
+                    pending.baselinePageValues.length > 0;
+                  const draftName = (() => {
+                    if (typeof window === "undefined") return variant ?? null;
+                    const p = new URLSearchParams(window.location.search);
+                    return p.get("force_variant") || p.get("variant") || variant || null;
+                  })();
+                  const following = formLocationFormLabels.filter((f) => !f.overrides || f.index === sectionIndex);
+                  const overriding = formLocationFormLabels.filter(
+                    (f) => f.overrides && f.index !== sectionIndex,
+                  );
+                  const nameOf = (slug: string) =>
+                    formOptions?.locations.find((l) => l.slug === slug)?.name ?? slug;
+                  const listNames = (slugs: string[]) => slugs.map(nameOf).join(", ") || "(none)";
+
+                  return (
+                    <>
+                      {isPageClear ? (
+                        <p className="text-foreground">
+                          This clears the page Locations field
+                          {pending?.baselinePageValues.length
+                            ? ` (was ${listNames(pending.baselinePageValues)})`
+                            : ""}
+                          . Forms that follow the page will no longer get a location from it.
+                        </p>
+                      ) : (
+                        <p>
+                          Choose whether {nextLocs.length ? listNames(nextLocs) : "these locations"} apply only to
+                          this form, or to the whole page.
+                        </p>
+                      )}
+                      {draftName ? (
+                        <p>Saved in the draft &quot;{draftName}&quot; — goes live when the draft is published.</p>
+                      ) : null}
+                      <div className="rounded-md border bg-muted/40 p-2 space-y-1">
+                        <p className="text-xs font-medium text-foreground">Forms on this page</p>
+                        <ul className="text-xs list-disc pl-4 space-y-0.5">
+                          {formLocationFormLabels.length === 0 ? (
+                            <li>No forms found on this page.</li>
+                          ) : (
+                            formLocationFormLabels.map((f) => (
+                              <li key={f.index}>
+                                {f.label}
+                                {f.index === sectionIndex ? " (this form)" : ""}
+                                {f.overrides ? " — has its own location" : " — follows the page"}
+                              </li>
+                            ))
+                          )}
+                        </ul>
+                        {locationScopeClearOthers && overriding.length > 0 ? (
+                          <p className="text-xs text-amber-600 dark:text-amber-400">
+                            Clearing own locations on: {overriding.map((f) => f.label).join(", ")}.
+                          </p>
+                        ) : null}
+                        {!locationScopeClearOthers && following.length > 0 && !isPageClear ? (
+                          <p className="text-xs">
+                            Whole page will update forms that follow the page
+                            {following.length ? `: ${following.map((f) => f.label).join(", ")}` : ""}.
+                          </p>
+                        ) : null}
+                      </div>
+                      {otherFormLocationOverrideIndexes.length > 0 ? (
+                        <label className="flex items-start gap-2 text-foreground">
+                          <Checkbox
+                            checked={locationScopeClearOthers}
+                            onCheckedChange={(v) => setLocationScopeClearOthers(v === true)}
+                            data-testid="checkbox-form-location-clear-others"
+                          />
+                          <span>
+                            Also clear {otherFormLocationOverrideIndexes.length} other form(s) that set their own
+                            location, so they follow the page.
+                          </span>
+                        </label>
+                      ) : null}
+                    </>
+                  );
+                })()}
+              </div>
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3 py-2">
+            {!(
+              formLocationPending &&
+              formLocationPending.locations.length === 0 &&
+              formLocationPending.baselineLayer === "entry" &&
+              formLocationPending.baselinePageValues.length > 0
+            ) ? (
+              <Button
+                variant="outline"
+                className="w-full justify-start gap-3 h-auto py-3 px-4"
+                disabled={isSaving}
+                onClick={() => {
+                  setLocationScopeDialogOpen(false);
+                  // Empty + this form only = follow page / keep staged form clear; non-empty already staged.
+                  void continueSaveAfterLocationScope();
+                }}
+                data-testid="button-form-location-scope-form"
+              >
+                <div className="flex flex-col items-start gap-0.5 text-left whitespace-normal">
+                  <span className="font-medium">This form only</span>
+                  <span className="text-xs text-muted-foreground">
+                    {formLocationPending && formLocationPending.locations.length === 0
+                      ? "This form follows the page (or detection). Other forms stay as they are."
+                      : "Only this form. Other forms on the page stay as they are. Save still syncs this form in other languages."}
+                  </span>
+                </div>
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                className="w-full justify-start gap-3 h-auto py-3 px-4"
+                disabled={isSaving}
+                onClick={() => {
+                  // Keep following the page: discard clear intent.
+                  setFormLocationPending(null);
+                  setLocationScopeDialogOpen(false);
+                  void continueSaveAfterLocationScope();
+                }}
+                data-testid="button-form-location-scope-keep-page"
+              >
+                <div className="flex flex-col items-start gap-0.5 text-left whitespace-normal">
+                  <span className="font-medium">Keep page locations</span>
+                  <span className="text-xs text-muted-foreground">
+                    Discard the clear. This form keeps following the page Locations.
+                  </span>
+                </div>
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              className="w-full justify-start gap-3 h-auto py-3 px-4"
+              disabled={isSaving}
+              onClick={async () => {
+                const locs = formLocationPending?.locations ?? [];
+                setLocationScopeDialogOpen(false);
+                const ok = await writeFormLocationPage(locs);
+                if (!ok) return;
+                await continueSaveAfterLocationScope();
+              }}
+              data-testid="button-form-location-scope-page"
+            >
+              <div className="flex flex-col items-start gap-0.5 text-left whitespace-normal">
+                <span className="font-medium">
+                  {formLocationPending &&
+                  formLocationPending.locations.length === 0 &&
+                  formLocationPending.baselineLayer === "entry"
+                    ? "Clear whole page"
+                    : "Whole page"}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {formLocationPending && formLocationPending.locations.length === 0
+                    ? "Removes the page Locations field for every language."
+                    : "Writes the page Locations field. Forms without their own location follow it."}
+                </span>
+              </div>
+            </Button>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              disabled={isSaving}
+              onClick={() => setLocationScopeDialogOpen(false)}
+              data-testid="button-form-location-scope-cancel"
+            >
+              Cancel
             </Button>
           </DialogFooter>
         </DialogContent>

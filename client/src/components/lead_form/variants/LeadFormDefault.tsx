@@ -1,5 +1,5 @@
 // section-spacing: self-padded
-import { useState, useEffect, useMemo, lazy, Suspense } from "react";
+import { useState, useEffect, useMemo, useRef, lazy, Suspense } from "react";
 import { Check, Loader2 } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -41,10 +41,19 @@ import {
 } from "@shared/resolveConversionProduct";
 import {
   buildSignupPayloadFromFieldMap,
+  formFieldNameFromSource,
+  isConstantEntry,
+  isDynamicFromEntry,
+  isFormSource,
   isGlobalEntry,
+  isSessionSource,
   isSignupFieldMapReady,
+  resolveSignupFieldMapEntry,
+  sessionPathFromSource,
   type AuthSignupFieldMapEntry,
+  type SignupFieldMapResolveContext,
 } from "@shared/authSignupFieldMap";
+import { useEditModeOptional } from "@/contexts/EditModeContext";
 import { useVariableDefinitions, useVariableContext } from "@/hooks/useVariables";
 import { resolveTemplateString, resolveDeep, resolveVariable } from "@/lib/variable-manager";
 import {
@@ -52,13 +61,26 @@ import {
   parseAuthConversionEventConfig,
 } from "@shared/authConversionEvents";
 import { resolveFormDefaults } from "@shared/resolveFormDefaults";
-import { isUsVisitor } from "@shared/usVisitor";
+import {
+  effectiveFormLocationPolicy,
+  formPageLocationMismatch,
+  pageLocationValues,
+  parseFormLocationPolicy,
+  resolveFormLocationSource,
+} from "@shared/formLocationPolicy";
+import {
+  resolveConsentCountryCode,
+  resolveSmsCountryFilter,
+  resolveWhatsappCountryFilter,
+  shouldShowConsentChannel,
+} from "@shared/consentCountryFilter";
 import { resolveConsentCopy, extraConsentYamlFieldsFromObject, consentKeyFromYamlField, isBlankConsentHtml, parseConsentSettingsResponse, resolveConsentRequirement } from "@shared/consent-settings";
 import { RichTextContent } from "@/components/ui/rich-text-content";
 import {
   applyLeadFormOverrideOutcome,
   normalizeLeadFormTags,
   resolveLeadFormOverride,
+  resolveLeadFormOverrideMatch,
   type LeadFormOverride,
 } from "@shared/resolveLeadFormOverride";
 import { useAuthUser, getConsumerToken } from "@/hooks/useAuthUser";
@@ -86,12 +108,53 @@ import {
 import {
   applyChoiceCardinality,
   resolveFormFieldRelationSource,
-  resolveSubmitValueFromOptions,
   type FormFieldOption as RelationFormFieldOption,
 } from "@shared/resolveFormFieldRelationSource";
-import type { RelationEditorHint } from "@shared/relation-field";
+import { deslugifyLabel, type RelationEditorHint } from "@shared/relation-field";
+import {
+  isNonEmptyLeadFormWireScalar,
+  resolveLeadFormDefault,
+  resolveLeadFormFieldValue,
+  resolveLeadFormFieldValues,
+  resolveLeadFormLocationSource,
+  type LeadFormFieldDefault,
+  type LeadFormFieldResolveContext,
+} from "@/components/lead_form/resolveLeadFormFieldValues";
+import {
+  hiddenBadgeId,
+  rankHiddenBadges,
+  type HiddenBadgeRef,
+  type LeadFormHiddenReason,
+} from "@/components/lead_form/hiddenFieldPriority";
+import type {
+  HiddenBadgeDetail,
+  LeadFormOverrideBadge,
+} from "@/components/lead_form/hiddenFieldsNoticeTypes";
+import {
+  buildSignupFieldMapContext,
+  buildSignupLocationDetail,
+} from "@/components/lead_form/signupFieldMapContext";
+import { resolveSignupGateStatus } from "@/components/lead_form/signupGateStatus";
 
 const StaffLeadConfirmDialog = lazy(() => import("@/components/lead_form/StaffLeadConfirmDialog"));
+const LeadFormStatusBadges = lazy(() => import("@/components/lead_form/LeadFormStatusBadges"));
+
+/** Built-in fields with an input slot (anything else in `fields` is an extra hidden key). */
+const LEAD_FORM_SLOT_FIELDS = [
+  "email",
+  "first_name",
+  "last_name",
+  "phone",
+  "program",
+  "plan",
+  "region",
+  "location",
+  "coupon",
+  "referral_key",
+  "client_comments",
+  "current_download",
+] as const;
+const LEAD_FORM_SLOT_SET = new Set<string>(LEAD_FORM_SLOT_FIELDS);
 
 /** Runtime defaults when YAML omits `fields.*.component_renderer`. */
 const SELECT_DEFAULT_FIELDS = new Set(["program", "plan", "location", "region"]);
@@ -161,19 +224,10 @@ function mergeLeadFormOptions(
   return merged;
 }
 
-/** Hidden payload defaults may be numbers/bools after resolveDeep (e.g. entry.id). */
-type LeadFormFieldDefault = string | number | boolean;
-
-/** Non-empty string, or any number/boolean (ids like event_id). */
-function isNonEmptyLeadFormWireScalar(
-  value: unknown,
-): value is LeadFormFieldDefault {
-  if (typeof value === "string") return value.trim() !== "";
-  return typeof value === "number" || typeof value === "boolean";
-}
-
 interface FieldConfig {
   visible?: boolean;
+  /** Runtime only (getFieldConfig): why the field is not rendered. */
+  hiddenReason?: LeadFormHiddenReason;
   required?: boolean;
   /** String in YAML; may be number/boolean after section resolveDeep. */
   default?: LeadFormFieldDefault;
@@ -258,9 +312,10 @@ export interface LeadFormData {
   };
   /**
    * Continuous form_overrides: first matching conditions (AND) overlays form props for UI + submit
-   * (messages, webhook, success, tags, …). Condition values support {{ entry.* }} / {{ visitor.* }}
-   * via resolveTemplateString. match_method: equals (default) | contains.
-   * No match → root form props. See shared/resolveLeadFormOverride.ts.
+   * (messages, webhook, success, tags, …). Condition operands support {{ form.* }} / {{ entry.* }} /
+   * {{ visitor.* }} via field_property_slug (legacy form_field_slug / entry_field_slug still work).
+   * match_method: equals (default) | contains. No match → root form props.
+   * See shared/resolveLeadFormOverride.ts.
    */
   form_overrides?: LeadFormOverride[];
   /** Phase copy for signup forms. Locale defaults apply when a stage is omitted. */
@@ -303,13 +358,18 @@ export interface LeadFormData {
     marketing_text?: string;
     sms_text?: string;
     sms_usa_only?: boolean;
-    [key: string]: boolean | string | undefined;
+    sms_countries?: string[];
+    sms_countries_mode?: "include" | "exclude";
+    whatsapp_countries?: string[];
+    whatsapp_countries_mode?: "include" | "exclude";
+    [key: string]: boolean | string | string[] | undefined;
   };
   show_terms?: boolean;
   terms_url?: string;
   privacy_url?: string;
   className?: string;
   button_className?: string;
+  button_variant?: "primary" | "secondary" | "outline" | "accent";
   terms_className?: string;
   turnstile?: {
     enabled?: boolean;
@@ -357,6 +417,19 @@ interface FormValues {
   [key: string]: string | boolean;
 }
 
+/** Marketing checkbox is stored as consent_email; CRM + GTM both get email+whatsapp from it. */
+function effectiveFormConsents(
+  formValues: Pick<FormValues, "consent_email" | "consent_sms" | "consent_whatsapp">,
+  consent: { marketing?: boolean } | null | undefined,
+) {
+  const consent_email = formValues.consent_email || false;
+  return {
+    consent_email,
+    consent_sms: formValues.consent_sms || false,
+    consent_whatsapp: consent?.marketing ? consent_email : formValues.consent_whatsapp || false,
+  };
+}
+
 interface ConsentSectionProps {
   consent: NonNullable<LeadFormData["consent"]>;
   form: ReturnType<typeof useForm<FormValues>>;
@@ -364,12 +437,18 @@ interface ConsentSectionProps {
   formOptions?: FormOptions;
   sessionLocation: { slug: string; region: string; country?: string; country_code?: string } | null;
   geo?: { country_code?: string } | null;
+  /** Single locked campus from form/page location plan when the field is not a picker. */
+  lockedLocationSlug?: string | null;
   consentSettings?: Record<string, Record<string, string> | string>;
   fallbackKey?: string | null;
+  textStyle?: React.CSSProperties;
 }
 
 const CONSENT_COPY_CLASS =
-  "text-xs text-muted-foreground max-w-none prose-p:my-0 prose-p:leading-snug [&_p]:m-0 [&_a]:underline [&_a]:text-inherit hover:[&_a]:text-foreground";
+  "text-xs text-inherit opacity-80 max-w-none prose-p:my-0 prose-p:leading-snug prose-strong:text-inherit [&_p]:m-0 [&_a]:underline [&_a]:text-inherit hover:[&_a]:no-underline";
+
+const CONSENT_CHECKBOX_CLASS =
+  "border-current opacity-80 data-[state=checked]:opacity-100 data-[state=checked]:bg-transparent data-[state=checked]:text-current";
 
 function ConsentMessage({ html, testId }: { html: string; testId?: string }) {
   if (!html?.trim()) return null;
@@ -411,6 +490,7 @@ function FallbackConsentField({
               <Checkbox
                 checked={!!field.value}
                 onCheckedChange={field.onChange}
+                className={CONSENT_CHECKBOX_CLASS}
                 data-testid={fallbackKey === "consent_general" ? "checkbox-consent-general" : "checkbox-consent-fallback"}
               />
             </FormControl>
@@ -435,14 +515,56 @@ function FallbackConsentField({
   );
 }
 
-function ConsentSection({ consent, form, locale, formOptions, sessionLocation, geo, consentSettings, fallbackKey }: ConsentSectionProps) {
-  const selectedLocationSlug = form.watch("location");
-  const selectedLocation = selectedLocationSlug
+function ConsentSection({
+  consent,
+  form,
+  locale,
+  formOptions,
+  sessionLocation,
+  geo,
+  lockedLocationSlug,
+  consentSettings,
+  fallbackKey,
+  textStyle,
+}: ConsentSectionProps) {
+  const selectedLocationSlug = form.watch("location") || lockedLocationSlug || undefined;
+  const formLocation = selectedLocationSlug
     ? formOptions?.locations.find((loc) => loc.slug === selectedLocationSlug)
     : undefined;
 
-  const showSmsConsent =
-    consent.sms && (!consent.sms_usa_only || isUsVisitor({ selectedLocation, sessionLocation, geo }));
+  // Locked/picked slug without catalog row yet → unknown (hide filtered channels).
+  // No slug yet → fall through to session/geo (autodetect).
+  const countryCode = formLocation
+    ? resolveConsentCountryCode({ formLocation, sessionLocation, geo })
+    : selectedLocationSlug
+      ? null
+      : resolveConsentCountryCode({ formLocation: null, sessionLocation, geo });
+
+  const smsFilter = resolveSmsCountryFilter(consent as Record<string, unknown>);
+  const whatsappFilter = resolveWhatsappCountryFilter(consent as Record<string, unknown>);
+  const showSmsConsent = shouldShowConsentChannel({
+    channelOn: !!consent.sms,
+    countries: smsFilter.countries,
+    mode: smsFilter.mode,
+    countryCode,
+  });
+  const showWhatsappConsent =
+    !consent.marketing &&
+    shouldShowConsentChannel({
+      channelOn: !!consent.whatsapp,
+      countries: whatsappFilter.countries,
+      mode: whatsappFilter.mode,
+      countryCode,
+    });
+
+  useEffect(() => {
+    if (!showSmsConsent && form.getValues("consent_sms")) {
+      form.setValue("consent_sms", false);
+    }
+    if (!showWhatsappConsent && form.getValues("consent_whatsapp")) {
+      form.setValue("consent_whatsapp", false);
+    }
+  }, [showSmsConsent, showWhatsappConsent, form]);
 
   const defaultMarketingText = resolveConsentCopy("consent_marketing", consentSettings?.consent_marketing, locale);
   const defaultSmsText = resolveConsentCopy("consent_sms", consentSettings?.consent_sms, locale);
@@ -458,7 +580,7 @@ function ConsentSection({ consent, form, locale, formOptions, sessionLocation, g
     : "";
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" style={textStyle}>
       {requirement.showFallback && requirement.fallbackKey && (
         <FallbackConsentField
           form={form}
@@ -480,6 +602,7 @@ function ConsentSection({ consent, form, locale, formOptions, sessionLocation, g
                   <Checkbox
                     checked={field.value}
                     onCheckedChange={field.onChange}
+                    className={CONSENT_CHECKBOX_CLASS}
                     data-testid="checkbox-consent-marketing"
                   />
                 </FormControl>
@@ -513,6 +636,7 @@ function ConsentSection({ consent, form, locale, formOptions, sessionLocation, g
                 <Checkbox
                   checked={field.value}
                   onCheckedChange={field.onChange}
+                  className={CONSENT_CHECKBOX_CLASS}
                   data-testid="checkbox-consent-email"
                 />
               </FormControl>
@@ -540,6 +664,7 @@ function ConsentSection({ consent, form, locale, formOptions, sessionLocation, g
                 <Checkbox
                   checked={field.value}
                   onCheckedChange={field.onChange}
+                  className={CONSENT_CHECKBOX_CLASS}
                   data-testid="checkbox-consent-sms"
                 />
               </FormControl>
@@ -557,7 +682,7 @@ function ConsentSection({ consent, form, locale, formOptions, sessionLocation, g
         />
       )}
 
-      {!consent.marketing && consent.whatsapp && (
+      {showWhatsappConsent && (
         <FormField
           control={form.control}
           name="consent_whatsapp"
@@ -567,6 +692,7 @@ function ConsentSection({ consent, form, locale, formOptions, sessionLocation, g
                 <Checkbox
                   checked={field.value}
                   onCheckedChange={field.onChange}
+                  className={CONSENT_CHECKBOX_CLASS}
                   data-testid="checkbox-consent-whatsapp"
                 />
               </FormControl>
@@ -602,6 +728,7 @@ function ConsentSection({ consent, form, locale, formOptions, sessionLocation, g
                     <Checkbox
                       checked={!!field.value}
                       onCheckedChange={field.onChange}
+                      className={CONSENT_CHECKBOX_CLASS}
                       data-testid={`checkbox-consent-${yamlField}`}
                     />
                   </FormControl>
@@ -736,7 +863,9 @@ export default function LeadForm({
   /** Page locale (SectionContext → path). Used for copy, options, and reload_entry_fields queryKeys. */
   const locale: LeadFormLocale =
     normalizeLocale(sectionLocale || localeFromPath(locationPath)) === "es" ? "es" : "en";
-  const { session, setConversionPage } = useSession();
+  const { session, setConversionPage, isLoading: sessionLoading } = useSession();
+  const isEditMode = useEditModeOptional()?.isEditMode ?? false;
+  const formRootRef = useRef<HTMLDivElement>(null);
   const sessionLocation = useSessionLocation();
   const utm = useUTM();
   const nav = useInternalNav();
@@ -795,7 +924,7 @@ export default function LeadForm({
   // so a stale YAML flag can never break submissions.
   const isSignupRequested = data.is_signup === true;
   const allowSignup = data.allow_signup !== false;
-  const { data: authSettings } = useQuery<{
+  const { data: authSettings, isLoading: authSettingsLoading } = useQuery<{
     signup_configured: boolean;
     signup_field_map_ready?: boolean;
     host?: string;
@@ -806,7 +935,7 @@ export default function LeadForm({
     enabled: isSignupRequested,
     staleTime: 5 * 60 * 1000,
   });
-  const { data: variableDefinitions } = useVariableDefinitions();
+  const { data: variableDefinitions, isLoading: variableDefinitionsLoading } = useVariableDefinitions();
   const variableContext = useVariableContext();
   const authConversionCfg = parseAuthConversionEventConfig(publicConversionEvents?.auth ?? {});
   // Account create path: needs field_map. Login-only gate does not.
@@ -940,21 +1069,38 @@ export default function LeadForm({
   const effectiveTermsUrl = resolvedData.terms_url || null;
   const effectivePrivacyUrl = resolvedData.privacy_url || null;
 
-  const hasLandingLocations = landingLocations && landingLocations.length > 0;
-  const singleLandingLocation = hasLandingLocations && landingLocations.length === 1 ? landingLocations[0] : null;
-  const multipleLandingLocations = hasLandingLocations && landingLocations.length > 1 ? landingLocations : null;
-
-  const { data: formOptions } = useQuery<FormOptions>({
+  const { data: formOptions, isLoading: formOptionsLoading } = useQuery<FormOptions>({
     queryKey: ["/api/form-options", locale],
   });
 
   const { data: contentTypeConfig } = useQuery<{
     editor?: Record<string, { type?: string } & RelationEditorHint>;
+    forms?: { location?: { entry_field?: string; autodetect?: boolean } } | null;
   }>({
     queryKey: [`/api/content-types/${contentType}/config`],
     enabled: !!contentType,
     staleTime: 5 * 60 * 1000,
   });
+
+  // forms.location on the content type: the form's own setting, then the page field, then detection.
+  const locationPolicy = useMemo(
+    () => effectiveFormLocationPolicy({ fields }, parseFormLocationPolicy(contentTypeConfig)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [contentTypeConfig, data.fields],
+  );
+  const locationResolution = locationPolicy
+    ? resolveFormLocationSource({ form: { fields }, entry: singleEntry, policy: locationPolicy })
+    : null;
+  const plannedLocations =
+    locationResolution && (locationResolution.layer === "form" || locationResolution.layer === "entry")
+      ? locationResolution.locations
+      : [];
+  const locationPicker = locationResolution?.own?.mode === "picker";
+  const singleLandingLocation = !locationPicker && plannedLocations.length === 1 ? plannedLocations[0] : null;
+  const multipleLandingLocations =
+    plannedLocations.length > 1 || (locationPicker && plannedLocations.length > 0) ? plannedLocations : null;
+  const hasLandingLocations = !!(singleLandingLocation || multipleLandingLocations);
+  const locationRegionOf = (slug: string) => formOptions?.locations.find((l) => l.slug === slug)?.region;
 
   const programSourceRaw = fields.program?.source;
   const programSource = programSourceRaw
@@ -966,7 +1112,7 @@ export default function LeadForm({
   const planSource = planSourceRaw ? parseFormFieldSource(planSourceRaw) : null;
   const planCatalogKey = planSource ? catalogSourceKey(planSource) : undefined;
 
-  const { data: programQueryOptions } = useQuery<{
+  const { data: programQueryOptions, isLoading: programQueryOptionsLoading } = useQuery<{
     options: Array<{ value: string; label: string }>;
   }>({
     queryKey: [
@@ -1071,7 +1217,7 @@ export default function LeadForm({
   const landingRegions = (() => {
     if (!hasLandingLocations || !formOptions?.locations) return null;
     const regionSlugs = new Set<string>();
-    for (const locSlug of landingLocations!) {
+    for (const locSlug of plannedLocations) {
       const found = formOptions.locations.find(l => l.slug === locSlug);
       if (found) regionSlugs.add(found.region);
     }
@@ -1097,29 +1243,52 @@ export default function LeadForm({
       client_comments: { visible: false, required: false },
       current_download: { visible: false, required: false },
     };
-    let baseConfig = { ...defaults[fieldName], ...fields[fieldName] };
+    let baseConfig: FieldConfig = { ...defaults[fieldName], ...fields[fieldName] };
+    if (!baseConfig.visible) {
+      baseConfig.hiddenReason =
+        fields[fieldName]?.visible === false || !defaults[fieldName] ? "yaml" : "builtin_default";
+    }
 
     // Signup mode: identity fields already known from the profile are hidden
     // (their values are prefilled and still submitted).
     if (hiddenIdentityFields.has(fieldName as IdentityField)) {
-      return { ...baseConfig, visible: false, required: false };
+      return { ...baseConfig, visible: false, required: false, hiddenReason: "signed_in_profile" };
     }
 
     if (fieldName === "location" && hasLandingLocations) {
       if (singleLandingLocation) {
-        return { ...baseConfig, visible: false, default: singleLandingLocation };
+        return {
+          ...baseConfig,
+          visible: false,
+          default: singleLandingLocation,
+          hiddenReason: "landing_location",
+        };
       }
       if (multipleLandingLocations) {
-        return { ...baseConfig, visible: true, required: true, default: "" };
+        return { ...baseConfig, visible: true, required: true, default: "", hiddenReason: undefined };
       }
+    }
+    if (fieldName === "location" && locationPicker) {
+      return { ...baseConfig, visible: true, required: true, hiddenReason: undefined };
+    }
+
+    // Region follows the chosen location once the form or page sets one.
+    if (fieldName === "region" && locationPolicy && (hasLandingLocations || locationPicker)) {
+      return { ...baseConfig, visible: false, required: false, hiddenReason: "landing_location" };
     }
 
     if (fieldName === "region" && hasLandingLocations) {
       if (singleLandingRegion) {
-        return { ...baseConfig, visible: false, required: false, default: singleLandingRegion };
+        return {
+          ...baseConfig,
+          visible: false,
+          required: false,
+          default: singleLandingRegion,
+          hiddenReason: "landing_location",
+        };
       }
       if (multipleLandingRegions) {
-        return { ...baseConfig, visible: true, required: true, default: "" };
+        return { ...baseConfig, visible: true, required: true, default: "", hiddenReason: undefined };
       }
     }
 
@@ -1158,8 +1327,16 @@ export default function LeadForm({
           src.related_field && normalizedDefault === "auto"
             ? { ...baseConfig, default: "" }
             : { ...baseConfig, default: normalizedDefault };
-        const { mode: _mode, ...card } = applyChoiceCardinality(authoredDefault, options);
-        baseConfig = card;
+        const { mode, ...card } = applyChoiceCardinality(authoredDefault, options);
+        baseConfig = {
+          ...card,
+          hiddenReason:
+            mode === "single"
+              ? "single_source_option"
+              : mode === "empty"
+                ? "source_no_options"
+                : undefined,
+        };
       }
     }
 
@@ -1187,30 +1364,14 @@ export default function LeadForm({
   const resolveDefault = (
     fieldName: string,
     configDefault?: LeadFormFieldDefault,
-  ): string => {
-    if (configDefault === undefined || configDefault === null) return "";
-    if (typeof configDefault !== "string") return String(configDefault);
-    if (configDefault !== "auto") {
-      return configDefault;
-    }
-
-    switch (fieldName) {
-      case "program":
-        return programContext || "";
-      case "location":
-        if (singleLandingLocation) return singleLandingLocation;
-        return sessionLocation?.slug || "";
-      case "region":
-        if (singleLandingRegion) return singleLandingRegion;
-        return sessionLocation?.region || "";
-      case "coupon":
-        return utm.coupon || "";
-      case "referral_key":
-        return utm.referral_key || utm.referral || utm.ref || "";
-      default:
-        return "";
-    }
-  };
+  ): string =>
+    resolveLeadFormDefault(fieldName, configDefault, {
+      programContext,
+      singleLandingLocation,
+      singleLandingRegion,
+      sessionLocation,
+      utm,
+    });
 
   const programFieldSlugs = fields.program?.slugs;
   const visiblePrograms = (() => {
@@ -1363,21 +1524,34 @@ export default function LeadForm({
   });
 
   useEffect(() => {
+    // With forms.location, detection only fills in when the content type allows it
+    // (or pre-selects a detected city that is on the form/page list).
+    const detectionPrefill = !locationPolicy || locationResolution?.layer === "autodetect" || locationPicker;
     if (singleLandingLocation) {
       form.setValue("location", singleLandingLocation);
     } else if (sessionLocation && !form.getValues("location")) {
-      // Only autofill when the session campus is among listed form options
-      // (Florida etc. hide most campuses — a foreign slug blanks the Select).
-      const listed = formOptions?.locations;
-      const sessionSlugOk =
-        !listed || listed.some((loc) => loc.slug === sessionLocation.slug);
-      if (sessionSlugOk) {
-        form.setValue("location", sessionLocation.slug);
+      if (multipleLandingLocations) {
+        if (multipleLandingLocations.includes(sessionLocation.slug)) {
+          form.setValue("location", sessionLocation.slug);
+        }
+      } else if (detectionPrefill) {
+        // Only autofill when the session campus is among listed form options
+        // (Florida etc. hide most campuses — a foreign slug blanks the Select).
+        const listed = formOptions?.locations;
+        const sessionSlugOk =
+          !listed || listed.some((loc) => loc.slug === sessionLocation.slug);
+        if (sessionSlugOk) {
+          form.setValue("location", sessionLocation.slug);
+        }
       }
     }
     if (singleLandingRegion) {
       form.setValue("region", singleLandingRegion);
-    } else if (sessionLocation?.region && !form.getValues("region")) {
+    } else if (
+      sessionLocation?.region &&
+      !form.getValues("region") &&
+      (!locationPolicy || locationResolution?.layer === "autodetect")
+    ) {
       const listedRegions = formOptions?.locations?.map((loc) => loc.region) ?? [];
       const sessionRegionOk =
         listedRegions.length === 0 || listedRegions.includes(sessionLocation.region);
@@ -1395,7 +1569,19 @@ export default function LeadForm({
     if (programContext && !form.getValues("program")) {
       form.setValue("program", programContext);
     }
-  }, [sessionLocation, utm, programContext, form, singleLandingLocation, singleLandingRegion, formOptions?.locations]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    sessionLocation,
+    utm,
+    programContext,
+    form,
+    singleLandingLocation,
+    singleLandingRegion,
+    formOptions?.locations,
+    locationPolicy,
+    locationResolution?.layer,
+    multipleLandingLocations?.join(","),
+  ]);
 
   useEffect(() => {
     if (programSource?.related_field || programCatalogKey) {
@@ -1438,8 +1624,8 @@ export default function LeadForm({
     form,
   ]);
 
-  /** Same field defaults used for lead payload and route matching. */
-  const resolveEffectiveFieldValues = (values: FormValues) => {
+  /** Inputs for the shared field precedence (submit, overrides, edit-mode notice). */
+  const buildFieldResolveContext = (values: FormValues): LeadFormFieldResolveContext => {
     const programOpts: RelationFormFieldOption[] = programSource?.related_field
       ? programRelationOptions
       : programCatalogKey
@@ -1454,65 +1640,71 @@ export default function LeadForm({
             bc_slug: p.bc_slug || p.slug,
           }));
 
-    const rawProgram =
-      values.program ||
-      formOptions?.programs.find((p) => p.slug === programContext)?.bc_slug ||
-      programContext ||
-      resolveDefault("program", getFieldConfig("program").default);
-
-    const resolved: Record<string, LeadFormFieldDefault> = {
-      ...Object.fromEntries(
-        Object.entries(values).filter(
-          (entry): entry is [string, string] => typeof entry[1] === "string",
-        ),
-      ),
-      program: resolveSubmitValueFromOptions(rawProgram, programOpts) || rawProgram,
-      location:
-        singleLandingLocation ||
-        values.location ||
-        sessionLocation?.slug ||
-        resolveDefault("location", getFieldConfig("location").default),
-      region:
-        singleLandingRegion ||
-        values.region ||
-        sessionLocation?.region ||
-        resolveDefault("region", getFieldConfig("region").default),
-      coupon:
-        values.coupon ||
-        utm.coupon ||
-        resolveDefault("coupon", getFieldConfig("coupon").default),
-      referral_key:
-        values.referral_key ||
-        utm.referral_key ||
-        utm.referral ||
-        utm.ref ||
-        resolveDefault("referral_key", getFieldConfig("referral_key").default),
-      current_download:
-        values.current_download ||
-        resolveDefault("current_download", getFieldConfig("current_download").default),
-      plan:
-        values.plan ||
-        resolveDefault("plan", getFieldConfig("plan").default) ||
-        "",
+    return {
+      values: values as Record<string, unknown>,
+      // SectionRenderer resolveDeep already expanded {{ entry.* }} in these defaults.
+      fields: (data.fields || {}) as LeadFormFieldResolveContext["fields"],
+      getConfigDefault: (name) =>
+        getFieldConfig(name as keyof NonNullable<LeadFormData["fields"]>).default,
+      programContext,
+      formPrograms: formOptions?.programs,
+      programOptions: programOpts,
+      singleLandingLocation,
+      singleLandingRegion,
+      sessionLocation,
+      utm,
+      identityPrefill: identityPrefill as Record<string, string | undefined>,
+      loading: {
+        session: sessionLoading,
+        formOptions: formOptionsLoading,
+        programOptions: programQueryOptionsLoading,
+      },
+      locationPlan: locationResolution
+        ? {
+            layer: locationResolution.layer,
+            locations: locationResolution.locations,
+            preselected:
+              multipleLandingLocations && sessionLocation?.slug && multipleLandingLocations.includes(sessionLocation.slug)
+                ? sessionLocation.slug
+                : null,
+          }
+        : null,
+      locationRegionOf,
     };
-
-    // Any fields.* default not already filled (SectionRenderer resolveDeep already
-    // expanded {{ entry.* }}; extras like event_id land here for lead body + GTM).
-    for (const [key, cfg] of Object.entries(data.fields || {})) {
-      if (!cfg || typeof cfg !== "object") continue;
-      if (isNonEmptyLeadFormWireScalar(resolved[key])) continue;
-      const rawDefault = cfg.default;
-      if (!isNonEmptyLeadFormWireScalar(rawDefault)) continue;
-      if (typeof rawDefault === "string") {
-        const fromAuto = resolveDefault(key, rawDefault);
-        resolved[key] = fromAuto || rawDefault;
-      } else {
-        resolved[key] = rawDefault;
-      }
-    }
-
-    return resolved;
   };
+
+  /** Same field defaults used for lead payload and route matching. */
+  const resolveEffectiveFieldValues = (values: FormValues) =>
+    resolveLeadFormFieldValues(buildFieldResolveContext(values));
+
+  /** Signup field_map context (submit and edit-mode notice). */
+  const buildSignupCtx = (
+    values: FormValues,
+    fields: Record<string, LeadFormFieldDefault>,
+    consents: { consent_email?: boolean; consent_sms?: boolean; consent_whatsapp?: boolean },
+    fieldMap: AuthSignupFieldMapEntry[],
+  ) =>
+    buildSignupFieldMapContext({
+      values: values as Record<string, unknown>,
+      fields,
+      consents,
+      session,
+      sessionLocation,
+      utm,
+      fieldMap,
+      locationDetail: (() => {
+        const slug = typeof fields.location === "string" ? fields.location : undefined;
+        return buildSignupLocationDetail({
+          slug,
+          location: slug ? formOptions?.locations.find((l) => l.slug === slug) : undefined,
+          detected: resolveLeadFormLocationSource(buildFieldResolveContext(values)) === "detected",
+          geo: session.geo,
+        });
+      })(),
+      resolveGlobal: variableDefinitions
+        ? (name) => resolveVariable(name, variableDefinitions, variableContext)?.value ?? ""
+        : null,
+    });
 
   /** Ecommerce product for this submit: GA4 item_id and the lead ledger use the same result. */
   const resolveSubmitProduct = async (fields: Record<string, LeadFormFieldDefault>) => {
@@ -1576,6 +1768,7 @@ export default function LeadForm({
   ) => {
     const resolvedProduct = await resolveSubmitProduct(fields);
     const leadTracking = await resolveLeadTracking(fields);
+    const consents = effectiveFormConsents(formValues, consent);
     const tracking: FormSubmissionTrackingData = {
       email: formValues.email,
       first_name: formValues.first_name,
@@ -1593,9 +1786,9 @@ export default function LeadForm({
       client_comments: formValues.client_comments,
       current_download:
         typeof fields.current_download === "string" ? fields.current_download : undefined,
-      consent_email: formValues.consent_email,
-      consent_sms: formValues.consent_sms,
-      consent_whatsapp: formValues.consent_whatsapp,
+      consent_email: consents.consent_email,
+      consent_sms: consents.consent_sms,
+      consent_whatsapp: consents.consent_whatsapp,
       consent_general: formValues.consent_general,
       ...Object.fromEntries(
         extraConsentFields.map((field) => [
@@ -1609,6 +1802,9 @@ export default function LeadForm({
       ...(leadTracking.codes ?? {}),
       submission_id: submissionId,
     };
+    // Analytics only: the CRM payload is built from `fields`, which never carries this.
+    const locationSource = resolveLeadFormLocationSource(buildFieldResolveContext(formValues));
+    if (locationSource) tracking.location_source = locationSource;
     await trackFormSubmission(eventName, tracking);
   };
 
@@ -1627,8 +1823,10 @@ export default function LeadForm({
       );
       
       // When marketing consent is enabled, derive both email and whatsapp from consent_email checkbox
-      const effectiveEmailConsent = consent_email || false;
-      const effectiveWhatsappConsent = consent.marketing ? effectiveEmailConsent : (consent_whatsapp || false);
+      const consents = effectiveFormConsents(
+        { consent_email, consent_sms, consent_whatsapp },
+        consent,
+      );
       const fieldScalars = Object.fromEntries(
         Object.entries(fields).filter(([, value]) =>
           isNonEmptyLeadFormWireScalar(value),
@@ -1641,9 +1839,9 @@ export default function LeadForm({
         ...restValues,
         ...fieldScalars,
         // Consent fields mapped to backend names
-        consent_email: effectiveEmailConsent,
-        sms_consent: consent_sms || false,
-        consent_whatsapp: effectiveWhatsappConsent,
+        consent_email: consents.consent_email,
+        sms_consent: consents.consent_sms,
+        consent_whatsapp: consents.consent_whatsapp,
         location: fields.location,
         region: fields.region,
         coupon: fields.coupon,
@@ -1684,36 +1882,7 @@ export default function LeadForm({
       // logged-in users skip this and go straight to the lead/conversion flow.
       if (signupActive && !isLoggedIn) {
         const fieldMap = authSettings?.signup?.field_map ?? [];
-        const formCtx: Record<string, unknown> = {
-          ...values,
-          ...fields,
-          consent_email: effectiveEmailConsent,
-          consent_sms: consent_sms || false,
-          consent_whatsapp: effectiveWhatsappConsent,
-        };
-        const sessionCtx: Record<string, unknown> = {
-          language: session.language,
-          browserLang: session.browserLang,
-          landing_page: session.landing_page,
-          conversion_page: session.conversion_page,
-          userId: session.userId,
-          geo: session.geo ?? {},
-          location: sessionLocation ?? {},
-          utm: {
-            utm_source: utm.utm_source,
-            utm_medium: utm.utm_medium,
-            utm_campaign: utm.utm_campaign,
-            utm_content: utm.utm_content,
-            utm_term: utm.utm_term,
-            utm_url: utm.utm_url,
-            utm_placement: utm.utm_placement,
-            utm_plan: utm.utm_plan,
-            coupon: utm.coupon,
-            referral_key: utm.referral_key,
-            referral: utm.referral,
-            ref: utm.ref,
-          },
-        };
+        const signupCtx = buildSignupCtx(values, fields, consents, fieldMap);
         const conversion_info: Record<string, unknown> = {
           user_agent: navigator.userAgent,
           landing_url:
@@ -1721,23 +1890,9 @@ export default function LeadForm({
           conversion_url: window.location.pathname,
           ...(utm.utm_placement ? { internal_cta_placement: utm.utm_placement } : {}),
         };
-        const globals: Record<string, string> = {};
-        for (const entry of fieldMap) {
-          if (!isGlobalEntry(entry)) continue;
-          if (!variableDefinitions) {
-            globals[entry.global] = "";
-            continue;
-          }
-          const resolved = resolveVariable(
-            entry.global,
-            variableDefinitions,
-            variableContext,
-          );
-          globals[entry.global] = resolved?.value ?? "";
-        }
         const signupPayload = buildSignupPayloadFromFieldMap(
           fieldMap,
-          { form: formCtx, session: sessionCtx, globals },
+          signupCtx,
           conversion_info,
         );
         const signupRes = await apiRequest("POST", "/api/auth/signup", signupPayload);
@@ -1782,6 +1937,7 @@ export default function LeadForm({
           {
             singleEntry: (singleEntry as Record<string, unknown> | undefined) ?? undefined,
             visitor: Object.keys(visitor).length > 0 ? visitor : undefined,
+            form: fields as Record<string, unknown>,
           },
         ).text;
       };
@@ -2010,17 +2166,25 @@ export default function LeadForm({
     getFieldConfig("region").options,
   );
 
+  // Hidden campuses (unlisted) stay valid on a form or page list but are not in form options.
+  const hiddenListedLocations = formOptions?.locations
+    ? (multipleLandingLocations ?? []).filter((slug) => !formOptions.locations.some((l) => l.slug === slug))
+    : [];
+
   const locationChoiceOptions = mergeLeadFormOptions(
-    filteredLocations.map((loc) => {
-      const region = formOptions?.regions.find((r) => r.slug === loc.region);
-      const countryLabel =
-        loc.country && loc.country !== "Unknown" ? loc.country : region?.label || "";
-      return {
-        value: loc.slug,
-        label: countryLabel ? `${loc.name} - ${countryLabel}` : loc.name,
-        group: region?.label,
-      };
-    }),
+    [
+      ...filteredLocations.map((loc) => {
+        const region = formOptions?.regions.find((r) => r.slug === loc.region);
+        const countryLabel =
+          loc.country && loc.country !== "Unknown" ? loc.country : region?.label || "";
+        return {
+          value: loc.slug,
+          label: countryLabel ? `${loc.name} - ${countryLabel}` : loc.name,
+          group: region?.label,
+        };
+      }),
+      ...hiddenListedLocations.map((slug) => ({ value: slug, label: deslugifyLabel(slug) })),
+    ],
     getFieldConfig("location").options,
   );
 
@@ -2067,22 +2231,25 @@ export default function LeadForm({
       resolveTemplateString(raw, defs, variableContext, {
         singleEntry: entry,
         visitor: visitorBag,
+        form: watchedValues as Record<string, unknown>,
       }).text;
-  }, [variableDefinitions, variableContext, singleEntry, visitorBag]);
+  }, [variableDefinitions, variableContext, singleEntry, visitorBag, watchedValues]);
 
-  /** Condition values: resolveDeep so exact {{ entry.* }} / {{ visitor.* }} keep arrays/numbers. */
+  /** Condition operands: resolveDeep so exact {{ form.* }} / {{ entry.* }} / {{ visitor.* }} keep arrays/numbers. */
   const resolveConditionValue = useMemo(() => {
     const defs = variableDefinitions ?? {};
     const entry = (singleEntry as Record<string, unknown> | undefined) ?? undefined;
+    const formValues = watchedValues as Record<string, unknown>;
     return (raw: string): unknown =>
       resolveDeep(raw, defs, variableContext, {
         singleEntry: entry,
         visitor: visitorBag,
+        form: formValues,
       }).data;
-  }, [variableDefinitions, variableContext, singleEntry, visitorBag]);
+  }, [variableDefinitions, variableContext, singleEntry, visitorBag, watchedValues]);
 
-  const effectiveData = useMemo(() => {
-    const override = resolveLeadFormOverride(
+  const { effectiveData, overrideMatch } = useMemo(() => {
+    const match = resolveLeadFormOverrideMatch(
       watchedValues as Record<string, unknown>,
       data.form_overrides,
       {
@@ -2090,10 +2257,13 @@ export default function LeadForm({
         entry: (singleEntry as Record<string, unknown> | undefined) ?? undefined,
       },
     );
-    return applyLeadFormOverrideOutcome(
-      data as Record<string, unknown>,
-      override,
-    ) as LeadFormData;
+    return {
+      overrideMatch: match,
+      effectiveData: applyLeadFormOverrideOutcome(
+        data as Record<string, unknown>,
+        match?.outcome ?? null,
+      ) as LeadFormData,
+    };
   }, [watchedValues, data, resolveConditionValue, singleEntry]);
 
   const isFieldValueFilled = (field: keyof FormValues): boolean => {
@@ -2139,11 +2309,32 @@ export default function LeadForm({
   });
   const formCopy = resolveLeadFormCopy(formPhase, effectiveData, locale);
 
+  const pickedButtonVariant =
+    data.button_variant === "outline"
+      ? "outline"
+      : data.button_variant === "secondary"
+        ? "secondary"
+        : data.button_variant === "accent"
+          ? "accent"
+          : "default";
+  const submitButtonVariant = formCopy.submit_disabled === true ? "secondary" : pickedButtonVariant;
+
+  const hideOptionals =
+    isSignupRequested && isLoggedIn && !loginMode && allRequiredFieldsFilled;
+
   const showField = (name: keyof NonNullable<LeadFormData["fields"]>) => {
-    const hideOptionals =
-      isSignupRequested && isLoggedIn && !loginMode && allRequiredFieldsFilled;
     const cfg = getFieldConfig(name);
     return !!cfg.visible && !(hideOptionals && !cfg.required);
+  };
+
+  /** Why `showField(name)` is false (null when the field is shown). */
+  const getHiddenReason = (
+    name: keyof NonNullable<LeadFormData["fields"]>,
+  ): LeadFormHiddenReason | null => {
+    const cfg = getFieldConfig(name);
+    if (!cfg.visible) return cfg.hiddenReason ?? "yaml";
+    if (hideOptionals && !cfg.required) return "collapsed_after_login";
+    return null;
   };
 
   // Avoid an empty space-y wrapper pushing the submit button away from the message.
@@ -2219,6 +2410,149 @@ export default function LeadForm({
 
   const isInline = variant === "inline";
 
+  // Edit mode: hidden values staff can't see. Top badges resolve now, the rest when
+  // "Other fields" opens — both through the same resolvers the submit uses.
+  const editModeNotice = (() => {
+    if (!isEditMode) return null;
+
+    const hiddenFields: Array<{ name: string; hiddenReason: LeadFormHiddenReason }> = [];
+    for (const name of LEAD_FORM_SLOT_FIELDS) {
+      const reason = getHiddenReason(name);
+      if (reason) hiddenFields.push({ name, hiddenReason: reason });
+    }
+    for (const name of Object.keys(fields)) {
+      if (LEAD_FORM_SLOT_SET.has(name) || name.startsWith("consent_")) continue;
+      hiddenFields.push({ name, hiddenReason: "extra_key" });
+    }
+    const hiddenNames = new Set(hiddenFields.map((f) => f.name));
+
+    const signupFieldMap = authSettings?.signup?.field_map ?? [];
+    const signupEntries =
+      isSignupRequested && allowSignup
+        ? signupFieldMap.filter((entry) => {
+            if (!isDynamicFromEntry(entry) || !isFormSource(entry.from)) return true;
+            const name = formFieldNameFromSource(entry.from);
+            if (!name || name.startsWith("consent_")) return false;
+            return hiddenNames.has(name) || !LEAD_FORM_SLOT_SET.has(name);
+          })
+        : [];
+
+    const { top, rest } = rankHiddenBadges({ fields: hiddenFields, signupEntries });
+
+    const fieldCtx = buildFieldResolveContext(watchedValues);
+    let signupCtx: SignupFieldMapResolveContext | null = null;
+    const getSignupCtx = () =>
+      (signupCtx ??= buildSignupCtx(
+        watchedValues,
+        resolveEffectiveFieldValues(watchedValues),
+        effectiveFormConsents(watchedValues, consent),
+        signupFieldMap,
+      ));
+
+    const resolveBadge = (ref: HiddenBadgeRef): HiddenBadgeDetail => {
+      const id = hiddenBadgeId(ref);
+      if (ref.kind === "field") {
+        return {
+          kind: "field",
+          id,
+          name: ref.name,
+          hiddenReason: ref.hiddenReason,
+          resolved: resolveLeadFormFieldValue(ref.name, fieldCtx),
+        };
+      }
+      const { entry, key } = ref;
+      const value = resolveSignupFieldMapEntry(entry, getSignupCtx());
+      const base = { kind: "signup" as const, id, key, entry, value };
+      if (isConstantEntry(entry)) {
+        return { ...base, source: "constant", pending: false, viewerDependent: false };
+      }
+      if (isGlobalEntry(entry)) {
+        return {
+          ...base,
+          source: "global",
+          sourcePath: entry.global,
+          pending: variableDefinitionsLoading && value === "",
+          viewerDependent: false,
+        };
+      }
+      if (isSessionSource(entry.from)) {
+        return {
+          ...base,
+          source: "session",
+          sourcePath: sessionPathFromSource(entry.from) ?? "",
+          pending: sessionLoading && value === "",
+          viewerDependent: true,
+        };
+      }
+      const formName = formFieldNameFromSource(entry.from) ?? "";
+      const formField = resolveLeadFormFieldValue(formName, fieldCtx);
+      return {
+        ...base,
+        source: "form",
+        sourcePath: formName,
+        formField,
+        pending: formField.pending,
+        viewerDependent: formField.viewerDependent,
+      };
+    };
+
+    const gate = resolveSignupGateStatus({
+      isSignupRequested,
+      allowSignup,
+      authSettings,
+      authSettingsLoading,
+      formData: data as Record<string, unknown>,
+      pageSetsLocation: locationResolution?.layer === "entry",
+    });
+
+    const matchedConditions = overrideMatch
+      ? data.form_overrides?.[overrideMatch.index]?.conditions ?? []
+      : [];
+    const override: LeadFormOverrideBadge | null = overrideMatch
+      ? {
+          number: overrideMatch.index + 1,
+          outcome: overrideMatch.outcome,
+          viewerDependent: matchedConditions.some((c) =>
+            [c.field_property_slug, typeof c.value === "string" ? c.value : ""].some(
+              (s) => typeof s === "string" && s.includes("visitor."),
+            ),
+          ),
+        }
+      : null;
+
+    const pageLocs = pageLocationValues(singleEntry, locationPolicy?.entryField);
+    const locationStatus =
+      locationResolution?.layer === "missing"
+        ? { status: "missing" as const }
+        : locationResolution?.layer === "form" && formPageLocationMismatch(locationResolution.locations, pageLocs)
+          ? { status: "mismatch" as const, formValues: locationResolution.locations, pageValues: pageLocs }
+          : null;
+
+    const renderOverlay = (withHiddenFields: boolean) => {
+      const hidden = withHiddenFields && top.length > 0 ? { top, rest, resolveBadge } : null;
+      if (gate.kind === "off" && !override && !hidden && !locationStatus) return null;
+      return (
+        <Suspense fallback={null}>
+          <LeadFormStatusBadges
+            locale={locale}
+            anchorRef={formRootRef}
+            gate={gate}
+            override={override}
+            location={locationStatus}
+            hiddenFields={hidden}
+          />
+        </Suspense>
+      );
+    };
+
+    return {
+      /** Floating status cluster + hidden fields panel (takes no layout space). */
+      overlay: renderOverlay(true),
+      /** Login step: status badges only (no lead fields are being filled). */
+      statusOnly: renderOverlay(false),
+    };
+  })();
+
   if (isSuccess) {
     // Inline variant: compact horizontal success message
     if (isInline) {
@@ -2249,7 +2583,8 @@ export default function LeadForm({
 
   if (loginMode) {
     return (
-      <div className={data.className} data-testid="lead-form-login">
+      <div className={data.className} data-testid="lead-form-login" ref={formRootRef}>
+        {editModeNotice?.statusOnly}
         {formCopy.title ? (
           <p
             className="font-inter text-[21px] font-bold tracking-tight text-foreground text-center mb-1"
@@ -2308,6 +2643,7 @@ export default function LeadForm({
           )}
           <Button
             type="submit"
+            variant={pickedButtonVariant}
             className="w-full"
             disabled={loginMutation.isPending || !loginEmail.trim() || !loginPassword}
             data-testid="button-login-submit"
@@ -2357,7 +2693,8 @@ export default function LeadForm({
 
   if (isInline && !hasVisibleFieldsBeyondEmailAndFirstName) {
     return (
-      <div className={data.className} data-testid="lead-form">
+      <div className={data.className} data-testid="lead-form" ref={formRootRef}>
+        {editModeNotice?.overlay}
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)}>
             <div className="flex gap-2 items-start flex-wrap">
@@ -2408,7 +2745,7 @@ export default function LeadForm({
               )}
               <Button 
                 type="submit" 
-                variant={formCopy.submit_disabled === true ? "secondary" : "default"}
+                variant={submitButtonVariant}
                 disabled={submitMutation.isPending || formCopy.submit_disabled === true}
                 data-testid="button-submit"
               >
@@ -2463,8 +2800,10 @@ export default function LeadForm({
                   formOptions={formOptions}
                   sessionLocation={sessionLocation}
                   geo={session.geo}
+                  lockedLocationSlug={singleLandingLocation}
                   consentSettings={consentSettings}
                   fallbackKey={consentFallbackKey}
+                  textStyle={termsStyle}
                 />
               </div>
             )}
@@ -2478,7 +2817,8 @@ export default function LeadForm({
   }
 
   return (
-    <div className={data.className} data-testid="lead-form">
+    <div className={data.className} data-testid="lead-form" ref={formRootRef}>
+      {editModeNotice?.overlay}
       {formCopy.title ? (
         <p
           className="font-inter text-[21px] font-bold tracking-tight text-foreground text-center mb-1"
@@ -2912,15 +3252,17 @@ export default function LeadForm({
           )}
 
           {showLegalAndConsent && allRequiredFieldsFilled && (
-            <ConsentSection 
+            <ConsentSection
               consent={consent}
               form={form}
               locale={locale}
               formOptions={formOptions}
               sessionLocation={sessionLocation}
               geo={session.geo}
+              lockedLocationSlug={singleLandingLocation}
               consentSettings={consentSettings}
               fallbackKey={consentFallbackKey}
+              textStyle={termsStyle}
             />
           )}
 
@@ -2977,11 +3319,11 @@ export default function LeadForm({
           </div>
 
           {isSignupRequested && showTerms && showLegalAndConsent && (
-            <p className={`text-xs text-center ${data.terms_className || "text-muted-foreground"}`} style={termsStyle} data-testid="text-terms">
+            <p className={`text-xs text-center ${data.terms_className || "text-inherit opacity-80"}`} style={termsStyle} data-testid="text-terms">
               {locale === "es" ? "Al registrarte, aceptas los " : "By signing up, you agree to the "}
               <a 
                 href={effectiveTermsUrl || legalSettings?.legal_terms_url || (locale === "es" ? "/es/terminos-y-condiciones" : "/en/terms-conditions")} 
-                className="underline hover:text-foreground"
+                className="underline hover:no-underline"
                 target="_blank"
                 rel="noopener noreferrer"
                 data-testid="link-terms"
@@ -2991,7 +3333,7 @@ export default function LeadForm({
               {locale === "es" ? " y la " : " and "}
               <a 
                 href={effectivePrivacyUrl || legalSettings?.legal_privacy_url || (locale === "es" ? "/es/politicas-de-privacidad" : "/en/privacy-policy")} 
-                className="underline hover:text-foreground"
+                className="underline hover:no-underline"
                 target="_blank"
                 rel="noopener noreferrer"
                 data-testid="link-privacy"

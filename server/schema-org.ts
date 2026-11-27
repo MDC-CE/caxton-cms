@@ -8,10 +8,17 @@ import {
   transformToJsonLd,
   type SchemaLocales,
 } from "@shared/schema-org-transform";
+import { resolveAllTemplateVars } from "./resolve-template-vars";
 
 export { transformToJsonLd, camelToJsonLd } from "@shared/schema-org-transform";
 
 const log = child({ module: "schema-org" });
+
+/** True when a ContentIndex variable-usage path is the site schema-org.yml. */
+export function isSchemaOrgUsagePath(filePath: string): boolean {
+  const n = filePath.replace(/\\/g, "/");
+  return n === "schema-org.yml" || n.endsWith("/schema-org.yml");
+}
 
 interface BaseSchema {
   type: string;
@@ -60,6 +67,21 @@ function loadSchemaConfig(contentRoot?: string): SchemaOrgConfig {
     log.error({ err: err }, "[SchemaOrg] Error loading schema-org.yml:");
     return {};
   }
+}
+
+/**
+ * schema-org.yml with site `{{ global.* }}` / `{{ brand.* }}` resolved.
+ * For JSON-LD emit only — editor prefills use raw `loadSchemaConfig` paths.
+ */
+export function loadResolvedSchemaConfig(
+  contentRoot?: string,
+  locale: string = "en",
+): SchemaOrgConfig {
+  return resolveAllTemplateVars(loadSchemaConfig(contentRoot), {
+    contentRoot: contentRoot ?? getDefaultContentRoot(),
+    context: { locale },
+    skipSiteVars: false,
+  }) as SchemaOrgConfig;
 }
 
 /** Clear the schema cache for a specific site (by contentRoot) or all sites if no arg given. */
@@ -136,22 +158,22 @@ function resolveSchemaRef(ref: string, config: SchemaOrgConfig, locale: string):
 }
 
 export function getSchema(schemaKey: string, locale: string = "en", contentRoot?: string): Record<string, unknown> | null {
-  const config = loadSchemaConfig(contentRoot);
-  
+  const config = loadResolvedSchemaConfig(contentRoot, locale);
+
   if (schemaKey === "organization" && config.organization) {
     return {
       "@context": "https://schema.org",
       ...transformToJsonLd(config.organization, locale),
     };
   }
-  
+
   if (schemaKey === "website" && config.website) {
     return {
       "@context": "https://schema.org",
       ...transformToJsonLd(config.website, locale),
     };
   }
-  
+
   if (schemaKey.startsWith("courses:")) {
     const resolved = resolveSchemaRef(schemaKey, config, locale);
     if (resolved) {
@@ -161,7 +183,7 @@ export function getSchema(schemaKey: string, locale: string = "en", contentRoot?
       };
     }
   }
-  
+
   if (schemaKey.startsWith("item_lists:")) {
     const resolved = resolveSchemaRef(schemaKey, config, locale);
     if (resolved) {
@@ -181,7 +203,7 @@ export function getSchema(schemaKey: string, locale: string = "en", contentRoot?
       };
     }
   }
-  
+
   return null;
 }
 
@@ -234,7 +256,8 @@ function matchesPlatform(url: string, platform: string): boolean {
 }
 
 export function getOrganizationTwitterHandle(contentRoot?: string): string | null {
-  const config = loadSchemaConfig(contentRoot);
+  // Public meta tags — resolve {{vars}} like JSON-LD emit (editor/prefills stay on loadSchemaConfig).
+  const config = loadResolvedSchemaConfig(contentRoot);
   const sameAs = config.organization?.same_as;
   if (!Array.isArray(sameAs)) return null;
   for (const url of sameAs) {
@@ -248,7 +271,7 @@ export function getOrganizationTwitterHandle(contentRoot?: string): string | nul
 }
 
 export function getOrganizationSameAsUrl(platform: string, contentRoot?: string): string | null {
-  const config = loadSchemaConfig(contentRoot);
+  const config = loadResolvedSchemaConfig(contentRoot);
   const sameAs = config.organization?.same_as;
   if (!Array.isArray(sameAs)) return null;
   for (const url of sameAs) {
@@ -299,19 +322,19 @@ export function updateOrganizationSameAsUrl(platform: string, url: string): void
 }
 
 export function getWebsiteDefaultSocialImage(contentRoot?: string): string | null {
-  const config = loadSchemaConfig(contentRoot);
+  const config = loadResolvedSchemaConfig(contentRoot);
   const img = (config.website as Record<string, unknown> | undefined)?.default_social_image;
   return typeof img === "string" && img.trim() !== "" ? img.trim() : null;
 }
 
 export function getOrganizationLogo(contentRoot?: string): string | null {
-  const config = loadSchemaConfig(contentRoot);
+  const config = loadResolvedSchemaConfig(contentRoot);
   const logo = (config.organization as Record<string, unknown> | undefined)?.logo;
   return typeof logo === "string" && logo.trim() !== "" ? logo.trim() : null;
 }
 
 export function getOrganizationName(contentRoot?: string): string | null {
-  const config = loadSchemaConfig(contentRoot);
+  const config = loadResolvedSchemaConfig(contentRoot);
   const name = (config.organization as Record<string, unknown> | undefined)?.name;
   return typeof name === "string" && name.trim() !== "" ? name.trim() : null;
 }
@@ -422,14 +445,14 @@ export function getAvailableSchemaKeys(contentRoot?: string): string[] {
 
 /** Stable @id for the site Organization (dual-emit / nested refs). */
 export function getOrganizationId(contentRoot?: string): string {
-  const config = loadSchemaConfig(contentRoot);
+  const config = loadResolvedSchemaConfig(contentRoot);
   const url = typeof config.organization?.url === "string" ? config.organization.url.replace(/\/$/, "") : "";
   return url ? `${url}/#organization` : "https://schema.org/#organization";
 }
 
 /** Site Organization as JSON-LD (with @context and stable @id). */
 export function getOrganizationDocument(locale: string = "en", contentRoot?: string): Record<string, unknown> | null {
-  const config = loadSchemaConfig(contentRoot);
+  const config = loadResolvedSchemaConfig(contentRoot, locale);
   if (!config.organization) return null;
   return {
     "@context": "https://schema.org",
@@ -446,7 +469,7 @@ export function getOrganizationNestedRef(
   locale: string = "en",
   contentRoot?: string,
 ): Record<string, unknown> | null {
-  const config = loadSchemaConfig(contentRoot);
+  const config = loadResolvedSchemaConfig(contentRoot, locale);
   if (!config.organization) return null;
   const transformed = transformToJsonLd(config.organization, locale);
   const orgType =
@@ -466,6 +489,45 @@ export function getOrganizationNestedRef(
   return ref;
 }
 
+/** Stable @id for the site WebSite (dual-emit / nested refs). */
+export function getWebsiteId(contentRoot?: string): string {
+  const config = loadResolvedSchemaConfig(contentRoot);
+  const raw =
+    (typeof config.website?.url === "string" && config.website.url) ||
+    (typeof config.organization?.url === "string" && config.organization.url) ||
+    "";
+  const url = raw.replace(/\/$/, "");
+  return url ? `${url}/#website` : "https://schema.org/#website";
+}
+
+/** Site WebSite as JSON-LD (with @context and stable @id). Omits default_social_image (meta-tag setting). */
+export function getWebsiteDocument(locale: string = "en", contentRoot?: string): Record<string, unknown> | null {
+  const config = loadResolvedSchemaConfig(contentRoot, locale);
+  if (!config.website) return null;
+  const { default_social_image: _d, ...website } = config.website as BaseSchema;
+  return {
+    "@context": "https://schema.org",
+    "@id": getWebsiteId(contentRoot),
+    ...transformToJsonLd(website as BaseSchema, locale),
+  };
+}
+
+/** Lightweight WebSite ref for nested isPartOf-style fields. */
+export function getWebsiteNestedRef(
+  locale: string = "en",
+  contentRoot?: string,
+): Record<string, unknown> | null {
+  const doc = getWebsiteDocument(locale, contentRoot);
+  if (!doc) return null;
+  const ref: Record<string, unknown> = {
+    "@id": doc["@id"],
+    "@type": (typeof doc["@type"] === "string" && doc["@type"]) || "WebSite",
+  };
+  if (typeof doc.name === "string" && doc.name.trim()) ref.name = doc.name;
+  if (typeof doc.url === "string" && doc.url.trim()) ref.url = doc.url;
+  return ref;
+}
+
 /** Site Website template properties (no @context) for prefilling page schema_org sections. */
 export function getWebsiteTemplateProperties(locale: string = "en", contentRoot?: string): Record<string, unknown> | null {
   const config = loadSchemaConfig(contentRoot);
@@ -481,23 +543,13 @@ export function getOrganizationTemplateProperties(locale: string = "en", content
   return { ...config.organization };
 }
 
-/**
- * Expand `@organization` string refs inside a document to nested Organization
- * objects sharing the stable @id. Returns whether any ref was expanded.
- */
-export function expandOrganizationRefs(
-  doc: Record<string, unknown>,
-  locale: string,
-  contentRoot?: string,
-): boolean {
-  const nested = getOrganizationNestedRef(locale, contentRoot);
-  if (!nested) return false;
-
+/** Replace every `token` string inside `doc` (in place) with `nested`. Returns whether any was replaced. */
+function expandStringRefs(doc: Record<string, unknown>, token: string, nested: Record<string, unknown>): boolean {
   let expanded = false;
   const walk = (node: unknown): unknown => {
-    if (node === "@organization") {
+    if (node === token) {
       expanded = true;
-      return nested;
+      return { ...nested };
     }
     if (Array.isArray(node)) return node.map(walk);
     if (node && typeof node === "object") {
@@ -514,6 +566,34 @@ export function expandOrganizationRefs(
   Object.keys(doc).forEach((k) => delete doc[k]);
   Object.assign(doc, walked);
   return expanded;
+}
+
+/**
+ * Expand `@organization` string refs inside a document to nested Organization
+ * objects sharing the stable @id. Returns whether any ref was expanded.
+ */
+export function expandOrganizationRefs(
+  doc: Record<string, unknown>,
+  locale: string,
+  contentRoot?: string,
+): boolean {
+  const nested = getOrganizationNestedRef(locale, contentRoot);
+  if (!nested) return false;
+  return expandStringRefs(doc, "@organization", nested);
+}
+
+/**
+ * Expand `@website` string refs (e.g. WebPage `isPartOf`) to nested WebSite
+ * objects sharing the stable @id. Returns whether any ref was expanded.
+ */
+export function expandWebsiteRefs(
+  doc: Record<string, unknown>,
+  locale: string,
+  contentRoot?: string,
+): boolean {
+  const nested = getWebsiteNestedRef(locale, contentRoot);
+  if (!nested) return false;
+  return expandStringRefs(doc, "@website", nested);
 }
 
 /** Raw course catalog entry (legacy) for migration / ensure seeding. */
@@ -534,6 +614,10 @@ export type SchemaOrgEditorOrganization = {
   description_es: string;
   founding_date: string;
   founders: Array<{ name: string }>;
+  /** Geographic regions served (schema.org areaServed). Plain strings, no template vars. */
+  area_served: string[];
+  /** BCP 47 language codes (schema.org knowsLanguage). Plain strings, no template vars. */
+  knows_language: string[];
   contact_point: {
     contact_type: string;
     email: string;
@@ -580,6 +664,8 @@ export function getSchemaOrgEditorPayload(contentRoot?: string): SchemaOrgEditor
   const address = (org.address as Record<string, unknown> | undefined) ?? {};
   const rating = (org.aggregate_rating as Record<string, unknown> | undefined) ?? {};
   const foundersRaw = Array.isArray(org.founders) ? org.founders : [];
+  const areaServedRaw = Array.isArray(org.area_served) ? org.area_served : [];
+  const knowsLanguageRaw = Array.isArray(org.knows_language) ? org.knows_language : [];
 
   const other_keys = getAvailableSchemaKeys(contentRoot).filter(
     (k) => k !== "organization" && k !== "website",
@@ -598,6 +684,14 @@ export function getSchemaOrgEditorPayload(contentRoot?: string): SchemaOrgEditor
       founders: foundersRaw
         .filter((f): f is { name: string } => !!f && typeof f === "object" && typeof (f as { name?: unknown }).name === "string")
         .map((f) => ({ name: f.name })),
+      area_served: areaServedRaw
+        .filter((s): s is string => typeof s === "string")
+        .map((s) => s.trim())
+        .filter(Boolean),
+      knows_language: knowsLanguageRaw
+        .filter((s): s is string => typeof s === "string")
+        .map((s) => s.trim())
+        .filter(Boolean),
       contact_point: {
         contact_type: asString(contact.contact_type),
         email: asString(contact.email),
@@ -651,6 +745,12 @@ export function updateSchemaOrgEditorPayload(
     if (input.organization.founders) {
       o.founders = input.organization.founders;
     }
+    if (input.organization.area_served) {
+      o.area_served = input.organization.area_served;
+    }
+    if (input.organization.knows_language) {
+      o.knows_language = input.organization.knows_language;
+    }
 
     const prevOrg = (existing.organization as Record<string, unknown> | undefined) ?? {};
     const locales = {
@@ -675,6 +775,8 @@ export function updateSchemaOrgEditorPayload(
       founders: o.founders
         .map((f) => ({ name: (f.name || "").trim() }))
         .filter((f) => f.name),
+      area_served: (o.area_served ?? []).map((s) => s.trim()).filter(Boolean),
+      knows_language: (o.knows_language ?? []).map((s) => s.trim()).filter(Boolean),
       contact_point: {
         type: "ContactPoint",
         contact_type: o.contact_point.contact_type.trim(),

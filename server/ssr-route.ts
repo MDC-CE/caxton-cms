@@ -52,11 +52,8 @@ export function parseRoute(
     let locale = urlHasLocale ? (urlLocale as string) : "en";
     if (resolved.params?.locale) {
       locale = resolved.params.locale;
-    } else if (!urlHasLocale) {
-      const commonData = ci.loadCommonData(resolved.contentType, resolved.slug);
-      if (commonData?.locale && typeof commonData.locale === "string") {
-        locale = commonData.locale;
-      }
+    } else if (!cleanUrl.match(/^\/(en|es)\b/)) {
+      locale = ci.localeForResolved(resolved);
     }
     return { contentType: resolved.contentType, slug: resolved.slug, locale };
   }

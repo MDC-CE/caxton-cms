@@ -529,7 +529,12 @@ export async function searchDatabaseItems(
       ? rawItems.filter((item) => isFaqIndexable(item))
       : rawItems;
 
-  const contentRoot = typeof dbm.getContentRoot === "function" ? dbm.getContentRoot() : undefined;
+  const contentRoot =
+    typeof dbm.getSourceContentRoot === "function"
+      ? dbm.getSourceContentRoot(dbName)
+      : typeof dbm.getContentRoot === "function"
+        ? dbm.getContentRoot()
+        : undefined;
   const indexState = getJobState(dbName, contentRoot).index;
   const changedAtMs = indexState.changedAt ? Date.parse(indexState.changedAt) : 0;
   dropStaleMemory(dbName, changedAtMs);

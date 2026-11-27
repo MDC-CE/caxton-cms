@@ -34,7 +34,7 @@ export function error(msg: string): void {
 
 export function banner(version: string): void {
   const col = c();
-  console.log(`${col.cyan("✦")} ${col.bold("weblify")} ${col.dim(version)}`);
+  console.log(`${col.cyan("✦")} ${col.bold("caxton-cms")} ${col.dim(version)}`);
 }
 
 export function printSiteOnly(opts: { siteUrl: string }): void {
@@ -68,11 +68,11 @@ export function printCloudAgentInstructions(opts: {
   console.log(col.dim("Keep this terminal open while you use the connector."));
   console.log(
     col.dim(
-      "If you restart Weblify, the link above may change — paste the new URL into the connector.",
+      "If you restart Caxton, the link above may change — paste the new URL into the connector.",
     ),
   );
   console.log(
-    col.dim("Need a new token later? Stop Weblify, then run: npx weblify token"),
+    col.dim("Need a new token later? Stop Caxton, then run: npx caxton-cms token"),
   );
   console.log("");
 }
@@ -114,7 +114,7 @@ export function printLocalAgentInstructions(opts: {
   console.log("  3. Save and chat with the agent against your site.");
   console.log("");
   console.log(
-    col.dim("Need a new secret later? Stop Weblify, then run: npx weblify token"),
+    col.dim("Need a new secret later? Stop Caxton, then run: npx caxton-cms token"),
   );
   console.log("");
 }
@@ -129,18 +129,24 @@ export function printLocalAgentConnectedTip(): void {
   console.log("");
 }
 
-/** Standalone `weblify token` — dual-use staff + MCP. */
-export function printTokenInstructions(opts: { token: string }): void {
+/** Standalone `caxton-cms token` — dual-use staff + MCP. */
+export function printTokenInstructions(opts: { token: string; owner: string }): void {
   const col = c();
   console.log("");
   console.log(`${col.green("✔")} New connection token:`);
   console.log(`       ${col.magenta(opts.token)}`);
+  console.log("");
+  console.log(
+    `${col.bold("You will sign in as")} ${col.cyan(opts.owner)} ${col.dim("(local bootstrap only — never use in production)")}`,
+  );
   console.log("");
   console.log(col.bold("What this token is for:"));
   console.log("  • Staff sign-in — paste it into the Debug bubble token field on the site.");
   console.log("  • MCP — use it as the auth token for Cursor / Claude Code / Claude.ai");
   console.log("    (Authorization: Bearer …, X-Api-Key, or the connector wizard).");
   console.log("");
-  console.log(col.dim("This replaces the previous token. Stop Weblify before minting if it is running."));
+  console.log(col.dim("Anyone with this token is that local user. Grant roles on that Security card, not your Gmail user."));
+  console.log(col.dim("See docs/local-connection-token.md"));
+  console.log(col.dim("This replaces the previous token. Stop Caxton before minting if it is running."));
   console.log("");
 }

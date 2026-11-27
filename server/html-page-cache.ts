@@ -39,7 +39,23 @@ export interface CachedHtmlPage {
   html: string;
 }
 
-type Stored = Omit<CachedHtmlPage, "html"> & { html?: string };
+/** Only the encodings visitors asked for are built. */
+type BootedBody = { br?: Buffer; gzip?: Buffer };
+
+type Stored = Omit<CachedHtmlPage, "html"> & {
+  html?: string;
+  /** Page token the boot copies were built with; a new token clears them. */
+  bootToken?: string;
+  /** Compressed bodies with the page boot injected, keyed by boot config. Memory only. */
+  bootVariants?: Map<string, BootedBody>;
+};
+
+export type PageBootInjection = {
+  /** Equal keys must inject identical bytes. */
+  key: string;
+  token: string;
+  inject: (html: string) => string;
+};
 
 const cache = new Map<string, Stored>();
 let byteBudget = DEFAULT_BYTE_BUDGET;
@@ -71,6 +87,7 @@ export function getHtmlBuildId(): string {
 
 export function setHtmlBuildIdForTests(id: string): void {
   buildId = id;
+  diskKeyByName.clear();
 }
 
 export function setHtmlCacheClockForTests(fn: () => number): void {
@@ -93,6 +110,9 @@ export function resetHtmlPageCacheForTests(): void {
   inflight.clear();
   generations.clear();
   diskMissReason.clear();
+  diskKeyByName.clear();
+  lastBootEvictionLogAt = 0;
+  bootEvictionsSinceLog = { pages: 0, bytes: 0 };
   byteBudget = DEFAULT_BYTE_BUDGET;
   nowFn = () => Date.now();
   buildId = resolveHtmlBuildId();
@@ -108,6 +128,26 @@ function cacheRootDir(): string {
 function diskPathForKey(key: string): string {
   const hash = crypto.createHash("sha256").update(key).digest("hex");
   return path.join(cacheRootDir(), buildId, `${hash}.json`);
+}
+
+/**
+ * File name → key for the current build folder. A name is the hash of its key, so an
+ * entry never goes stale; listing only reads files it has not seen.
+ */
+const diskKeyByName = new Map<string, string>();
+let diskKeyDir = "";
+
+function diskKeyIndex(dir: string): Map<string, string> {
+  if (diskKeyDir !== dir) {
+    diskKeyByName.clear();
+    diskKeyDir = dir;
+  }
+  return diskKeyByName;
+}
+
+function rememberDiskKey(key: string): void {
+  const file = diskPathForKey(key);
+  diskKeyIndex(path.dirname(file)).set(path.basename(file), key);
 }
 
 export type HtmlCachePathIndex = {
@@ -204,7 +244,39 @@ function dropKey(key: string): void {
   forgetDisk(key);
 }
 
+const BOOT_EVICTION_LOG_INTERVAL_MS = 60_000;
+let lastBootEvictionLogAt = 0;
+let bootEvictionsSinceLog = { pages: 0, bytes: 0 };
+
+/** Boot copies are rebuilt in a few ms on the next hit; pages need a full render. Copies go first. */
+function freeBootVariantsUntilBudget(): void {
+  if (usedBytes <= byteBudget) return;
+  for (const entry of cache.values()) {
+    if (usedBytes <= byteBudget) break;
+    const freed = clearBootVariants(entry);
+    if (freed === 0) continue;
+    bootEvictionsSinceLog.pages += 1;
+    bootEvictionsSinceLog.bytes += freed;
+  }
+  const now = nowFn();
+  if (bootEvictionsSinceLog.pages > 0 && now - lastBootEvictionLogAt >= BOOT_EVICTION_LOG_INTERVAL_MS) {
+    const budgetMb = Math.max(1, Math.round(byteBudget / (1024 * 1024)));
+    log.warn(
+      {
+        pages: bootEvictionsSinceLog.pages,
+        freedMb: Math.round((bootEvictionsSinceLog.bytes / (1024 * 1024)) * 10) / 10,
+        usedMb: Math.round(usedBytes / (1024 * 1024)),
+        budgetMb,
+      },
+      `HTML cache freed page boot copies: over ${budgetMb}MB budget`,
+    );
+    lastBootEvictionLogAt = now;
+    bootEvictionsSinceLog = { pages: 0, bytes: 0 };
+  }
+}
+
 function evictUntilBudget(): void {
+  freeBootVariantsUntilBudget();
   while (usedBytes > byteBudget && cache.size > 0) {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) break;
@@ -271,6 +343,68 @@ export function getCachedHtml(key: string): CachedHtmlPage | null {
   return decorate(entry);
 }
 
+/**
+ * Compressed body for a cached page with its page boot injected. Built once per boot config
+ * and reused; the copies count toward the cache budget and are not written to disk.
+ * Null when the page is no longer in memory.
+ */
+export function getBootedHtmlBody(
+  key: string,
+  boot: PageBootInjection,
+  encoding: "br" | "gzip",
+): Buffer | null {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (entry.bootToken !== boot.token) clearBootVariants(entry);
+  const existing = entry.bootVariants?.get(boot.key)?.[encoding];
+  if (existing) return existing;
+  const html = entry.html ?? zlib.gunzipSync(entry.gzip).toString("utf8");
+  const raw = Buffer.from(boot.inject(html), "utf8");
+  const body = encoding === "br" ? brotliHtml(raw) : gzipHtml(raw);
+  entry.bootToken = boot.token;
+  const variants = (entry.bootVariants ??= new Map());
+  const copies = variants.get(boot.key) ?? {};
+  copies[encoding] = body;
+  variants.set(boot.key, copies);
+  entry.byteLength += body.length;
+  usedBytes += body.length;
+  evictUntilBudget();
+  return body;
+}
+
+function bootVariantBytes(entry: Stored): number {
+  let bytes = 0;
+  for (const body of entry.bootVariants?.values() ?? []) {
+    bytes += (body.br?.length ?? 0) + (body.gzip?.length ?? 0);
+  }
+  return bytes;
+}
+
+function clearBootVariants(entry: Stored): number {
+  if (!entry.bootVariants) return 0;
+  const freed = bootVariantBytes(entry);
+  entry.byteLength -= freed;
+  usedBytes -= freed;
+  entry.bootVariants = undefined;
+  entry.bootToken = undefined;
+  return freed;
+}
+
+function gzipHtml(raw: Buffer): Buffer {
+  return zlib.gzipSync(raw, { level: 6 });
+}
+
+function brotliHtml(raw: Buffer): Buffer {
+  return zlib.brotliCompressSync(raw, {
+    params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 },
+  });
+}
+
+function compressHtml(html: string): { br: Buffer; gzip: Buffer } {
+  const raw = Buffer.from(html, "utf8");
+  return { gzip: gzipHtml(raw), br: brotliHtml(raw) };
+}
+
 export function noteHtmlRebuildPending(
   key: string,
   generation: number,
@@ -287,6 +421,40 @@ export function htmlRebuildInFlight(key: string): boolean {
   const entry = cache.get(key);
   if (!entry) return false;
   return entry.pendingGeneration > entry.generation;
+}
+
+export type HtmlCachePeek = {
+  storedAt: number;
+  generation: number;
+  pendingGeneration: number;
+  source: "memory" | "disk";
+};
+
+/**
+ * Stored time and generations for a key without serving it. Does not reorder the LRU,
+ * load the disk copy, or drop a copy whose rebuild is slow. Disk is a stat, not a read.
+ */
+export function peekHtmlCacheEntry(key: string): HtmlCachePeek | null {
+  const entry = cache.get(key);
+  let diskMtime = 0;
+  try {
+    diskMtime = fs.statSync(diskPathForKey(key)).mtimeMs;
+  } catch {
+    diskMtime = 0;
+  }
+  if (entry) {
+    // The worker writes the file before this process adopts it; the next read serves it.
+    const rebuiltOnDisk = entry.pendingSince > 0 && diskMtime > entry.pendingSince;
+    return {
+      storedAt: Math.max(entry.storedAt, diskMtime),
+      generation: entry.generation,
+      pendingGeneration: rebuiltOnDisk ? entry.generation : entry.pendingGeneration,
+      source: "memory",
+    };
+  }
+  if (!diskMtime) return null;
+  const generation = generations.get(key) ?? 0;
+  return { storedAt: diskMtime, generation, pendingGeneration: generation, source: "disk" };
 }
 
 export function currentHtmlGeneration(key: string): number {
@@ -312,11 +480,7 @@ export function setCachedHtml(
   const generation = opts?.generation ?? currentHtmlGeneration(key);
   if (generation < (generations.get(key) ?? 0)) return;
 
-  const raw = Buffer.from(html, "utf8");
-  const gzip = zlib.gzipSync(raw, { level: 6 });
-  const br = zlib.brotliCompressSync(raw, {
-    params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 },
-  });
+  const { gzip, br } = compressHtml(html);
   const byteLength = gzip.length + br.length;
   const storedAt = nowFn();
   const next: Stored = {
@@ -360,6 +524,7 @@ function persistEntry(key: string, entry: Stored): void {
     const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, payload);
     fs.renameSync(tmp, file);
+    rememberDiskKey(key);
   } catch (err) {
     log.warn({ err, key }, "html cache disk write failed");
   }
@@ -404,37 +569,42 @@ function inspectHtmlCacheDisk(key: string): string {
   return "on disk but not loaded";
 }
 
+type DiskFile = {
+  buildId?: string;
+  key?: string;
+  status?: number;
+  storedAt?: number;
+  expiresAt?: number;
+  generation?: number;
+  br?: string;
+  gzip?: string;
+};
+
+function storedFromDisk(parsed: DiskFile, key: string): Stored | null {
+  if (parsed.buildId !== buildId || parsed.key !== key) return null;
+  if (!parsed.gzip || !parsed.br) return null;
+  const generation = parsed.generation ?? 0;
+  if (generation < (generations.get(key) ?? 0)) return null;
+  const gzip = Buffer.from(parsed.gzip, "base64");
+  const br = Buffer.from(parsed.br, "base64");
+  return {
+    status: parsed.status ?? 200,
+    storedAt: parsed.storedAt ?? nowFn(),
+    expiresAt: parsed.expiresAt ?? Number.MAX_SAFE_INTEGER,
+    generation,
+    pendingGeneration: generation,
+    pendingSince: 0,
+    pendingDeleteIfSlow: false,
+    br,
+    gzip,
+    byteLength: gzip.length + br.length,
+  };
+}
+
 function readDiskEntry(key: string): Stored | null {
   try {
     const raw = fs.readFileSync(diskPathForKey(key), "utf8");
-    const parsed = JSON.parse(raw) as {
-      buildId?: string;
-      key?: string;
-      status?: number;
-      storedAt?: number;
-      expiresAt?: number;
-      generation?: number;
-      br?: string;
-      gzip?: string;
-    };
-    if (parsed.buildId !== buildId || parsed.key !== key) return null;
-    if (!parsed.gzip || !parsed.br) return null;
-    const gzip = Buffer.from(parsed.gzip, "base64");
-    const br = Buffer.from(parsed.br, "base64");
-    const generation = parsed.generation ?? 0;
-    if (generation < (generations.get(key) ?? 0)) return null;
-    return {
-      status: parsed.status ?? 200,
-      storedAt: parsed.storedAt ?? nowFn(),
-      expiresAt: parsed.expiresAt ?? Number.MAX_SAFE_INTEGER,
-      generation,
-      pendingGeneration: generation,
-      pendingSince: 0,
-      pendingDeleteIfSlow: false,
-      br,
-      gzip,
-      byteLength: gzip.length + br.length,
-    };
+    return storedFromDisk(JSON.parse(raw) as DiskFile, key);
   } catch {
     return null;
   }
@@ -486,43 +656,69 @@ function adoptDiskIfNewer(key: string): void {
   evictUntilBudget();
 }
 
-export function rehydrateHtmlPageCache(): number {
+export type HtmlCacheRehydrateResult = {
+  files: number;
+  loaded: number;
+  skippedForSpace: number;
+  usedBytes: number;
+  budgetBytes: number;
+};
+
+/** Load this build's files into memory, newest first, until the budget is full. Each file is parsed once. */
+export function rehydrateHtmlPageCache(): HtmlCacheRehydrateResult {
   const dir = path.join(cacheRootDir(), buildId);
-  let loaded = 0;
+  const result: HtmlCacheRehydrateResult = {
+    files: 0,
+    loaded: 0,
+    skippedForSpace: 0,
+    usedBytes,
+    budgetBytes: byteBudget,
+  };
   let names: string[] = [];
   try {
     names = fs.readdirSync(dir);
   } catch {
-    return 0;
+    return result;
   }
+  const index = diskKeyIndex(dir);
   const files = names
     .filter((name) => name.endsWith(".json"))
     .map((name) => {
+      let mtime = 0;
       try {
-        const parsed = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) as {
-          key?: string;
-          storedAt?: number;
-        };
-        return parsed;
+        mtime = fs.statSync(path.join(dir, name)).mtimeMs;
       } catch {
-        return null;
+        mtime = 0;
       }
+      return { name, mtime };
     })
-    .filter((row): row is { key?: string; storedAt?: number } => !!row?.key)
-    .sort((a, b) => (b.storedAt ?? 0) - (a.storedAt ?? 0));
+    .sort((a, b) => b.mtime - a.mtime);
+  result.files = files.length;
 
-  for (const parsed of files) {
-    if (!parsed.key) continue;
-    const entry = readDiskEntry(parsed.key);
+  for (const { name } of files) {
+    let parsed: DiskFile;
+    try {
+      parsed = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) as DiskFile;
+    } catch {
+      continue;
+    }
+    const key = typeof parsed.key === "string" ? parsed.key : "";
+    if (!key || path.basename(diskPathForKey(key)) !== name) continue;
+    index.set(name, key);
+    if (cache.has(key)) continue;
+    const entry = storedFromDisk(parsed, key);
     if (!entry) continue;
-    if (cache.has(parsed.key)) continue;
-    if (usedBytes + entry.byteLength > byteBudget) continue;
-    cache.set(parsed.key, entry);
+    if (usedBytes + entry.byteLength > byteBudget) {
+      result.skippedForSpace += 1;
+      continue;
+    }
+    cache.set(key, entry);
     usedBytes += entry.byteLength;
-    loaded += 1;
+    result.loaded += 1;
   }
   evictUntilBudget();
-  return loaded;
+  result.usedBytes = usedBytes;
+  return result;
 }
 
 export function invalidateHtmlPageCache(): void {
@@ -583,14 +779,27 @@ export function listStoredHtmlCacheKeys(siteId?: string): string[] {
   } catch {
     names = [];
   }
+  const index = diskKeyIndex(dir);
+  const listed = new Set<string>();
   for (const name of names) {
     if (!name.endsWith(".json")) continue;
-    try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) as { key?: string };
-      if (typeof parsed.key === "string" && parsed.key) keys.add(parsed.key);
-    } catch {
-      /* unreadable handoff */
+    listed.add(name);
+    let key = index.get(name);
+    if (key === undefined) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) as { key?: string };
+        if (typeof parsed.key === "string" && parsed.key) {
+          key = parsed.key;
+          index.set(name, key);
+        }
+      } catch {
+        /* unreadable handoff */
+      }
     }
+    if (key) keys.add(key);
+  }
+  for (const name of [...index.keys()]) {
+    if (!listed.has(name)) index.delete(name);
   }
   const out: string[] = [];
   for (const key of keys) {

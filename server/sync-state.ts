@@ -221,7 +221,12 @@ export function shouldTrackFile(filePath: string, allowedExceptions?: Set<string
   if (filePath.includes('/images/')) {
     return false;
   }
-  
+
+  // Llms.txt content files at site root (template output + regenerate instructions).
+  if (basename === "llms.template.md" || basename === "llms.regenerate-prompt.md") {
+    return true;
+  }
+
   const ext = path.extname(filePath).toLowerCase();
   if (ext !== '.yml' && ext !== '.yaml' && ext !== '.json') {
     return false;
@@ -740,8 +745,13 @@ export function getAllContentFiles(contentRoot?: string): string[] {
         }
       } else {
         const ext = path.extname(entry.name).toLowerCase();
-        if (ext === '.yml' || ext === '.yaml' || ext === '.json' || ext === '.ts' || ext === '.tsx' || ext === '.css') {
-          const relativePath = toPosixPath(path.relative(process.cwd(), fullPath));
+        // .md is walked so shouldTrackFile can allow llms.template.md / llms.regenerate-prompt.md;
+        // other markdown stays out via shouldTrackFile. .tsx/.css kept for site registry components.
+        if (ext === '.yml' || ext === '.yaml' || ext === '.json' || ext === '.ts' || ext === '.tsx' || ext === '.css' || ext === '.md') {
+          const relativePath = toPosixPath(path.relative(
+            resolvePathForComparison(process.cwd()),
+            resolvePathForComparison(fullPath),
+          ));
           if (shouldTrackFile(relativePath, undefined, contentRoot)) {
             files.push(relativePath);
           }

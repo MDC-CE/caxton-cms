@@ -4,7 +4,7 @@ import { LocationOverrideModal } from "./LocationOverrideModal";
 import { badgeVariants } from "@/components/ui/badge";
 import { useSession } from "@/contexts/SessionContext";
 import { useToast } from "@/hooks/use-toast";
-import { locations } from "@/lib/locations";
+import { useLocationCatalog } from "@/hooks/useLocationCatalog";
 import { cn } from "@/lib/utils";
 
 const REGION_LABELS: Record<string, string> = {
@@ -13,9 +13,15 @@ const REGION_LABELS: Record<string, string> = {
   europe: "Europe",
 };
 
-export function LocationOverrideBadge() {
+export function LocationOverrideBadge({
+  readOnlyLlm = false,
+}: {
+  /** LLM crawler preview: show “all sections” and do not open the override modal. */
+  readOnlyLlm?: boolean;
+}) {
   const { session, refreshGeo } = useSession();
   const { toast } = useToast();
+  const { data: locations = [] } = useLocationCatalog();
   const [open, setOpen] = useState(false);
   const [selectedLocationSlug, setSelectedLocationSlug] = useState("");
   const [isResetting, setIsResetting] = useState(false);
@@ -35,8 +41,24 @@ export function LocationOverrideBadge() {
         },
         {} as Record<string, typeof locations>,
       ),
-    [],
+    [locations],
   );
+
+  if (readOnlyLlm) {
+    return (
+      <span
+        className={cn(
+          badgeVariants({ variant: "outline" }),
+          "text-xs gap-1 pointer-events-none",
+        )}
+        data-testid="badge-location-llm-readonly"
+        title="AI crawler preview shows every regional section at once"
+      >
+        <MapPin className="h-3 w-3" />
+        <span className="max-w-[160px] truncate">All sections visible at once</span>
+      </span>
+    );
+  }
 
   const handleLocationOverride = () => {
     if (!selectedLocationSlug) return;

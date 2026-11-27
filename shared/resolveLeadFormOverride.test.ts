@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyLeadFormOverrideOutcome,
   resolveLeadFormOverride,
+  resolveLeadFormOverrideMatch,
 } from "./resolveLeadFormOverride";
 
 describe("resolveLeadFormOverride", () => {
@@ -172,6 +173,90 @@ describe("resolveLeadFormOverride", () => {
     );
     expect(override).toBeNull();
   });
+
+  it("matches field_property_slug via resolveValue (form bag template)", () => {
+    const resolveValue = (raw: string) => {
+      if (raw === "{{ form.program }}") return "ai-engineering";
+      return raw;
+    };
+    const override = resolveLeadFormOverride(
+      { program: "ai-engineering" },
+      [
+        {
+          conditions: [
+            {
+              field_property_slug: "{{ form.program }}",
+              value: "ai-engineering",
+            },
+          ],
+          conversion_name: "from-field-prop",
+        },
+      ],
+      { resolveValue },
+    );
+    expect(override?.conversion_name).toBe("from-field-prop");
+  });
+
+  it("prefers field_property_slug over legacy form_field_slug", () => {
+    const resolveValue = (raw: string) => {
+      if (raw === "{{ form.program }}") return "from-prop";
+      if (raw === "{{ form.other }}") return "from-legacy";
+      return raw;
+    };
+    const override = resolveLeadFormOverride(
+      { program: "from-prop", other: "from-legacy" },
+      [
+        {
+          conditions: [
+            {
+              field_property_slug: "{{ form.program }}",
+              form_field_slug: "other",
+              value: "from-prop",
+            },
+          ],
+          conversion_name: "prop-wins",
+        },
+      ],
+      { resolveValue },
+    );
+    expect(override?.conversion_name).toBe("prop-wins");
+  });
+
+  it("legacy form_field_slug uses {{ form.* }} when resolveValue is set", () => {
+    const resolveValue = (raw: string) => {
+      if (raw === "{{ form.program }}") return "ai-engineering";
+      return raw;
+    };
+    const override = resolveLeadFormOverride(
+      {},
+      [
+        {
+          conditions: [{ form_field_slug: "program", value: "ai-engineering" }],
+          conversion_name: "compat",
+        },
+      ],
+      { resolveValue },
+    );
+    expect(override?.conversion_name).toBe("compat");
+  });
+
+  it("legacy entry_field_slug uses {{ entry.* }} when resolveValue is set", () => {
+    const resolveValue = (raw: string) => {
+      if (raw === "{{ entry.event_started }}") return "true";
+      return raw;
+    };
+    const override = resolveLeadFormOverride(
+      {},
+      [
+        {
+          conditions: [{ entry_field_slug: "event_started", value: "true" }],
+          conversion_name: "compat-entry",
+        },
+      ],
+      { resolveValue },
+    );
+    expect(override?.conversion_name).toBe("compat-entry");
+  });
 });
 
 describe("applyLeadFormOverrideOutcome", () => {
@@ -198,5 +283,30 @@ describe("applyLeadFormOverrideOutcome", () => {
   it("returns formData when override is null", () => {
     const form = { conversion_name: "root" };
     expect(applyLeadFormOverrideOutcome(form, null)).toBe(form);
+  });
+});
+
+describe("resolveLeadFormOverrideMatch", () => {
+  const overrides = [
+    { conditions: [], conversion_name: "skipped-no-conditions" },
+    { conditions: [{ form_field_slug: "program", value: "web" }], conversion_name: "web-lead" },
+    { conditions: [{ form_field_slug: "program", value: "ai" }], conversion_name: "ai-lead", tags: "ai" },
+  ];
+
+  it("returns the matched index and the same outcome as resolveLeadFormOverride", () => {
+    const match = resolveLeadFormOverrideMatch({ program: "ai" }, overrides);
+    expect(match?.index).toBe(2);
+    expect(match?.outcome).toEqual(resolveLeadFormOverride({ program: "ai" }, overrides));
+    expect(match?.outcome).toEqual({ conversion_name: "ai-lead", tags: "ai" });
+  });
+
+  it("returns the first match", () => {
+    const match = resolveLeadFormOverrideMatch({ program: "web" }, [...overrides, overrides[1]!]);
+    expect(match?.index).toBe(1);
+  });
+
+  it("returns null when nothing matches or the list is empty", () => {
+    expect(resolveLeadFormOverrideMatch({ program: "none" }, overrides)).toBeNull();
+    expect(resolveLeadFormOverrideMatch({}, undefined)).toBeNull();
   });
 });

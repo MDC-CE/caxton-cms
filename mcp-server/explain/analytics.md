@@ -13,6 +13,12 @@ Call this topic for **site-wide behavioral analytics** from the GA4 BigQuery exp
 
 Do not treat GSC and GA numbers as the same metric. Journey analytics does **not** prove traffic moved between funnel stages. Planning research (`get_or_refresh_seo_research`) is not a substitute for `get_organic_traffic`.
 
+## Page stats drawer (staff) — checkout-aware + micro
+
+- Decision pages with Ecommerce-tracked checkout buttons use primary metric **leads or enrollment clicks** (`lead_or_enroll_rate` over `enroll_visits`), not leads alone.
+- Curated **micro actions** (from `micro-events.ts`) appear as secondary context; they never replace the headline.
+- A/B test goals: `leads` | `enrollment_clicks` | `both` | `micro_actions`. Micro is a separate goal — not folded into leads/enroll.
+
 ## `get_analytics_report`
 
 - **One report per call:** `site_summary` | `top_pages` | `page_detail` | `events_by_name` | `traffic_sources` | `traffic_source_conversions`.
@@ -47,6 +53,15 @@ Answers “which traffic sources bring leads?” (not sessions alone).
 - **`item_id` (optional):** filters **lead** events to that ecommerce `product_id` only; sessions stay channel-level → warning `lead_rate_channel_sessions`. Leads with empty `item_id` are excluded and counted in `totals.leads_missing_item_id` + warning (no content validator forces `item_id`).
 - **Session mode unattributed:** leads without `ga_session_id` excluded from rows → `totals.leads_unattributed` + warning.
 - **Empty Count as lead catalog:** `ok` with sessions/`leads: 0` + `no_lead_events_configured` (or `counts_as_lead_not_configured` when flags never set).
+
+## A/B test goal (staff page-stats test view)
+
+- **Goal per test run:** `leads` (default; every run recorded before goals existed) | `enrollment_clicks` | `both`. `list_variants.test_goal` shows it per locale with a running test. Staff pick it when starting traffic and can change it while the test runs (each change logged on the run). Finished tests keep their goal; staff can only preview another. Agents cannot change it (allocation is staff-only).
+- **Enrollment clicks:** visits with an `add_to_cart` / `click_begin_checkout` click on the tested page, i.e. buttons whose `cta.tracking` is not `none` (e.g. `signup_card.cta_button.tracking`, `programs[].summary.cta.tracking`). Intent, not purchases. A goal of `enrollment_clicks` / `both` on versions with no tracked button stays at zero; staff see a warning.
+- **Both:** visits with a lead later in the visit or an enrollment click, counted once. Uses visit-level leads (`lead_later`), so it can differ from the ledger "Leads sent on this page" row.
+- **Payment-site rows:** `begin_checkout` (reached checkout) and `purchase` in the same visit, GA4 only, information only (never pick the winner).
+- **Site's own counts:** enrollment clicks are recorded from the day `visits.db` migration 2 ran (`fp_meta.enroll_clicks_since`); enrollment rates only use visits from that day. Older days are not backfilled.
+- **Non-effects:** does not change lead counting, Count as lead, `get_analytics_report`, or the dataLayer for non-enrollment events.
 
 ## Config
 

@@ -8,6 +8,8 @@ vi.mock("./user-store", () => ({
   getOrCreateStaffUserId: vi.fn(),
   hasAnyRole: vi.fn(),
   setMcpAccess: vi.fn(() => ({ ok: true, access: { mcpReadEnabled: true, mcpWriteEnabled: true } })),
+  renameUser: vi.fn(),
+  markConnectionTokenOwner: vi.fn(),
   getEffectiveCapabilities: vi.fn(() => [{ name: "users_manage" }]),
 }));
 
@@ -30,48 +32,53 @@ import { getStaffSession } from "./staff-session";
 import { isConnectionTokenStaffAllowed } from "./staff-github-login";
 import { resolveOwnedStaffSession } from "./staff-session-resolve";
 import {
-  WEBLIFY_LOCAL_USERNAME,
   WEBLIFY_OWNER_PACK_ROLES,
-  ensureWeblifyLocalOwner,
+  ensureConnectionTokenOwner,
 } from "./weblify-connection-token";
 
-describe("ensureWeblifyLocalOwner", () => {
+describe("ensureConnectionTokenOwner", () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    vi.mocked(userStore.getOrCreateStaffUserId).mockReturnValue("weblify-local");
+    delete process.env.WEBLIFY_CONNECTION_OWNER;
+    vi.mocked(userStore.getOrCreateStaffUserId).mockReturnValue("dev-alice");
+    vi.mocked(userStore.renameUser).mockReturnValue({ ok: true });
   });
 
-  it("creates weblify-local with owner pack when missing", () => {
+  afterEach(() => {
+    delete process.env.WEBLIFY_CONNECTION_OWNER;
+  });
+
+  it("throws when owner file/env missing", () => {
+    expect(() => ensureConnectionTokenOwner()).toThrow(/owner missing/i);
+  });
+
+  it("creates flagged owner when missing", () => {
+    process.env.WEBLIFY_CONNECTION_OWNER = "dev-alice";
     vi.mocked(userStore.getUser).mockReturnValue(null);
     vi.mocked(userStore.getUserRoles).mockReturnValue([...WEBLIFY_OWNER_PACK_ROLES]);
-    const result = ensureWeblifyLocalOwner();
+    const result = ensureConnectionTokenOwner();
     expect(userStore.createAdmittedUser).toHaveBeenCalledWith(
       expect.objectContaining({
-        username: WEBLIFY_LOCAL_USERNAME,
-        roles: expect.arrayContaining(["user_admin", "platform_steward", "copy_editor"]),
+        username: "dev-alice",
+        connectionTokenOwner: true,
+        roles: expect.arrayContaining(["user_admin", "platform_steward"]),
       }),
     );
-    expect(userStore.setMcpAccess).toHaveBeenCalledWith(WEBLIFY_LOCAL_USERNAME, {
+    expect(userStore.setMcpAccess).toHaveBeenCalledWith("dev-alice", {
       mcpReadEnabled: true,
       mcpWriteEnabled: true,
     });
-    expect(result.username).toBe(WEBLIFY_LOCAL_USERNAME);
+    expect(result.username).toBe("dev-alice");
   });
 
-  it("unions roles when user exists with weaker set", () => {
+  it("rejects colliding real staff user", () => {
+    process.env.WEBLIFY_CONNECTION_OWNER = "real-user";
     vi.mocked(userStore.getUser).mockReturnValue({
       id: "x",
-      username: WEBLIFY_LOCAL_USERNAME,
+      username: "real-user",
       roles: ["user_admin"],
     } as any);
-    vi.mocked(userStore.getUserRoles)
-      .mockReturnValueOnce(["user_admin"])
-      .mockReturnValue([...WEBLIFY_OWNER_PACK_ROLES]);
-    ensureWeblifyLocalOwner();
-    expect(userStore.assignRoles).toHaveBeenCalledWith(
-      WEBLIFY_LOCAL_USERNAME,
-      expect.arrayContaining(["user_admin", "publisher", "media_editor"]),
-    );
+    expect(() => ensureConnectionTokenOwner()).toThrow(/already exists as a real staff user/i);
   });
 });
 
@@ -81,28 +88,40 @@ describe("resolveOwnedStaffSession connection token", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     delete process.env.WEBLIFY_CONNECTION_TOKEN;
+    delete process.env.WEBLIFY_CONNECTION_OWNER;
     delete process.env.WEBLIFY_PROJECT_ROOT;
     vi.mocked(getStaffSession).mockResolvedValue(null);
-    vi.mocked(userStore.getOrCreateStaffUserId).mockReturnValue("weblify-local");
+    vi.mocked(userStore.getOrCreateStaffUserId).mockReturnValue("dev-alice");
     vi.mocked(userStore.getUserRoles).mockReturnValue([...WEBLIFY_OWNER_PACK_ROLES]);
     vi.mocked(userStore.getUser).mockReturnValue(null);
+    vi.mocked(userStore.renameUser).mockReturnValue({ ok: true });
   });
 
   afterEach(() => {
     delete process.env.WEBLIFY_CONNECTION_TOKEN;
+    delete process.env.WEBLIFY_CONNECTION_OWNER;
   });
 
-  it("accepts matching connection token when allowed", async () => {
+  it("accepts matching connection token when allowed and owner set", async () => {
     process.env.WEBLIFY_CONNECTION_TOKEN = token;
+    process.env.WEBLIFY_CONNECTION_OWNER = "dev-alice";
     vi.mocked(isConnectionTokenStaffAllowed).mockReturnValue(true);
     const resolved = await resolveOwnedStaffSession(token);
-    expect(resolved?.username).toBe(WEBLIFY_LOCAL_USERNAME);
+    expect(resolved?.username).toBe("dev-alice");
     expect(resolved?.token).toBe(token);
     expect(userStore.createAdmittedUser).toHaveBeenCalled();
   });
 
+  it("rejects matching token when owner missing", async () => {
+    process.env.WEBLIFY_CONNECTION_TOKEN = token;
+    vi.mocked(isConnectionTokenStaffAllowed).mockReturnValue(true);
+    const resolved = await resolveOwnedStaffSession(token);
+    expect(resolved).toBeNull();
+  });
+
   it("rejects matching connection token when not allowed", async () => {
     process.env.WEBLIFY_CONNECTION_TOKEN = token;
+    process.env.WEBLIFY_CONNECTION_OWNER = "dev-alice";
     vi.mocked(isConnectionTokenStaffAllowed).mockReturnValue(false);
     const resolved = await resolveOwnedStaffSession(token);
     expect(resolved).toBeNull();
@@ -110,6 +129,7 @@ describe("resolveOwnedStaffSession connection token", () => {
 
   it("rejects wrong token", async () => {
     process.env.WEBLIFY_CONNECTION_TOKEN = token;
+    process.env.WEBLIFY_CONNECTION_OWNER = "dev-alice";
     vi.mocked(isConnectionTokenStaffAllowed).mockReturnValue(true);
     const resolved = await resolveOwnedStaffSession("wfy_wrong");
     expect(resolved).toBeNull();

@@ -18,11 +18,13 @@ function fakeDocument() {
       const age = attrs.find((a) => a.toLowerCase().startsWith("max-age="));
       if (age) maxAge.set(pair.slice(0, eq), Number(age.split("=")[1]));
     },
+    getElementById: (): HTMLElement | null => null,
   };
 }
 
 type Push = Record<string, unknown>;
 
+/** Fresh module whose current page has already set its (empty) context, so `track()` does not wait. */
 async function load() {
   vi.resetModules();
   const mod = await import("./tracking");
@@ -35,6 +37,9 @@ async function load() {
 async function flushTrack() {
   await Promise.resolve();
 }
+
+/** `track()` pushes after an await; let pending pushes land. */
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("visit experiment (first test seen this visit)", () => {
   let doc: ReturnType<typeof fakeDocument>;

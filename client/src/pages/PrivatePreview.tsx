@@ -21,6 +21,7 @@ import { useScrollToLocationHashWhenReady } from "@/hooks/useScrollToLocationHas
 import { useEditModeOptional } from "@/contexts/EditModeContext";
 import { DevicePreviewShell } from "@/components/editing/DevicePreviewShell";
 import Staff404Layout from "@/components/editing/Staff404Layout";
+import { humanizeDatabaseLabel } from "@/lib/staff404";
 import Staff404VariantModal, { type Staff404VariantOption } from "@/components/editing/Staff404VariantModal";
 import { isPreviewListingSharedTemplate, isSharedLayoutType } from "@/lib/sharedLayoutEntry";
 import { staff404PreviewHref } from "@/lib/staff404";
@@ -115,7 +116,9 @@ export default function PrivatePreview() {
   const [variantModal, setVariantModal] = useState<"templates" | "entry" | null>(null);
 
   const editMode = useEditModeOptional();
-  const isDeviceShell = !!editMode?.isEditMode && editMode.previewBreakpoint === "mobile";
+  const isLlmPreview = !!editMode?.isLlmPreview;
+  const isDeviceShell =
+    !isLlmPreview && !!editMode?.isEditMode && editMode.previewBreakpoint === "mobile";
 
   const { data: content, isLoading, error, refetch } = useQuery<ContentData>({
     queryKey: ["/api/preview", normalizedType, slug, variant, version, locale],
@@ -382,6 +385,8 @@ export default function PrivatePreview() {
               contentType={normalizedType}
               isValidType
               listingSharedTemplate={listingSharedTemplate}
+              hasDatabase={!!typeInfo?.has_database}
+              databaseLabel={humanizeDatabaseLabel(typeInfo?.database_slug)}
               isDraftOnly={isDraftOnly}
               hasEntryVariants={!listingSharedTemplate && availableVariants.length > 0}
               variantsLoading={variantsPending}
@@ -470,8 +475,8 @@ export default function PrivatePreview() {
             isDetached={isDetached}
           />
         </div>
-        <SectionRenderer 
-          sections={content.sections} 
+        <SectionRenderer
+          sections={content.sections}
           contentType={normalizedType}
           slug={slug}
           locale={locale}
@@ -482,7 +487,7 @@ export default function PrivatePreview() {
           meta={(content as any).meta}
           param={(content as any).param}
           allowEntryStructuralOverrides={!isSharedLayout || pageDetached}
-          allowErrorYamlEdit
+          allowErrorYamlEdit={!isLlmPreview}
         />
       </MenuVisualContextProvider>
       <div className="group relative">
@@ -504,8 +509,8 @@ export default function PrivatePreview() {
           isDetached={isDetached}
         />
       </div>
-      {rawEditor}
-      {variant && slug ? (
+      {!isLlmPreview ? rawEditor : null}
+      {!isLlmPreview && variant && slug ? (
         <Suspense fallback={null}>
           <ProposalReviewDrawer
             key={`${normalizedType}:${slug}:${locale}:${variant}`}

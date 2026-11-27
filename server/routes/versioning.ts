@@ -346,6 +346,49 @@ async function proposalsByVariantFor(opts: {
   return out;
 }
 
+/** `{locale: {variant: flag}}` for drafts the daily cleanup scheduled for deletion (`_draft.cleanup`). */
+async function cleanupByVariantFor(
+  versioning: Record<string, { variants?: Array<{ slug: string }> }>,
+  variantPath: (variant: string, locale: string) => string,
+): Promise<Record<string, Record<string, { flagged_at: string; deletes_at: string }>>> {
+  const { readDraftMeta } = await import("../versioning/draft-meta");
+  const out: Record<string, Record<string, { flagged_at: string; deletes_at: string }>> = {};
+  for (const [locale, block] of Object.entries(versioning)) {
+    for (const v of block?.variants ?? []) {
+      const cleanup = readDraftMeta(variantPath(v.slug, locale))?.cleanup;
+      if (cleanup) (out[locale] ??= {})[v.slug] = cleanup;
+    }
+  }
+  return out;
+}
+
+/** Context for variant-info (age, proposal, tests, verdict) on one page. */
+async function variantInfoContextFor(opts: {
+  res: Response;
+  contentType: string;
+  slug: string;
+  versioning: Record<string, { variants?: Array<{ slug: string; allocation?: number }>; started_at?: string }> | null;
+  versioningManager: any;
+  locales: string[];
+}): Promise<import("../versioning/variant-info").VariantInfoContext> {
+  const { buildVariantInfoContext } = await import("../versioning/variant-info");
+  return buildVariantInfoContext({
+    contentType: opts.contentType,
+    slug: opts.slug,
+    contentRoot: getContentRoot(opts.res),
+    contentRootName: getContentRootName(opts.res),
+    versioning: opts.versioning,
+    vm: opts.versioningManager,
+    locales: opts.locales,
+  });
+}
+
+function wantsVariantInfo(req: Request): boolean {
+  const raw = req.query.include;
+  const parts = (Array.isArray(raw) ? raw : [raw]).flatMap((v) => String(v ?? "").split(","));
+  return parts.map((p) => p.trim()).includes("variant_info");
+}
+
 /** Resolve writable versioning slug (entry drafts or template `single`). */
 function resolveWritableVersioningSlug(
   contentType: string,
@@ -495,8 +538,47 @@ export function registerVersioningRoutes(app: Express): void {
       return;
     }
 
+    let variantInfo: Record<string, Record<string, unknown>> | undefined;
+    if (wantsVariantInfo(req)) {
+      try {
+        const { getVariantInfoMap } = await import("../versioning/variant-info");
+        variantInfo = getVariantInfoMap(
+          await variantInfoContextFor({
+            res,
+            contentType,
+            slug: resolvedSlug,
+            versioning,
+            versioningManager,
+            locales: availableLocales,
+          }),
+        );
+      } catch {
+        variantInfo = {};
+      }
+    }
+
+    const { trackedEnrollButtonsByVersion } = await import("../versioning/enroll-buttons");
+    const enroll_buttons: Record<string, Record<string, number> | null> = {};
+    const test_goals: Record<string, string> = {};
+    for (const [loc, localeData] of Object.entries(versioning as Record<string, { variants?: Array<{ slug: string }> }>)) {
+      if (!Array.isArray(localeData?.variants)) continue;
+      const run = versioningManager.getLatestRun(contentType, resolvedSlug, loc);
+      if (run && !run.ended_at) test_goals[loc] = run.goal ?? "leads";
+      enroll_buttons[loc] = trackedEnrollButtonsByVersion({
+        vm: versioningManager,
+        contentType,
+        slug: resolvedSlug,
+        locale: loc,
+        versions: ["default", ...localeData.variants.map((v) => v.slug).filter((s) => s !== "default")],
+        contentFolder: getContentRootName(res),
+      });
+    }
+
     res.json({
       versioning,
+      ...(variantInfo ? { variantInfo } : {}),
+      enroll_buttons,
+      test_goals,
       ab_testing,
       split_health: getSplitHealth(
         {
@@ -531,8 +613,58 @@ export function registerVersioningRoutes(app: Express): void {
             variantPath: (variant, locale) =>
               versioningManager.getVariantFilePath(contentType, resolvedSlug, variant, locale),
           }),
+      cleanupByVariant: templateMode
+        ? {}
+        : await cleanupByVariantFor(versioning, (variant, locale) =>
+            versioningManager.getVariantFilePath(contentType, resolvedSlug, variant, locale),
+          ),
     });
   });
+
+  // One variant's age, last edit, proposal, tests, drift and delete verdict (Versions panel info popover)
+  api.get(
+    app,
+    "/api/versioning/:contentType/:contentSlug/:locale/:variantSlug/info",
+    { rate: "staffWrite" },
+    async (req, res) => {
+      const { contentType, contentSlug: requestSlug, locale, variantSlug } = req.params;
+      if (!isValidType(contentType)) {
+        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+        return;
+      }
+      const auth = await requireCapability(req, res, "content_view", contentType);
+      if (!auth.authorized) return;
+      if (!/^[a-z0-9-]+$/.test(variantSlug) || !/^[a-z]{2}(-[A-Z]{2})?$/.test(locale)) {
+        res.status(400).json({ error: "Invalid variant or locale" });
+        return;
+      }
+
+      const root = getContentRoot(res);
+      const contentSlug = resolvePreviewBaseSlug(requestSlug, contentType, getCI(res));
+      const resolvedSlug = resolveVersioningReadSlug(contentType, contentSlug, root);
+      const versioningManager = (res.locals.site as any)?.versioningManager ?? getVersioningManager();
+      const versioning = versioningManager.getVersioningForContent(contentType, resolvedSlug);
+      const { getVariantInfo } = await import("../versioning/variant-info");
+      const info = getVariantInfo(
+        await variantInfoContextFor({
+          res,
+          contentType,
+          slug: resolvedSlug,
+          versioning,
+          versioningManager,
+          locales: getLocaleEntries().map((l: { code: string }) => l.code),
+        }),
+        locale,
+        variantSlug,
+        { full: true },
+      );
+      if (!info) {
+        res.status(404).json({ error: `Variant ${variantSlug}.${locale}.yml not found` });
+        return;
+      }
+      res.json(info);
+    },
+  );
 
   // Update versioning allocations for a locale
   app.patch(
@@ -833,9 +965,11 @@ export function registerVersioningRoutes(app: Express): void {
           ...existing,
           [locale]: { variants: newVariants, ...(startedAt ? { started_at: startedAt } : {}) },
         };
+        const testGoal = parseResult.data.test_goal;
         versioningManager.updateVersioning(contentType, resolved.slug, updated, {
           author: auth.author,
           contentRoot: root,
+          ...(!hadTraffic && hasTraffic && testGoal ? { testGoals: { [locale]: testGoal } } : {}),
         });
         invalidateContentCaches(contentType, ci);
 
@@ -1074,6 +1208,54 @@ export function registerVersioningRoutes(app: Express): void {
     }
   });
 
+  // Change the goal of the running test for one locale (logged on the run). Finished tests keep theirs.
+  api.put(
+    app,
+    "/api/versioning/:contentType/:contentSlug/:locale/test-goal",
+    { rate: "staffWrite" },
+    async (req, res) => {
+      const { contentType, contentSlug, locale } = req.params;
+      if (!isValidType(contentType)) {
+        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+        return;
+      }
+      const auth = await requireCapability(req, res, "content_allocate_traffic", contentType);
+      if (!auth.authorized) return;
+
+      const { isTestGoal } = await import("@shared/page-stats");
+      const { experiment_id, goal } = (req.body ?? {}) as { experiment_id?: unknown; goal?: unknown };
+      if (typeof experiment_id !== "string" || !experiment_id || !isTestGoal(goal)) {
+        res.status(400).json({ error: "experiment_id and goal (leads | enrollment_clicks | both | micro_actions) are required" });
+        return;
+      }
+
+      const resolved = resolveWritableVersioningSlug(contentType, contentSlug, getContentRoot(res));
+      if (!resolved.ok) {
+        res.status(resolved.status).json({ error: resolved.error });
+        return;
+      }
+      const versioningManager = (res.locals.site as any)?.versioningManager ?? getVersioningManager();
+      const latest = versioningManager.getLatestRun(contentType, resolved.slug, locale);
+      if (!latest || latest.experiment_id !== experiment_id) {
+        res.status(404).json({ error: "That test is not the latest one for this page and language." });
+        return;
+      }
+
+      const result = versioningManager.setRunGoal(experiment_id, goal, auth.author ?? null);
+      if (result === "ended") {
+        res.status(409).json({ error: "Finished tests keep their goal; use Preview by goal.", code: "test_ended" });
+        return;
+      }
+      if (result === "not_found") {
+        res.status(404).json({ error: "Test run not found." });
+        return;
+      }
+      const { clearPageTestStatsCache } = await import("../analytics/page-stats/test-view");
+      clearPageTestStatsCache();
+      res.json({ success: true, experiment_id, goal, changed: result === "changed" });
+    },
+  );
+
   // Register an existing variant file that versioning.yml does not list (at 0% traffic)
   api.post(app, "/api/versioning/:contentType/:contentSlug/register", { rate: "staffWrite" }, async (req, res) => {
     const { contentType, contentSlug } = req.params;
@@ -1141,6 +1323,12 @@ export function registerVersioningRoutes(app: Express): void {
       { ...existing, [locale]: { ...existing[locale], variants: localeVariants } },
       { author: auth.author || "api", contentRoot: root },
     );
+    {
+      const { readDraftMeta, writeDraftMeta } = await import("../versioning/draft-meta");
+      if (!readDraftMeta(variantFilePath)?.created_at) {
+        writeDraftMeta(variantFilePath, { created_at: new Date().toISOString() }, { author: auth.author || "api", contentRoot: root });
+      }
+    }
 
     const versioning = versioningManager.getVersioningForContent(contentType, resolved.slug) || {};
     const availableLocales = getLocaleEntries().map((l: { code: string }) => l.code);
@@ -1300,6 +1488,15 @@ export function registerVersioningRoutes(app: Express): void {
 
       const publishedLocales: string[] = [];
       const warnings: Array<{ locale: string; code: string; message: string }> = [];
+      const factLiteralWarnings: Array<{
+        locale: string;
+        message: string;
+        field_path: string;
+        literal: string;
+        variables: string[];
+        status: string;
+        kind: string;
+      }> = [];
       for (const locale of draftLocales) {
         const result = await promoteLocale(locale, false);
         if (!result.ok) {
@@ -1314,6 +1511,9 @@ export function registerVersioningRoutes(app: Express): void {
         }
         publishedLocales.push(locale);
         for (const w of result.warnings) warnings.push({ locale, code: w.code, message: w.message });
+        for (const w of result.factLiteralWarnings ?? []) {
+          factLiteralWarnings.push({ locale, ...w });
+        }
       }
 
       if (publishedLocales.length > 0) {
@@ -1333,6 +1533,7 @@ export function registerVersioningRoutes(app: Express): void {
         variantSlug,
         locales: publishedLocales,
         warnings,
+        ...(factLiteralWarnings.length ? { fact_literal_warnings: factLiteralWarnings } : {}),
       });
     } catch (error) {
       res.status(500).json({ error: String(error) });
@@ -1439,6 +1640,9 @@ export function registerVersioningRoutes(app: Express): void {
       deletedSiblings: result.deletedSiblings,
       warnings: result.warnings,
       published_diff: result.publishedDiff,
+      ...(result.factLiteralWarnings?.length
+        ? { fact_literal_warnings: result.factLiteralWarnings }
+        : {}),
       ...(result.rebuilt ? { rebuilt: result.rebuilt } : {}),
       versioning_deleted: result.versioningDeleted === true,
     });
@@ -1475,6 +1679,28 @@ export function registerVersioningRoutes(app: Express): void {
             "Convert to draft is blocked on the shared template. Detach this entry first, then convert this entry only.",
         });
         return;
+      }
+
+      const lock = abCheckPageLock(contentType, resolved.slug, getContentRoot(res));
+      if (lock) {
+        res.status(403).json({ error: lock.error, code: lock.code });
+        return;
+      }
+
+      // Read before the locale leaves the live index: which ads send people to its URL.
+      let adsOnUrl: { url: string | null; live: unknown[]; paused: unknown[]; checked: boolean } | null = null;
+      try {
+        const { assessUrlRemoval, liveAdsOf, pausedAdsOf } = await import("../url-removal-check");
+        const { adFacts } = await import("@shared/url-removal");
+        const removal = await assessUrlRemoval({ contentType, slug: resolved.slug, locales: [locale], action: "unpublish", ci: getCI(res) });
+        adsOnUrl = {
+          url: removal.locales[0]?.url ?? null,
+          live: adFacts(liveAdsOf(removal)),
+          paused: adFacts(pausedAdsOf(removal)),
+          checked: removal.ads_checked,
+        };
+      } catch {
+        /* ads check is advisory */
       }
 
       const root = getContentRoot(res);
@@ -1543,6 +1769,7 @@ export function registerVersioningRoutes(app: Express): void {
         liveRelPath: result.liveRelPath,
         draftRelPath: result.draftRelPath,
         versioningRelPath: result.versioningRelPath,
+        ...(adsOnUrl ? { ads_on_url: adsOnUrl } : {}),
       });
     },
   );
@@ -1611,6 +1838,70 @@ export function registerVersioningRoutes(app: Express): void {
     },
   );
 
+  // Keep for now (staff only): restarts the abandoned-draft cleanup clock; draft content unchanged.
+  api.post(
+    app,
+    "/api/versioning/:contentType/:contentSlug/:locale/:variantSlug/keep",
+    { rate: "staffWrite" },
+    async (req, res) => {
+      const { contentType, contentSlug, locale, variantSlug } = req.params;
+      if (!isValidType(contentType)) {
+        res.status(400).json({ error: "Invalid content type", validTypes: getAllFolders() });
+        return;
+      }
+      const auth = await requireCapability(req, res, "content_delete_variant", contentType);
+      if (!auth.authorized) return;
+      if (isSwarmCaller(req)) {
+        res.status(403).json({ code: "staff_only", error: "Only staff can keep a draft from cleanup." });
+        return;
+      }
+      if (!/^[a-z0-9-]+$/.test(variantSlug) || !/^[a-z]{2}(-[A-Z]{2})?$/.test(locale)) {
+        res.status(400).json({ error: "Invalid variant or locale" });
+        return;
+      }
+      const resolved = resolveWritableVersioningSlug(contentType, contentSlug, getContentRoot(res));
+      if (!resolved.ok) {
+        res.status(resolved.status).json({ error: resolved.error });
+        return;
+      }
+      const versioningManager = (res.locals.site as any)?.versioningManager ?? getVersioningManager();
+      const variantFilePath = path.resolve(
+        versioningManager.getVariantFilePath(contentType, resolved.slug, variantSlug, locale),
+      );
+      if (!fs.existsSync(variantFilePath)) {
+        res.status(404).json({ error: "Draft file not found" });
+        return;
+      }
+      const { readDraftMeta, writeDraftMeta } = await import("../versioning/draft-meta");
+      const meta = readDraftMeta(variantFilePath);
+      if (meta?.proposal) {
+        res.status(400).json({
+          code: "proposal_draft",
+          error: "This draft belongs to a proposal; the proposal decides when it is removed.",
+        });
+        return;
+      }
+      const keptAt = new Date().toISOString();
+      writeDraftMeta(
+        variantFilePath,
+        { kept_at: keptAt, cleanup: null },
+        { author: auth.author || "api", contentRoot: getContentRoot(res) },
+      );
+      if (meta?.cleanup) {
+        const { emitEvent } = await import("../events/event-store");
+        const { singleAttribution } = await import("../events/types");
+        emitEvent({
+          site: getContentRootName(res),
+          type: "draft_cleanup_flag_cleared",
+          resource: { contentType, slug: resolved.slug, locale },
+          attribution: singleAttribution(auth.author || "api", { type: "ui" }),
+          payload: { variant: variantSlug, cause: "kept", deletes_at: meta.cleanup.deletes_at },
+        });
+      }
+      res.json({ success: true, kept_at: keptAt });
+    },
+  );
+
   // Delete a variant: remove its YML file and strip its entry from versioning.yml
   app.delete("/api/versioning/:contentType/:contentSlug/:locale/:variantSlug", async (req, res) => {
     const { contentType, contentSlug, locale, variantSlug } = req.params;
@@ -1622,6 +1913,21 @@ export function registerVersioningRoutes(app: Express): void {
 
     const auth = await requireCapability(req, res, "content_delete_variant", contentType);
     if (!auth.authorized) return;
+
+    {
+      const body = (req.body ?? {}) as { report?: unknown; overridden_reasons?: unknown };
+      const report = typeof body.report === "string" ? body.report.trim() : "";
+      const overridden = Array.isArray(body.overridden_reasons)
+        ? body.overridden_reasons.filter((c): c is string => typeof c === "string" && /^[a-z_]+$/.test(c))
+        : [];
+      if (report) {
+        const gate = await beginMcpContentWrite(req, {
+          report: overridden.length ? `${report}\n\nOverrode variant delete checks: ${overridden.join(", ")}` : report,
+          mode: "legacy_report",
+        });
+        if (gate.ok) enterContentWriteContext(gate.ctx);
+      }
+    }
 
     const resolved = resolveWritableVersioningSlug(contentType, contentSlug, getContentRoot(res));
     if (!resolved.ok) {

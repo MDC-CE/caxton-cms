@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Monitor, MonitorSmartphone, Smartphone, Tablet } from "lucide-react";
+import { Bot, Check, ChevronDown, Monitor, MonitorSmartphone, Smartphone, Tablet } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -10,8 +10,14 @@ import {
 import { useEditMode } from "@/contexts/EditModeContext";
 import { cn } from "@/lib/utils";
 import { getPreviewDevice, PREVIEW_PHONES, PREVIEW_TABLETS } from "@/lib/preview-devices";
+import { isPrivatePreviewPath } from "@/lib/visual-edit-path";
 
 type PreviewDeviceMenuTrigger = "icon" | "caption";
+
+function isOnPrivatePreview(): boolean {
+  if (typeof window === "undefined") return false;
+  return isPrivatePreviewPath(window.location.pathname);
+}
 
 export function PreviewDeviceMenu({
   trigger = "icon",
@@ -22,18 +28,50 @@ export function PreviewDeviceMenu({
   onNeedEditMode?: () => void;
 }) {
   const editMode = useEditMode();
-  const isDevicePreview = editMode.isEditMode && editMode.previewBreakpoint === "mobile";
+  const isLlmPreview = editMode.isLlmPreview;
+  const isDevicePreview =
+    !isLlmPreview && editMode.isEditMode && editMode.previewBreakpoint === "mobile";
   const activeDevice = isDevicePreview ? getPreviewDevice(editMode.previewDeviceId) : null;
-  const previewTitle = activeDevice
-    ? `Preview: ${activeDevice.label} (${activeDevice.width} × ${activeDevice.height})`
-    : "Preview: Desktop";
+  const previewTitle = isLlmPreview
+    ? "Preview: AI crawler (any device)"
+    : activeDevice
+      ? `Preview: ${activeDevice.label} (${activeDevice.width} × ${activeDevice.height})`
+      : "Preview: Desktop";
+
+  const captionLabel = isLlmPreview
+    ? "Any device LLM crawlers use"
+    : activeDevice
+      ? `${activeDevice.label} · ${activeDevice.width} × ${activeDevice.height}`
+      : "Desktop";
 
   const selectDevice = (deviceId: typeof editMode.previewDeviceId) => {
-    if (!editMode.isEditMode) {
+    const alreadyPreview = isOnPrivatePreview();
+    if (!alreadyPreview) {
+      // Device frames live on /private/preview. If we cannot open it, stay put.
+      onNeedEditMode?.();
+      if (!isOnPrivatePreview()) return;
+    } else if (!editMode.isEditMode) {
       editMode.enableEditMode();
     }
+    // setPreviewMode last so it owns the URL (and leaves LLM when needed).
+    editMode.setPreviewMode({ kind: "device", deviceId });
+  };
+
+  const selectDesktop = () => {
+    // Leaving LLM: turn off in place (no jump to private preview).
+    if (isLlmPreview) {
+      editMode.setPreviewMode({ kind: "desktop" });
+      return;
+    }
     onNeedEditMode?.();
-    editMode.setPreviewDevice(deviceId);
+    editMode.setPreviewMode({ kind: "desktop" });
+  };
+
+  const selectLlm = () => {
+    // Already on: no-op so we do not jump away from a public page.
+    if (isLlmPreview) return;
+    // Turn on where you are — no private-preview jump, no URL pre-stamp.
+    editMode.setPreviewMode({ kind: "llm" });
   };
 
   return (
@@ -47,9 +85,7 @@ export function PreviewDeviceMenu({
             data-testid="preview-device-caption"
             title={previewTitle}
           >
-            {activeDevice
-              ? `${activeDevice.label} · ${activeDevice.width} × ${activeDevice.height}`
-              : "Desktop"}
+            {captionLabel}
             <ChevronDown className="h-3 w-3" />
           </button>
         ) : (
@@ -60,7 +96,11 @@ export function PreviewDeviceMenu({
             data-testid="toggle-preview-breakpoint"
             title={previewTitle}
           >
-            <MonitorSmartphone className="h-3.5 w-3.5" />
+            {isLlmPreview ? (
+              <Bot className="h-3.5 w-3.5" />
+            ) : (
+              <MonitorSmartphone className="h-3.5 w-3.5" />
+            )}
           </button>
         )}
       </DropdownMenuTrigger>
@@ -74,17 +114,28 @@ export function PreviewDeviceMenu({
           CSS viewport
         </DropdownMenuLabel>
         <DropdownMenuItem
-          onClick={() => editMode.setPreviewBreakpoint("desktop")}
+          onClick={selectDesktop}
           className={cn(
             "text-xs gap-2",
-            !isDevicePreview && "bg-accent font-medium",
+            !isDevicePreview && !isLlmPreview && "bg-accent font-medium",
           )}
           data-testid="button-preview-desktop"
         >
           <Monitor className="h-3.5 w-3.5" />
           Desktop
-          {!isDevicePreview && (
+          {!isDevicePreview && !isLlmPreview && (
             <Check className="h-3.5 w-3.5 ml-auto text-foreground" />
+          )}
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onClick={selectLlm}
+          className={cn("text-xs gap-2", isLlmPreview && "bg-accent font-medium")}
+          data-testid="button-preview-llm"
+        >
+          <Bot className="h-3.5 w-3.5 shrink-0" />
+          <span className="truncate">LLM crawler</span>
+          {isLlmPreview && (
+            <Check className="h-3.5 w-3.5 ml-auto text-foreground shrink-0" />
           )}
         </DropdownMenuItem>
         <DropdownMenuSeparator />
@@ -136,14 +187,18 @@ export function PreviewDeviceMenu({
           onPointerDown={(e) => e.preventDefault()}
         >
           <p>
-            Device preview always lives on <code className="bg-muted px-1 rounded">/private/preview/…</code> (locale, variant, version). Picking a phone or tablet from Read on a public URL (e.g. <code className="bg-muted px-1 rounded">/en/apply</code>) first opens that preview path, same as Edit. The phone is this page only: scroll and in-page anchors work; links do not leave (a dialog offers desktop). Inside is read mode so you see that page’s real header and footer. Desktop and Read clear the stored device so the menu does not keep a phone selected. The phone iframe does not clear storage (shared <code className="bg-muted px-1 rounded">localStorage</code>).
+            LLM crawler turns on where you are and stays on while you browse; Desktop turns it off.
+            Device preview always lives on <code className="bg-muted px-1 rounded">/private/preview/…</code>{" "}
+            (locale, variant, version). LLM crawler shows the page the way AI crawlers see it — all
+            regions at once; editing is off until you switch back to Desktop or a phone. Share copies
+            the current viewport and campus (campus omitted in LLM mode).
           </p>
           <details>
             <summary className="cursor-pointer hover:text-foreground">Read more (advanced)</summary>
             <ul className="mt-1 list-disc pl-3 space-y-0.5">
-              <li>Presets, embed href allowlist, and device storage: <code className="bg-muted px-1 rounded">client/src/lib/preview-devices.ts</code></li>
-              <li>Embed flag: <code className="bg-muted px-1 rounded">device_embed=1</code> in <code className="bg-muted px-1 rounded">EditModeContext.tsx</code></li>
-              <li>Link lock and blocked-nav dialog: <code className="bg-muted px-1 rounded">useInternalNav.ts</code>, <code className="bg-muted px-1 rounded">DevicePreviewShell.tsx</code> (unsaved in-memory edits are not shown until save; public pages unchanged)</li>
+              <li>URL: <code className="bg-muted px-1 rounded">preview_mode</code> in <code className="bg-muted px-1 rounded">client/src/lib/preview-mode.ts</code></li>
+              <li>Presets and device storage: <code className="bg-muted px-1 rounded">client/src/lib/preview-devices.ts</code></li>
+              <li>Embed flag: <code className="bg-muted px-1 rounded">device_embed=1</code></li>
             </ul>
           </details>
         </div>

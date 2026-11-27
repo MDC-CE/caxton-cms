@@ -375,6 +375,37 @@ export function registerSeoRoutes(app: Express): void {
     res.send(content);
   });
 
+  // Deterministic llms.txt from site_*/llms.template.md (AI job writes the template).
+  app.get("/llms.txt", async (req, res) => {
+    const { compileLlmsTxt } = await import("../llms-txt/compile");
+    const { enqueueLlmsTxtRegenerate } = await import("../llms-txt/enqueue-llms-txt");
+    const { getLlmsTxtSettings } = await import("../settings");
+    const contentRoot = getContentRoot(res);
+    const { enabled } = getLlmsTxtSettings(contentRoot);
+    if (!enabled) {
+      res.status(404);
+      res.set("Content-Type", "text/plain; charset=utf-8");
+      res.set("Cache-Control", "no-store");
+      return res.send("Not Found\n");
+    }
+    const compiled = compileLlmsTxt(contentRoot);
+    if (!compiled.ok) {
+      const site = res.locals.site as SiteContext | undefined;
+      void enqueueLlmsTxtRegenerate({
+        contentRoot,
+        siteId: site?.contentRootName,
+        reason: "missing_template",
+      }).catch(() => {});
+      res.status(404);
+      res.set("Content-Type", "text/plain; charset=utf-8");
+      res.set("Cache-Control", "no-store");
+      return res.send("Not Found\n");
+    }
+    res.set("Content-Type", "text/plain; charset=utf-8");
+    res.set("Cache-Control", "public, max-age=3600");
+    res.send(compiled.body);
+  });
+
   app.get("/:key.txt", indexNowKeyFileHandler);
 
   // Dynamic sitemap with caching
@@ -656,8 +687,7 @@ export function registerSeoRoutes(app: Express): void {
 
       let effectiveLocale = (req.query.locale as string) || "en";
       if (resolved && !req.query.locale && resolved.patternLocale) {
-        effectiveLocale =
-          resolved.patternLocale === "default" ? "en" : resolved.patternLocale;
+        effectiveLocale = getCI(res).localeForResolved(resolved);
       }
 
       let rawData: Record<string, unknown> | null = null;
@@ -1147,6 +1177,7 @@ export function registerSeoRoutes(app: Express): void {
         keyword: mainKeyword,
         contentRoot,
         contentFolder: contentRootName,
+        locale,
         yamlVolume: yamlVol,
         yamlDifficulty: yamlDiff,
       });
@@ -1398,20 +1429,39 @@ export function registerSeoRoutes(app: Express): void {
         }> = [];
 
         if (Array.isArray(dbSections)) {
+          const contentRoot = getContentRoot(res);
           const withDynamic = (await resolveDynamicEntries(dbSections, locale, {
-            contentRoot: getContentRoot(res),
+            db: getDB(res),
+            contentRoot,
             contentIndex: getCI(res),
             singleEntry,
           })) as Array<Record<string, unknown>>;
           const collected = collectSectionSchemasDetailed(withDynamic, {
             locale,
-            contentRoot: getContentRoot(res),
-            baseUrl: getSiteBaseUrl(getContentRoot(res)),
+            contentRoot,
+            baseUrl: getSiteBaseUrl(contentRoot),
             contentType,
             pageUrl: typeof resolvedMeta.canonical_url === "string" ? resolvedMeta.canonical_url : undefined,
             title: typeof resolvedMeta.page_title === "string" ? resolvedMeta.page_title : undefined,
             description: typeof resolvedMeta.description === "string" ? resolvedMeta.description : undefined,
             image: typeof resolvedMeta.og_image === "string" ? resolvedMeta.og_image : undefined,
+            publishedAt:
+              (typeof singleEntry.published_at === "string" ? singleEntry.published_at : undefined) ||
+              (typeof resolvedMeta.published_at === "string" ? resolvedMeta.published_at : undefined),
+            updatedAt:
+              resolveEntryUpdatedAt({
+                contentType,
+                slug: (typeof singleEntry.slug === "string" && singleEntry.slug) || slug,
+                locale,
+                record: singleEntry,
+                contentRoot,
+              }) || undefined,
+            authorName: typeof singleEntry.author === "string" ? singleEntry.author : undefined,
+            authors:
+              Array.isArray(singleEntry.authors) && singleEntry.authors.length > 0
+                ? (singleEntry.authors as Array<Record<string, unknown> | string>)
+                : undefined,
+            singleEntry,
           });
           schemaOrg = collected.documents;
           schemaOrgDocuments = collected.preview;
@@ -1539,7 +1589,14 @@ export function registerSeoRoutes(app: Express): void {
           slug,
           _slug: slug,
         };
+        // Dates/authors from entry layer (common+locale), not the shared template shell.
+        const entryRecord: Record<string, unknown> = {
+          ...(pageData as Record<string, unknown>),
+          slug,
+          _slug: slug,
+        };
         const withDynamic = (await resolveDynamicEntries(sections, locale, {
+          db: getDB(res),
           contentRoot,
           contentIndex: ci,
           singleEntry,
@@ -1570,6 +1627,23 @@ export function registerSeoRoutes(app: Express): void {
             typeof displayMeta.og_image === "string"
               ? displayMeta.og_image
               : undefined,
+          publishedAt:
+            (typeof entryRecord.published_at === "string" ? entryRecord.published_at : undefined) ||
+            (typeof displayMeta.published_at === "string" ? displayMeta.published_at : undefined),
+          updatedAt:
+            resolveEntryUpdatedAt({
+              contentType,
+              slug,
+              locale,
+              record: entryRecord,
+              contentRoot,
+            }) || undefined,
+          authorName: typeof entryRecord.author === "string" ? entryRecord.author : undefined,
+          authors:
+            Array.isArray(entryRecord.authors) && entryRecord.authors.length > 0
+              ? (entryRecord.authors as Array<Record<string, unknown> | string>)
+              : undefined,
+          singleEntry,
         });
         schemaOrg = collected.documents;
         schemaOrgDocuments = collected.preview;
@@ -1759,7 +1833,7 @@ export function registerSeoRoutes(app: Express): void {
           return {
             contentType: r.contentType,
             slug: r.slug,
-            patternLocale: ci.servedLocale(r.contentType, r.slug, r.patternLocale),
+            patternLocale: ci.localeForResolved(r),
           };
         },
         site,
@@ -1923,15 +1997,15 @@ export function registerSeoRoutes(app: Express): void {
       const auth = await requireCapability(req, res, "seo_edit", contentType);
       if (!auth.authorized) return;
 
-      const {
-        isOpenRushConfigured,
-        inspectKeywordQuery,
-        OPENRUSH_INSPECT_KEYWORD_CREDITS,
-      } = await import("../openrush-client");
-      const { getOpenRushSettings } = await import("../settings");
+      const { providerFor, fetchKeywordMetrics, estimateKeywordMetricsCost } = await import(
+        "../seo-research-providers"
+      );
+      const { resolveSiteResearchMarket, marketSummary } = await import("../seo-research-market");
       const {
         getKeywordEntry,
         keywordMetricsCompleteAndFresh,
+        volumeProviderOf,
+        difficultyProviderOf,
       } = await import("../openrush-keyword-cache");
       const {
         wouldSpend,
@@ -1940,12 +2014,26 @@ export function registerSeoRoutes(app: Express): void {
       } = await import("../seo-research-budget");
       const contentRoot = getContentRoot(res);
       const contentFolder = getContentRootName(res);
-      if (!isOpenRushConfigured(contentRoot)) {
+      const provider = providerFor("keyword_metrics", contentRoot);
+      if (!provider) {
         return res.status(400).json({
           error: "SEO research must be activated to refresh keyword metrics",
           code: "seo_research_inactive",
         });
       }
+      const marketRes = resolveSiteResearchMarket({
+        contentRoot,
+        locale,
+        marketId: typeof req.body?.market === "string" ? req.body.market : undefined,
+      });
+      if (!marketRes.ok) {
+        return res.status(400).json({
+          error: marketRes.message,
+          code: marketRes.code,
+          country_markets: marketRes.country_markets,
+        });
+      }
+      const market = marketRes.market;
 
       let keyword = keywordOverride;
       if (!keyword) {
@@ -1973,10 +2061,8 @@ export function registerSeoRoutes(app: Express): void {
       }
 
       const force = req.body?.force === true;
-      const settings = getOpenRushSettings(contentRoot);
-      const location = settings.location || "United States";
-      const language = settings.language || "English";
-      const cached = getKeywordEntry(keyword, location, language, contentFolder);
+      const marketOut = marketSummary(market);
+      const cached = getKeywordEntry(keyword, market.location, market.language, contentFolder);
       if (!force && keywordMetricsCompleteAndFresh(cached)) {
         return res.json({
           ok: true,
@@ -1984,21 +2070,26 @@ export function registerSeoRoutes(app: Express): void {
           keyword: cached!.keyword,
           kw_monthly_volume: cached!.monthly_volume,
           kw_difficulty: cached!.kw_difficulty,
+          volume_provider: volumeProviderOf(cached),
+          difficulty_provider: difficultyProviderOf(cached),
+          market: marketOut,
           fetched_at: cached!.fetched_at,
           notes: cached!.notes,
           source: "seo_research_cache",
           credits: 0,
+          cost_usd: 0,
         });
       }
 
+      const estimate = estimateKeywordMetricsCost(provider, 1);
       const gate = wouldSpend({
+        provider,
         contentFolder,
         contentRoot,
         sessionKey: STAFF_BUDGET_SESSION_KEY,
         applySessionCap: false,
-        cost: OPENRUSH_INSPECT_KEYWORD_CREDITS,
+        cost: estimate,
         confirm: true,
-        settings,
       });
       if (!gate.ok) {
         return res.status(429).json({
@@ -2008,38 +2099,47 @@ export function registerSeoRoutes(app: Express): void {
         });
       }
 
-      const inspected = await inspectKeywordQuery({ keyword, contentRoot, contentFolder });
-      if (!inspected.ok || !inspected.metrics) {
-        return res.status(400).json({ error: inspected.error || "Keyword research lookup failed" });
-      }
-
-      const volume = inspected.entry?.monthly_volume ?? inspected.metrics.monthly_volume;
-      const difficulty = inspected.entry?.kw_difficulty ?? inspected.metrics.kw_difficulty;
-      if (volume == null && difficulty == null && !inspected.entry) {
+      const fetched = await fetchKeywordMetrics({
+        provider,
+        keywords: [keyword],
+        market,
+        contentRoot,
+        contentFolder,
+      });
+      const row = fetched.rows[0];
+      if (!row || !row.ok) {
         return res.status(400).json({
-          error: "Provider returned no volume or difficulty for this keyword",
-          keyword,
-          metrics: inspected.metrics,
+          error: row && !row.ok ? row.error : "Keyword research lookup failed",
+          code: fetched.fatal ? "seo_research_provider_unavailable" : "seo_research_keyword_failed",
+          error_kind: row && !row.ok ? (row.error_kind ?? null) : null,
+          provider,
         });
       }
 
       recordSpend({
+        provider,
+        contentRoot,
         contentFolder,
         sessionKey: STAFF_BUDGET_SESSION_KEY,
-        cost: OPENRUSH_INSPECT_KEYWORD_CREDITS,
+        cost: fetched.cost,
       });
 
       res.json({
         ok: true,
         outcome: "fetched",
-        keyword: inspected.metrics.keyword,
-        kw_monthly_volume: volume,
-        kw_difficulty: difficulty,
-        fetched_at: inspected.entry?.fetched_at ?? null,
-        notes: inspected.entry?.notes ?? null,
+        keyword: row.entry.keyword,
+        kw_monthly_volume: row.entry.monthly_volume,
+        kw_difficulty: row.entry.kw_difficulty,
+        volume_provider: volumeProviderOf(row.entry),
+        difficulty_provider: difficultyProviderOf(row.entry),
+        found: row.found,
+        market: marketOut,
+        mode: fetched.mode,
+        fetched_at: row.entry.fetched_at,
+        notes: row.entry.notes,
         source: "seo_research_cache",
-        credits: OPENRUSH_INSPECT_KEYWORD_CREDITS,
-        credits_note: inspected.credits_note,
+        credits: provider === "openrush" ? fetched.cost : 0,
+        cost_usd: provider === "dataforseo" ? fetched.cost : 0,
       });
     } catch (err) {
       log.error({ err }, "keyword refresh failed");
@@ -2105,13 +2205,20 @@ export function registerSeoRoutes(app: Express): void {
       const auth = await requireCapability(req, res, "seo_edit", contentType);
       if (!auth.authorized) return;
 
-      const { isOpenRushConfigured } = await import("../openrush-client");
+      const { providerFor } = await import("../seo-research-providers");
       const contentRoot = getContentRoot(res);
       const contentFolder = getContentRootName(res);
-      if (!isOpenRushConfigured(contentRoot)) {
+      const provider = providerFor("keyword_metrics", contentRoot);
+      if (!provider) {
         return res.status(400).json({
-          error: "OpenRush must be activated to refresh keyword metrics",
+          error: "Keyword research must be activated to refresh keyword metrics",
           code: "openrush_inactive",
+        });
+      }
+      if (!preview && provider === "dataforseo" && req.body?.confirm_cost !== true) {
+        return res.status(400).json({
+          error: "Confirm the estimated DataForSEO cost (confirm_cost: true) before running this refresh.",
+          code: "confirm_cost_required",
         });
       }
 
@@ -2177,6 +2284,47 @@ export function registerSeoRoutes(app: Express): void {
         ok: false,
         balance: null,
         error: err instanceof Error ? err.message : "Credits lookup failed",
+      });
+    }
+  });
+
+  /**
+   * Remaining DataForSEO account balance (USD, appendix/user_data). Staff-only; no content type.
+   */
+  api.get(app, "/api/seo/dataforseo/balance", { rate: "staffWrite" }, async (req, res) => {
+    try {
+      const auth = await requireStaffSession(req, res);
+      if (!auth.authorized) return;
+      const contentRoot = getContentRoot(res);
+      const { isDataForSeoConfigured, fetchDataForSeoBalance, dataForSeoMode } = await import(
+        "../dataforseo-client"
+      );
+      if (!isDataForSeoConfigured(contentRoot)) {
+        return res.status(400).json({
+          ok: false,
+          balance_usd: null,
+          mode: dataForSeoMode(),
+          error: "DataForSEO is not configured",
+          code: "dataforseo_inactive",
+        });
+      }
+      const result = await fetchDataForSeoBalance();
+      if (!result.ok) {
+        return res.status(400).json({
+          ok: false,
+          balance_usd: null,
+          mode: dataForSeoMode(),
+          error: result.error,
+          error_kind: result.error_kind,
+        });
+      }
+      res.json({ ok: true, balance_usd: result.balance_usd, mode: result.mode });
+    } catch (err) {
+      log.error({ err }, "dataforseo balance failed");
+      res.status(500).json({
+        ok: false,
+        balance_usd: null,
+        error: err instanceof Error ? err.message : "Balance lookup failed",
       });
     }
   });
@@ -2260,8 +2408,20 @@ export function registerSeoRoutes(app: Express): void {
 
       const force = req.body?.force === true;
       const settings = getOpenRushSettings(contentRoot);
-      const location = settings.location || "United States";
-      const language = settings.language || "English";
+      const { resolveSiteResearchMarket } = await import("../seo-research-market");
+      const marketRes = resolveSiteResearchMarket({
+        contentRoot,
+        locale,
+        marketId: typeof req.body?.market === "string" ? req.body.market : undefined,
+      });
+      if (!marketRes.ok) {
+        return res.status(400).json({
+          error: marketRes.message,
+          code: marketRes.code,
+          country_markets: marketRes.country_markets,
+        });
+      }
+      const { location, language } = marketRes.market;
       const cached = loadSerpCache(contentFolder).entries[keyword];
       if (!force && serpEntryFreshForMarket(cached, location, language)) {
         return res.json({
@@ -2303,6 +2463,7 @@ export function registerSeoRoutes(app: Express): void {
         contentRoot,
         contentFolder,
         targetUrl,
+        market: { location, language },
       });
       if (!inspected.ok || !inspected.entry) {
         return res.status(400).json({ error: inspected.error || "SERP lookup failed" });

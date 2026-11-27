@@ -31,12 +31,20 @@ import {
   refreshSitemapEntriesForContentKey,
 } from "../sitemap";
 import { markFileAsModified } from "../sync-state";
+import {
+  databaseHasGeoFields,
+  listLocalDatabaseSlugs,
+  listLocationDatabaseGeoErrors,
+  listLocationGeoOkDatabases,
+  SESSION_LOCATION_GEO_ERROR,
+} from "../session-location-catalog";
 import { emitMenuChanged, emitTagManagerChanged, emitThemeChanged } from "../content-events";
 import { checkThemeWrite, createOwnSiteTheme, loadSiteTheme, resolveSiteTheme, sitesInheritingThemeFrom } from "../theme-config";
 import { scanThemeBackgroundUsage, replaceSectionBackgroundEverywhere } from "../design/theme-usage";
 import { sharedTypesUsingBackground } from "../design/shared-base-palette";
 import { isSharedBasePaletteId } from "@shared/theme-palette";
 import { evaluateVariableWrite, type VariableWriteAction } from "../variable-write-rules";
+import { syncListPriceBindingAfterWrite } from "../variable-list-price-bind";
 import { api } from "../rate-limit/api";
 import { handleVariableCatalogRequest } from "../variable-catalog-route";
 import { getConversionNameUsages, bulkReplaceConversionName, partialReplaceConversionNameBySection, buildFormState, getFormStateSuggestions, getConversionNameCounts, getAllFormEntries } from "../form-state";
@@ -164,6 +172,8 @@ import {
   buildRobotsTxtContent,
   getAuthSettings,
   updateAuthSettings,
+  getSessionSettings,
+  updateSessionSettings,
   isSignupConfigured,
   isSignupFieldMapReady,
   getEntryPreviewSettings,
@@ -597,7 +607,14 @@ export function registerSettingsRoutes(app: Express): void {
       }
       if (action === "set_metadata") {
         vm.updateMetadata(name, decision.metadataPatch ?? {});
-        return res.json({ success: true, definitions: vm.getDefinitions() });
+        const bind = syncListPriceBindingAfterWrite(name);
+        return res.json({
+          success: true,
+          definitions: vm.getDefinitions(),
+          ...(bind.bound || bind.cleared.length || bind.warnings.length
+            ? { list_price_binding: bind }
+            : {}),
+        });
       }
       const applyMeta = () => {
         if (decision.metadataPatch) vm.applyMetadata(name, decision.metadataPatch);
@@ -605,17 +622,17 @@ export function registerSettingsRoutes(app: Express): void {
 
       switch (action) {
         case "set_default": {
-          const { value } = body as { value: string };
+          const { value } = body as { value: unknown };
           if (value === undefined) {
             return res.status(400).json({ error: "value is required" });
           }
           applyMeta();
-          getVM(res).updateDefault(name, value);
+          getVM(res).updateDefault(name, value as string | { amount: number; currency: string });
           break;
         }
         case "add_condition": {
           const { condition } = body as {
-            condition: { query: Record<string, string>; value: string };
+            condition: { query: Record<string, string>; value: unknown };
           };
           if (!condition || !condition.query || condition.value === undefined) {
             return res
@@ -623,13 +640,13 @@ export function registerSettingsRoutes(app: Express): void {
               .json({ error: "condition with query and value is required" });
           }
           applyMeta();
-          getVM(res).addCondition(name, condition);
+          getVM(res).addCondition(name, condition as { query: Record<string, string>; value: string });
           break;
         }
         case "update_condition": {
           const { index, condition } = body as {
             index: number;
-            condition: { query: Record<string, string>; value: string };
+            condition: { query: Record<string, string>; value: unknown };
           };
           if (
             index === undefined ||
@@ -642,7 +659,11 @@ export function registerSettingsRoutes(app: Express): void {
             });
           }
           applyMeta();
-          getVM(res).updateCondition(name, index, condition);
+          getVM(res).updateCondition(
+            name,
+            index,
+            condition as { query: Record<string, string>; value: string },
+          );
           break;
         }
         case "delete_condition": {
@@ -671,9 +692,13 @@ export function registerSettingsRoutes(app: Express): void {
           return res.status(400).json({ error: `Unknown action: ${action}` });
       }
 
+      const bind = syncListPriceBindingAfterWrite(name);
       res.json({
         success: true,
         definitions: getVM(res).getDefinitions(),
+        ...(bind.bound || bind.cleared.length || bind.warnings.length
+          ? { list_price_binding: bind }
+          : {}),
       });
     } catch (err: any) {
       res
@@ -1004,6 +1029,52 @@ export function registerSettingsRoutes(app: Express): void {
     });
   });
 
+  app.get("/api/settings/session", (req, res) => {
+    const contentRoot = getContentRoot(res);
+    const session = getSessionSettings(contentRoot);
+    const available_databases = listLocalDatabaseSlugs(contentRoot);
+    res.json({
+      ...session,
+      available_databases,
+      location_geo_ok_databases: listLocationGeoOkDatabases(contentRoot, available_databases),
+      location_database_errors: listLocationDatabaseGeoErrors(contentRoot, available_databases),
+    });
+  });
+
+  api.put(app, "/api/settings/session", { rate: "staffWrite" }, (req, res) => {
+    try {
+      const schema = z.object({
+        location: z
+          .object({
+            database: z.string().nullable().optional(),
+            fill_from_ip: z.boolean().optional(),
+          })
+          .optional(),
+      });
+      const parsed = schema.safeParse(req.body?.session === undefined ? req.body : req.body.session);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid request body" });
+      }
+      const contentRoot = getContentRoot(res);
+      const nextDb = parsed.data.location?.database;
+      if (typeof nextDb === "string" && nextDb.trim() && !databaseHasGeoFields(nextDb.trim(), contentRoot)) {
+        return res.status(400).json({ error: SESSION_LOCATION_GEO_ERROR });
+      }
+      const updated = updateSessionSettings(parsed.data, contentRoot);
+      markFileAsModified("settings.yml", undefined, undefined, contentRoot);
+      const available_databases = listLocalDatabaseSlugs(contentRoot);
+      res.json({
+        success: true,
+        ...updated,
+        available_databases,
+        location_geo_ok_databases: listLocationGeoOkDatabases(contentRoot, available_databases),
+        location_database_errors: listLocationDatabaseGeoErrors(contentRoot, available_databases),
+      });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || String(err) });
+    }
+  });
+
   app.put("/api/settings/auth", (req, res) => {
     try {
       const methodSchema = z.enum(["GET", "POST", "PUT"]).optional();
@@ -1266,18 +1337,23 @@ export function registerSettingsRoutes(app: Express): void {
         login_event_name,
         signup_event_aliases,
         login_event_aliases,
+        gtm_payload,
       } = req.body;
       if (
         conversion_events === undefined && webhook === undefined &&
         leads_expected_conversion_names === undefined && leads_expected_tags === undefined &&
         bigquery === undefined &&
         signup_event_name === undefined && login_event_name === undefined &&
-        signup_event_aliases === undefined && login_event_aliases === undefined
+        signup_event_aliases === undefined && login_event_aliases === undefined &&
+        gtm_payload === undefined
       ) {
         return res.status(400).json({
           error:
-            "Request body must contain conversion_events, webhook, leads_expected_*, bigquery, or signup/login_event_*",
+            "Request body must contain conversion_events, webhook, leads_expected_*, bigquery, gtm_payload, or signup/login_event_*",
         });
+      }
+      if (gtm_payload !== undefined && (typeof gtm_payload !== "object" || gtm_payload === null || Array.isArray(gtm_payload))) {
+        return res.status(400).json({ error: "gtm_payload must be an object with skip_domains" });
       }
       if (conversion_events !== undefined && !Array.isArray(conversion_events)) {
         return res.status(400).json({ error: "conversion_events must be an array" });
@@ -1301,6 +1377,7 @@ export function registerSettingsRoutes(app: Express): void {
         ...(login_event_name !== undefined ? { login_event_name } : {}),
         ...(signup_event_aliases !== undefined ? { signup_event_aliases } : {}),
         ...(login_event_aliases !== undefined ? { login_event_aliases } : {}),
+        ...(gtm_payload !== undefined ? { gtm_payload } : {}),
       }, res, auth.author);
       res.json({ success: true, ...getTrackingSettings(getContentRoot(res)) });
     } catch (err: any) {
@@ -2066,13 +2143,15 @@ export function registerSettingsRoutes(app: Express): void {
     const auth = await requireCapability(req, res, "seo_settings");
     if (!auth.authorized) return;
     const { getSearchConsoleSettings } = await import("../settings");
-    const { marketsForUi } = await import("../gsc-organic-markets");
+    const { marketsForUi, researchableMarketIds } = await import("../gsc-organic-markets");
     const sc = getSearchConsoleSettings(getContentRoot(res));
     const grouped = marketsForUi(sc.organic_markets);
     res.json({
       markets: sc.organic_markets,
       rollups: grouped.rollups,
       countries: grouped.countries,
+      research_market_defaults: sc.research_market_defaults,
+      researchable_market_ids: researchableMarketIds(sc.organic_markets),
     });
   });
 
@@ -2086,8 +2165,15 @@ export function registerSettingsRoutes(app: Express): void {
       }
       const contentRoot = getContentRoot(res);
       const { updateSearchConsoleOrganicMarkets } = await import("../settings");
-      const { marketsForUi } = await import("../gsc-organic-markets");
-      const updated = updateSearchConsoleOrganicMarkets(body, contentRoot);
+      const { marketsForUi, researchableMarketIds } = await import("../gsc-organic-markets");
+      const researchDefaults = req.body?.research_market_defaults;
+      if (
+        researchDefaults !== undefined &&
+        (!researchDefaults || typeof researchDefaults !== "object" || Array.isArray(researchDefaults))
+      ) {
+        return res.status(400).json({ error: "research_market_defaults must be an object of locale → market id" });
+      }
+      const updated = updateSearchConsoleOrganicMarkets(body, contentRoot, researchDefaults);
       markFileAsModified("settings.yml", undefined, undefined, contentRoot);
       const grouped = marketsForUi(updated.organic_markets);
       res.json({
@@ -2095,6 +2181,8 @@ export function registerSettingsRoutes(app: Express): void {
         markets: updated.organic_markets,
         rollups: grouped.rollups,
         countries: grouped.countries,
+        research_market_defaults: updated.research_market_defaults,
+        researchable_market_ids: researchableMarketIds(updated.organic_markets),
       });
     } catch (err: any) {
       res.status(400).json({ error: err.message || String(err) });
@@ -2150,6 +2238,59 @@ export function registerSettingsRoutes(app: Express): void {
       });
     } catch (err: any) {
       res.status(400).json({ error: err.message || String(err) });
+    }
+  });
+
+  api.get(app, "/api/settings/dataforseo", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "seo_settings");
+    if (!auth.authorized) return;
+    const { getDataForSeoSettings } = await import("../settings");
+    const { dataForSeoCredentialsConfigured, dataForSeoMode } = await import("../dataforseo-client");
+    const settings = getDataForSeoSettings(getContentRoot(res));
+    const credentials_configured = dataForSeoCredentialsConfigured();
+    res.json({
+      configured: Boolean(settings.enabled && credentials_configured),
+      credentials_configured,
+      mode: dataForSeoMode(),
+      settings,
+    });
+  });
+
+  api.put(app, "/api/settings/dataforseo", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "seo_settings");
+    if (!auth.authorized) return;
+    try {
+      const body = req.body?.dataforseo ?? req.body;
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return res.status(400).json({ error: "Request body must be a dataforseo object" });
+      }
+      const contentRoot = getContentRoot(res);
+      const { updateDataForSeoSettings } = await import("../settings");
+      const { dataForSeoCredentialsConfigured, dataForSeoMode } = await import("../dataforseo-client");
+      const settings = updateDataForSeoSettings(body, contentRoot);
+      markFileAsModified("settings.yml", auth.username ?? undefined, undefined, contentRoot);
+      const credentials_configured = dataForSeoCredentialsConfigured();
+      res.json({
+        success: true,
+        configured: Boolean(settings.enabled && credentials_configured),
+        credentials_configured,
+        mode: dataForSeoMode(),
+        settings,
+      });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || String(err) });
+    }
+  });
+
+  api.post(app, "/api/settings/dataforseo/test", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireCapability(req, res, "seo_settings");
+    if (!auth.authorized) return;
+    try {
+      const { testDataForSeoConnection } = await import("../dataforseo-client");
+      const result = await testDataForSeoConnection(getContentRoot(res));
+      res.status(result.ok ? 200 : 400).json(result);
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err?.message || String(err), elapsed_ms: 0 });
     }
   });
 
@@ -2293,6 +2434,8 @@ export function registerSettingsRoutes(app: Express): void {
   app.put("/api/settings/robots", (req, res) => {
     try {
       const schema = z.object({
+        indexing_block: z.enum(["none", "ai", "all"]).optional(),
+        /** Legacy; mapped to indexing_block when indexing_block is omitted. */
         block_indexing: z.boolean().optional(),
         include_sitemap: z.boolean().optional(),
         disallow_paths: z.array(z.string()).optional(),
@@ -2317,6 +2460,154 @@ export function registerSettingsRoutes(app: Express): void {
       });
     } catch (err: any) {
       res.status(400).json({ error: err.message || String(err) });
+    }
+  });
+
+  // Staff preview of compiled llms.txt (same compile path as GET /llms.txt) — never enqueues.
+  app.get("/api/settings/llms-txt", async (req, res) => {
+    try {
+      const {
+        compileLlmsTxt,
+        llmsTemplateExists,
+        getLlmsTemplateMtimeMs,
+      } = await import("../llms-txt/compile");
+      const {
+        readLlmsTemplate,
+        readLlmsTxtPrompt,
+        LLMS_PROMPT_INPUT_SLOTS,
+        LLMS_PROMPT_INPUT_SLOT_INFO,
+      } = await import("../llms-txt/regenerate-prompt");
+      const { getLlmsTxtSettings } = await import("../settings");
+      const contentRoot = getContentRoot(res);
+      const hasTemplate = llmsTemplateExists(contentRoot);
+      const { enabled } = getLlmsTxtSettings(contentRoot);
+      const template = hasTemplate ? readLlmsTemplate(contentRoot) : null;
+      const compiled = hasTemplate ? compileLlmsTxt(contentRoot) : null;
+      const prompt = readLlmsTxtPrompt(contentRoot);
+      return res.json({
+        has_template: hasTemplate,
+        has_prompt: prompt !== null,
+        enabled,
+        serving: enabled && hasTemplate,
+        template,
+        template_mtime_ms: getLlmsTemplateMtimeMs(contentRoot),
+        markdown: compiled?.ok ? compiled.body : null,
+        prompt,
+        prompt_slots: LLMS_PROMPT_INPUT_SLOTS.map((id) => ({
+          id,
+          token: `{{${id}}}`,
+          info: LLMS_PROMPT_INPUT_SLOT_INFO[id],
+        })),
+        public_url: "/llms.txt",
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to load llms.txt preview" });
+    }
+  });
+
+  api.put(app, "/api/settings/llms-txt/prompt", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireMutatingStaff(req, res);
+    if (!auth.authorized) return;
+    try {
+      const schema = z.object({ prompt: z.string() });
+      const parsed = schema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res.status(400).json({ error: "prompt string required", details: parsed.error.flatten() });
+      }
+      const body = parsed.data.prompt;
+      if (!body.trim()) {
+        return res.status(400).json({ error: "Prompt cannot be empty" });
+      }
+      const {
+        writeLlmsTxtPrompt,
+        readLlmsTxtPrompt,
+        LLMS_TXT_PROMPT_BASENAME,
+      } = await import("../llms-txt/regenerate-prompt");
+      const contentRoot = getContentRoot(res);
+      const author = auth.author || auth.username || "staff";
+      writeLlmsTxtPrompt(body, contentRoot);
+      markFileAsModified(LLMS_TXT_PROMPT_BASENAME, author, undefined, contentRoot);
+      res.json({
+        success: true,
+        prompt: readLlmsTxtPrompt(contentRoot),
+        has_prompt: true,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to save regenerate prompt" });
+    }
+  });
+
+  api.post(app, "/api/settings/llms-txt/regenerate", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireMutatingStaff(req, res);
+    if (!auth.authorized) return;
+    try {
+      const { enqueueLlmsTxtRegenerate } = await import("../llms-txt/enqueue-llms-txt");
+      const { getLlmsTxtSettings } = await import("../settings");
+      const { readLlmsTxtPrompt } = await import("../llms-txt/regenerate-prompt");
+      const contentRoot = getContentRoot(res);
+      const folder = getContentRootName(res);
+      const { enabled } = getLlmsTxtSettings(contentRoot);
+
+      if (!readLlmsTxtPrompt(contentRoot)) {
+        return res.status(400).json({
+          error: "Save a regenerate prompt first (View prompt → edit → Save).",
+          has_prompt: false,
+        });
+      }
+
+      // Regenerate only rebuilds the template; serving stays whatever llms_txt.enabled is.
+      const result = await enqueueLlmsTxtRegenerate({
+        contentRoot,
+        siteId: folder,
+        reason: "staff",
+      });
+      res.json({
+        success: true,
+        queued: result.queued,
+        deduped: result.deduped === true,
+        busy: result.busy === true,
+        enabled,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to enqueue llms.txt regenerate" });
+    }
+  });
+
+  // Toggle public serving via settings.yml llms_txt.enabled (keeps llms.template.md).
+  api.post(app, "/api/settings/llms-txt/serving", { rate: "staffWrite" }, async (req, res) => {
+    const auth = await requireMutatingStaff(req, res);
+    if (!auth.authorized) return;
+    try {
+      const schema = z.object({ enabled: z.boolean() });
+      const parsed = schema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res.status(400).json({ error: "enabled boolean required", details: parsed.error.flatten() });
+      }
+      const { updateLlmsTxtSettings, getLlmsTxtSettings } = await import("../settings");
+      const { llmsTemplateExists } = await import("../llms-txt/compile");
+      const contentRoot = getContentRoot(res);
+      const author = auth.author || auth.username || "staff";
+      const hasTemplate = llmsTemplateExists(contentRoot);
+
+      if (parsed.data.enabled && !hasTemplate) {
+        return res.status(400).json({
+          error: "No template yet — generate one first, then Serve",
+          has_template: false,
+        });
+      }
+
+      const llms = updateLlmsTxtSettings({ enabled: parsed.data.enabled }, contentRoot);
+      markFileAsModified("settings.yml", author, undefined, contentRoot);
+
+      res.json({
+        success: true,
+        enabled: llms.enabled,
+        has_template: hasTemplate,
+        serving: llms.enabled && hasTemplate,
+        settings: getLlmsTxtSettings(contentRoot),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "Failed to update llms.txt serving" });
     }
   });
 

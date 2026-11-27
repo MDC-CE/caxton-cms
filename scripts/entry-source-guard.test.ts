@@ -18,7 +18,7 @@ const ENTRY_SOURCE_ALLOWLIST: Record<string, Allowed> = {
   "shared/sharedLayoutPaths.ts": { count: 1, reason: "typeUsesSharedTemplate: database types always use a shared template" },
   "server/content-types.ts": { count: 13, reason: "content type registry: getDatabaseName/hasDatabaseSingle definitions + field_mapping reserved keys" },
 
-  "client/src/pages/ContentTypeManagePage.tsx": { count: 45, reason: CONFIG },
+  "client/src/pages/ContentTypeManagePage.tsx": { count: 47, reason: CONFIG },
   "server/redirects.ts": { count: 1, reason: "a {{ entry.* }} redirect looks up the visited page only when that type has a database" },
   "client/src/components/editing/SingleVariablePickerModal.tsx": { count: 6, reason: "variable picker lists database columns for {{ entry.* }}" },
   "client/src/components/editing/MappingFieldsTab.tsx": { count: 5, reason: CONFIG },
@@ -64,6 +64,8 @@ const ENTRY_SOURCE_ALLOWLIST: Record<string, Allowed> = {
   "server/routes/seo.ts": { count: 3, reason: "SEO preview: database pages show merged live meta (no entry file holds it), live-only contexts, no per-language visibility copy" },
   "server/content-proposals/evidence-sources.ts": { count: 1, reason: "proposal review reads evidence database rows as proof (not entry resolution)" },
   "server/entry-ref.ts": { count: 2, reason: "slug resolver: database pages resolve through their language group (findEntryPresence)" },
+  "server/workshops-ago-migration.ts": { count: 1, reason: "migration 013 only runs where the workshop type is linked to the workshops database (config check)" },
+  "server/page-slug-identity.ts": { count: 1, reason: "slug-move detect: finds content types linked to a database that declare _slug (config check, not entry resolution)" },
 };
 
 describe("entry source guard", () => {

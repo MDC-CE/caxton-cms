@@ -163,6 +163,47 @@ Then run **Deploy to VPS** again (Actions → Run workflow). Do not just `system
 
 When Node ships the next security release, raise the floors in `require_patched_node` in [`scripts/deploy.sh`](../scripts/deploy.sh). CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) uses `node-version: "24"`, which already picks up the latest 24.x.
 
+### 4.5 Precompressed static files (optional nginx)
+
+`npm run build` ends with [`scripts/precompress-assets.mjs`](../scripts/precompress-assets.mjs), which writes `file.br` and `file.gz` next to each compressible file in `dist/public`. Node already serves those copies ([`server/static-precompressed.ts`](../server/static-precompressed.ts)), so nothing on the server has to change.
+
+To take asset requests off Node entirely, let nginx serve `/assets/` from the live release. This needs ngx_brotli built with its static module (`brotli_static`); check with `nginx -V 2>&1 | grep -o brotli` and that the config test passes with the directive.
+
+```nginx
+location /assets/ {
+    root /opt/website-v3/current/dist/public;
+    brotli_static on;
+    gzip_static on;
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    try_files $uri @app;
+}
+```
+
+`@app` is the named location that proxies to Node (define it next to the existing `proxy_pass` block if it does not exist yet). `nginx -t && systemctl reload nginx` after editing. `current` is a symlink that flips on deploy; nginx resolves it per request (unless `open_file_cache` is on), so a deploy needs no nginx reload.
+
+An `add_header` inside a `location` replaces every `add_header` inherited from the `server` block. If security headers (HSTS, `X-Content-Type-Options`, and so on) are set at server level, repeat them inside `location /assets/`, or assets go out without them.
+
+### 4.6 Reading HTML timing and cache fill
+
+Every HTML response carries a `Server-Timing` header (durations only, in ms). Chrome DevTools shows it under Network → the document → Timing; from a shell: `curl -s -o /dev/null -D - https://4geeks.com/en/home -H 'accept-encoding: br' | grep -i server-timing`.
+
+| Step | Cache hit | Cache miss |
+|---|---|---|
+| `pre` | Request start to the HTML cache (cookies, routes, redirects) | Same, or up to the renderer when the cache was skipped |
+| `lookup` | Cache key and cache read | Cache key and the failed read |
+| `data` | | Initial data middleware, up to the renderer |
+| `render` | | Server render (or a copy another request just built) |
+| `boot` | Page boot and compressed body | Page boot |
+| `shell` | | Client-only fallback page |
+| `total` | Sum of the above | Sum of the above |
+
+The header is set before the body is sent, so sending is not included.
+
+At start the web process logs `HTML cache loaded <n> of <files> pages, <used> of <budget>MB`. When it is near the budget, check for these log lines:
+
+- `HTML cache freed page boot copies: over 150MB budget`: per-visitor compressed copies were dropped to make room. They rebuild in a few ms on the next visit. At most one line a minute.
+- `HTML cache dropped <path>: over 150MB budget`: a whole page was deleted from memory and disk; its next visit renders on the web process. Repeated lines mean the budget is too small.
+
 ---
 
 ## 5. systemd

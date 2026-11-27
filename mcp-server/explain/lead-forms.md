@@ -126,17 +126,19 @@ Live submit builds the body from the map only (no legacy payload merge). `conver
 
 No magic aliases: `payload.course` ← `form.program` only if that mapping row exists.
 
-## Continuous `form_overrides` + `{{ visitor.* }}`
+## Continuous `form_overrides` + match-time templates
 
-First matching override overlays the form root for **UI and submit** (not submit-only). Plain objects (`messages`, `success`, `webhook`) deep-merge.
+First matching override overlays the form root for **UI and submit** (not submit-only). Plain objects (`messages`, `success`, `webhook`) deep-merge. Outcomes only need keys that **differ** from the form defaults (staff UI strips equals-default).
+
+Prefer **`field_property_slug`** (template resolved in LeadForm at match time with bags `{ form, entry, visitor }`). Section / SSR `resolveDeep` **does not** expand condition operands (`field_property_slug`, `value`, legacy slugs)—same reason bare `entry_field_slug` existed.
 
 ```yaml
 form_overrides:
   - conditions:
-      - entry_field_slug: registered_attendee_ids
+      - field_property_slug: "{{ entry.registered_attendee_ids }}"
         match_method: contains   # equals (default) | contains
         value: "{{ visitor.id }}"
-      - entry_field_slug: event_started
+      - field_property_slug: "{{ entry.event_started }}"
         value: "true"
     messages:
       ready:
@@ -146,7 +148,11 @@ form_overrides:
     success:
       url: "https://…/join?token={{ visitor.token }}"
   - conditions:
-      - entry_field_slug: event_started
+      - field_property_slug: "{{ form.program }}"
+        value: ai-engineering
+    tags: ai-lead
+  - conditions:
+      - field_property_slug: "{{ entry.event_started }}"
         value: "false"
     webhook:
       url: "https://…/checkin"
@@ -158,10 +164,10 @@ form_overrides:
       reload_entry_fields: true
 ```
 
-- **`form_field_slug`:** compare against a submitted form field (e.g. `program`).
-- **`entry_field_slug`:** bare entry field path looked up on `singleEntry` at match time (e.g. `event_started`). Do **not** use `{{ entry.* }}` here — section `resolveDeep` would replace the template before LeadForm runs. Listing `item_property_slug` is unrelated.
+- **`field_property_slug`:** left operand template — `{{ form.program }}`, `{{ entry.event_started }}`, `{{ visitor.id }}`, etc.
+- **Legacy:** `form_field_slug` / `entry_field_slug` still match (compat → `{{ form.* }}` / `{{ entry.* }}`). Staff UI writes `field_property_slug` only.
 - **`match_method: contains`:** substring on strings; membership on arrays of scalars/ids. Not deep object search.
-- **Condition `value`:** `resolveDeep` — literals or `{{ visitor.* }}` (logged-in auth profile + `visitor.token`). Logged out → unresolved → contains fails → normal form.
+- **Condition `value`:** match-time resolve — literals or `{{ form.* }}` / `{{ visitor.* }}` / `{{ entry.* }}`. Logged out visitor → unresolved → contains fails → normal form.
 - **Order matters:** put already-registered overrides before generic live/upcoming.
 - **Webhook default is strict** (await upstream; 502 → no success UI). `webhook.fail_silently: true` = fire-and-forget.
 - **`webhook.headers`:** outbound headers; use `Authorization: "Token {{ visitor.token }}"` instead of removed `use_visitor_token`.
@@ -254,10 +260,30 @@ Every lead form must show at least one checkbox visitors must tick. Effective co
 | none + site has no Default | nothing → `FORM_NO_REQUIRED_CONSENT` (error) + publish blocked |
 
 - SMS, Email and WhatsApp are **always optional** and never count. `marketing: true` hides the separate Email / WhatsApp checkboxes (their CRM values follow the Marketing checkbox).
-- `sms_usa_only: true`: SMS shows only for US visitors by two-letter `country_code` — the location the visitor picked, else the detected session location; a location with unknown country (`XX`, e.g. `remote`) falls through to the visitor's geo `country_code`.
+- **Country filters (SMS / WhatsApp):** `sms_countries` / `whatsapp_countries` (ISO codes) plus `sms_countries_mode` / `whatsapp_countries_mode` (`include` default, or `exclude`). Matched to the **form-calculated location**’s `country_code` (form → page → autodetect). `XX` campuses (`remote` / `rest-of-*`) fall through to visitor geo. Empty list after merge = unrestricted. Filtered channel + unknown country → hide. Empty/missing countries on a customized form **inherit** the conversion event. Legacy `sms_usa_only: true` (no `sms_countries`) → include `[US]`. Typical soft-lead defaults: SMS include `[US]`, WhatsApp exclude `[US]`. Changing campus clears hidden channel values. Soft warn in staff UI when both channels could show for the same country (does not block publish).
 - Publish gate (`publish_draft`, `promote_variant`, staff publish, live `replace_all_sections`): refuses `consent_no_mandatory_checkbox` with `consent_forms[].property_path` and `fix_field_path` (`sections.N.<form>.consent.general`); `form_overrides` that switch `conversion_name` are checked as their own variant. Draft saves never block. A site with no Default adds warning `site_no_default_consent` to every publish; validator raises `SITE_NO_DEFAULT_CONSENT` (error).
-- Non-effects: values sent to the CRM are unchanged (`consent_general` is sent as-is; General does **not** set marketing consent). Enforcement is browser-only (the server accepts leads without consent). Agents cannot change the site Default (staff Settings).
-- Rule: `resolveConsentRequirement` in `shared/consent-settings.ts`; per-form check `shared/formConsentCheck.ts`; gate `server/consent-gate.ts`; validator `scripts/validation/validators/forms.ts`.
+- Non-effects: values sent to the CRM are unchanged (`consent_general` is sent as-is; General does **not** set marketing consent). Country filters are **browser display only**. Enforcement of mandatory checkboxes is browser-only (the server accepts leads without consent). Agents cannot change the site Default (staff Settings).
+- Rule: `resolveConsentRequirement` in `shared/consent-settings.ts`; country filter `shared/consentCountryFilter.ts`; per-form check `shared/formConsentCheck.ts`; gate `server/consent-gate.ts`; validator `scripts/validation/validators/forms.ts`.
+
+## Location (per content type: `forms.location`)
+
+Content types opt in with `content-types.yml` → `forms.location: { entry_field, autodetect }` (staff-only, content type dashboard → Form location; read it on `get_content_type_info.form_location`). Types without it keep the old behavior (detected location).
+
+Order for each form:
+
+1. **The form's own `fields.location`**: `default: <slug>` = one location (hidden, locked); `allowed: [slugs]` = several (required dropdown); `visible: true` = visitor picks (from `allowed` when set, else every listed location). `default: auto` / empty = not set.
+2. **The page field** named by `entry_field` (a relation to `location`, page-level → `_common.yml` for every language). One = locked; several = required dropdown with the visitor's detected city pre-selected when it is on the list.
+3. **Detection** (`autodetect` true, default) — otherwise the form has no location. Visitor `session.location` comes from Settings → Session (`settings.yml` → `session.location.database` + IP geo via `GET /api/session/location-catalog`). When the database is **None** or fill-from-IP is off, `session.location` stays null (raw `geo` still fills); forms that rely on detection then have no location until staff pick one.
+
+Rules agents must know:
+
+- `autodetect: false` + nothing set → `form_location_missing`: blocks publish/promote, and live saves that touch a form section or the page field. Draft saves and untouched forms get `form_location_warnings`. Live visitors still get a detected location until fixed (only when Session has a location database configured).
+- Location values are location slugs (`list_entries` contentType `location`, known also from the `locations` private database). Wrong slugs → `form_location_unknown` (same blocking rules; variables `{{ entry.* }}` are filled in before checking). Hidden locations (`visibility: unlisted`) stay valid (warning `form_location_hidden_campus`).
+- A form location different from the page's → warning `form_location_page_mismatch` (form wins).
+- **Prefer `update_fields` on the page field** (e.g. `locations: ["madrid-spain"]`, written to `_common.yml`). `fields.location` on a form is per language file — `update_fields` warns `form_location_override` and does not copy it to other languages. Staff's Forms tab → Location box: pick locations, then section Save → choose **this form only** or **whole page** (whole page only when the content type has `forms.location.entry_field`). This form only writes this language and syncs the same form in other languages; whole page writes the page Locations field first (then section Save). Empty + this form only = follow the page; empty + whole page clears page Locations (with a form list warning). Clear-others defaults on when page location is configured.
+- Region follows the chosen location. Signup field map can use `form.location.city|country|region` (chosen location; detected city/country when the location is `remote` / `rest-of-*` or itself detected).
+- Analytics only: the conversion event carries `location_source` (`form` | `page` | `preselected` | `visitor_picked` | `detected`). Lead/CRM payload unchanged.
+- Code: `shared/formLocationPolicy.ts`, gate `server/form-location-gate.ts`, writes `server/form-location-write.ts`, resolver `client/src/components/lead_form/resolveLeadFormFieldValues.ts`; validator codes `FORM_LOCATION_*` in `scripts/validation/validators/forms.ts`.
 
 ## Paths
 

@@ -33,6 +33,7 @@ import {
   type DraftRef,
   type FieldChange,
 } from "./draft-base";
+import { forgetDraftActivity } from "./draft-activity";
 import { markFileAsModified } from "../sync-state";
 import { deepMerge } from "../utils/deepMerge";
 import {
@@ -46,7 +47,10 @@ import { validateYamlIdentity } from "../validate-content-identity";
 import {
   assertLocaleUrlAvailable,
   checkNewLocaleUrlSlug,
+  isSingleAddressPattern,
+  liveLocaleSlugsInFolder,
   ownLocaleSlug,
+  singleAddressConflictFor,
   validateLocaleUrlSlugFormat,
 } from "../locale-url-slug";
 import { getContentTypeConfig } from "../content-types";
@@ -61,7 +65,7 @@ import { findTopLevelKeySpan, surgicalRemoveTopLevelKey } from "../seo-fields";
 import { normalizeFunnelBlock } from "@shared/funnel";
 import { assertFunnelAudienceGates } from "../product/funnel-audience-gates";
 import { stripFunnelFromAllLocaleYamls } from "../funnel-fields";
-import { urlParamsForContentType } from "../field-scope-config";
+import { commonKeysForContentType, urlParamsForContentType } from "../field-scope-config";
 import type { ValidationCacheService } from "../services/validationCacheService";
 import { checkDeprecatedFileWrite, deprecatedErrorInfo } from "../deprecated-field-guard";
 import { isSeoMonitoringEnabled } from "../seo-monitoring";
@@ -81,6 +85,10 @@ import {
   TEXT_LIMITS_EXCEEDED_CODE,
   summarizeTextLimitViolations,
 } from "@shared/component-text-limits";
+import {
+  evaluateFactLiteralWarnings,
+  type FactLiteralWarning,
+} from "../fact-literals-edit";
 import {
   normalizeRobotsValue,
   parseRobotsOnPublish,
@@ -192,6 +200,8 @@ export type PromoteWithTeardownResult =
       rebuilt?: { kept_live_fields: string[]; author_fields: string[] };
       /** What changed on the published page (fields, before/after). */
       publishedDiff: FieldChange[];
+      /** Exact catalog fact-literal hits on changed fields (warn-only). */
+      factLiteralWarnings?: FactLiteralWarning[];
       /** Raw files before the write (for revert). */
       preApplySnapshot: PromoteSnapshot;
       versioningDeleted: boolean;
@@ -263,10 +273,11 @@ export function displayValueChanges(opts: {
   commonBeforeRaw: string | null;
   commonAfterRaw: string | null;
   urlParams?: string[];
+  commonKeys?: string[];
 }): DisplayValueChange[] {
   const live = parseOrNull(opts.liveRaw);
   if (!live) return [];
-  const { common: legacy } = splitByFieldScope(live, { urlParams: opts.urlParams });
+  const { common: legacy } = splitByFieldScope(live, { urlParams: opts.urlParams, commonKeys: opts.commonKeys });
   const commonBefore = parseOrNull(opts.commonBeforeRaw) ?? {};
   const commonAfter = parseOrNull(opts.commonAfterRaw) ?? {};
   const out: DisplayValueChange[] = [];
@@ -289,9 +300,14 @@ export function routeSharedFieldsOnPromote(opts: {
   draftRaw: string;
   commonRaw: string | null;
   urlParams?: string[];
+  /** Content-type page-level keys (e.g. the form location page field). */
+  commonKeys?: string[];
 }): { localeRaw: string; commonRaw: string | null; commonChanged: boolean; paths: string[]; draftCommon: Record<string, unknown> } {
   const parsed = safeLoadYaml(opts.draftRaw) ?? {};
-  const { common: draftCommon, locale: draftLocale } = splitByFieldScope(parsed, { urlParams: opts.urlParams });
+  const { common: draftCommon, locale: draftLocale } = splitByFieldScope(parsed, {
+    urlParams: opts.urlParams,
+    commonKeys: opts.commonKeys,
+  });
   const paths = commonPathsOf(draftCommon);
   const localeNulls = localeNullPaths(draftLocale);
   if (paths.length === 0 && localeNulls.length === 0) {
@@ -623,6 +639,17 @@ export async function promoteVariantWithOptionalTeardown(
     }
     const parsedVariant = (ci.safeYamlLoad(variantContent) as Record<string, unknown>) || {};
     const commonForGate = ci.loadCommonData(contentType, slug) || {};
+    const urlPatternForGate = getContentTypeConfig(contentType, contentRoot)?.url_pattern ?? null;
+    if (!templateMode && isSingleAddressPattern(urlPatternForGate)) {
+      const commonSlug = typeof commonForGate.slug === "string" && commonForGate.slug.trim() ? commonForGate.slug.trim() : null;
+      const conflict = singleAddressConflictFor({
+        urlPattern: urlPatternForGate,
+        slugsByLocale: liveLocaleSlugsInFolder(contentDir, slug, (raw) => safeLoadYaml(raw), commonSlug),
+        locale,
+        newSlug: ownLocaleSlug(parsedVariant) ?? commonSlug ?? slug,
+      });
+      if (!conflict.ok) return { ok: false, code: conflict.code, error: conflict.error, status: 409, details: conflict.details };
+    }
     const mergedForGate = deepMerge(commonForGate, parsedVariant) as Record<string, unknown>;
     const { evaluateLiveEntrySeoAndRequiredFields } = await import("../live-entry-seo-gate");
     const seoGate = evaluateLiveEntrySeoAndRequiredFields({
@@ -680,6 +707,41 @@ export async function promoteVariantWithOptionalTeardown(
         };
       }
       for (const w of consentGate.warnings) warnings.push({ code: w.code, message: w.message, fields: [] });
+    }
+    if (!templateMode) {
+      const { runFormLocationGate, formLocationBlockMessage } = await import("../form-location-gate");
+      const locationGate = runFormLocationGate({ pageData: mergedForGate, contentType, contentRoot });
+      if (locationGate.errors.length > 0) {
+        return {
+          ok: false,
+          code: locationGate.errors[0]!.code,
+          error: `Cannot promote: ${formLocationBlockMessage(locationGate.errors)}`,
+          details: { form_location_issues: locationGate.errors, warnings: locationGate.warnings },
+        };
+      }
+      for (const w of locationGate.warnings) {
+        warnings.push({ code: w.code, message: w.message, fields: [w.fix_field_path] });
+      }
+      const {
+        runAdsAccountLocationGate,
+        adsAccountLocationBlockMessage,
+        landingPathForEntry,
+      } = await import("../ads-account-location-gate");
+      const landingPath = landingPathForEntry(contentType, slug, contentRoot);
+      if (landingPath) {
+        const adsGate = runAdsAccountLocationGate({ landingPath, contentType, contentRoot });
+        if (adsGate.errors.length > 0) {
+          return {
+            ok: false,
+            code: adsGate.errors[0]!.code,
+            error: `Cannot promote: ${adsAccountLocationBlockMessage(adsGate.errors)}`,
+            details: { ads_account_location_issues: adsGate.errors },
+          };
+        }
+        for (const w of adsGate.warnings) {
+          warnings.push({ code: w.code, message: w.message, fields: [w.fix_field_path] });
+        }
+      }
     }
     if (!templateMode) {
       const urlCheck = assertLocaleUrlAvailable({
@@ -806,6 +868,7 @@ export async function promoteVariantWithOptionalTeardown(
           draftRaw: variantContent,
           commonRaw: commonBefore,
           urlParams: urlParamsForContentType(contentType, contentRoot),
+          commonKeys: commonKeysForContentType(contentType, contentRoot),
         });
 
     if ("funnel" in routed.draftCommon && routed.draftCommon.funnel !== null) {
@@ -826,6 +889,7 @@ export async function promoteVariantWithOptionalTeardown(
           commonBeforeRaw: commonBefore,
           commonAfterRaw: routed.commonChanged ? routed.commonRaw : commonBefore,
           urlParams: urlParamsForContentType(contentType, contentRoot),
+          commonKeys: commonKeysForContentType(contentType, contentRoot),
         });
     if (displayChanges.length > 0) {
       const fields = displayChanges.map((c) => c.field_path);
@@ -923,6 +987,37 @@ export async function promoteVariantWithOptionalTeardown(
         common: routed.commonChanged ? parseOrNull(routed.commonRaw) : parseOrNull(commonBefore),
       } as BaseSnapshot,
     );
+
+    // Exact site-fact literals on fields this publish touched (warn-only; cue-invited on-save).
+    let factLiteralWarnings: FactLiteralWarning[] = [];
+    try {
+      factLiteralWarnings = evaluateFactLiteralWarnings({
+        contentRoot,
+        site: contentRootName,
+        entryKey: buildEntryKey(contentType, slug, locale),
+        isLiveWrite: true,
+        entryData: mergedForGate,
+        changes: publishedDiff.map((c) => ({ field_path: c.field_path, value: c.after })),
+        locale,
+        stashForOnSave: args.dryRun !== true,
+      });
+      for (const w of factLiteralWarnings) {
+        warnings.push({
+          code: "fact_literal_prefer_variable",
+          message: w.message,
+          fields: [w.field_path],
+          details: {
+            literal: w.literal,
+            variables: w.variables,
+            status: w.status,
+            kind: w.kind,
+          },
+        });
+      }
+    } catch {
+      /* non-fatal */
+    }
+
     const preApplySnapshot: PromoteSnapshot = { live: liveContent, common: commonBefore };
     if (routed.paths.length > 0) {
       warnings.push({
@@ -940,6 +1035,7 @@ export async function promoteVariantWithOptionalTeardown(
         warnings,
         rebuilt,
         publishedDiff,
+        ...(factLiteralWarnings.length ? { factLiteralWarnings } : {}),
         preApplySnapshot,
         versioningDeleted: false,
         dryRun: true,
@@ -1010,6 +1106,7 @@ export async function promoteVariantWithOptionalTeardown(
 
     fs.unlinkSync(variantFilePath);
     forgetDraftBase(ref);
+    forgetDraftActivity(ref);
 
     if ("funnel" in routed.draftCommon) {
       stripFunnelFromAllLocaleYamls(contentType, slug, contentRoot, author);
@@ -1104,6 +1201,7 @@ export async function promoteVariantWithOptionalTeardown(
       warnings,
       rebuilt,
       publishedDiff,
+      ...(factLiteralWarnings.length ? { factLiteralWarnings } : {}),
       preApplySnapshot,
       versioningDeleted,
     };

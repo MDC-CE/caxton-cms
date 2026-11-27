@@ -35,10 +35,12 @@ Score **each entry row** in the proposal. Soft prefer ≤10 related posts per pa
 | Dimension | Pass when | Fail when | Warn when |
 |---|---|---|---|
 | **Persona** | Content intent matches a real persona id on a product (`get_product`) | Invented persona id, or persona from the wrong product’s story | Product has no usable personas — product-only bind OK; do not invent ids |
-| **Product** | Bindings follow that fit; **multiple** `{ product, persona? }` OK when two+ personas truly fit | Bound to a product whose buyers do not match; or `all` used only because the topic feels company-wide | — |
+| **Product** | Bindings follow that fit; **multiple** `{ product, persona? }` OK when two+ **product-owned** personas truly fit (each persona id must exist on **that** product — not one shared persona on two SKUs) | Bound to a product whose buyers do not match; or `all` used only because the topic feels company-wide | — |
 | **Stage** | `awareness` / `consideration` / `decision` / `post-enrollment` matches readiness | Money-page (`decision`) for top-of-funnel education; or awareness on a buy-now page | — |
 
 **`products: all`:** only when **no single product’s personas are a better fit** (true site/brand story). `"all"` **never** carries personas.
+
+**1 persona → 1 product:** Multi-bind rows are different personas on different products. Pace vs intensity (e.g. Flex vs bootcamp/AI Engineering) for the same human segment ⇒ usually **two product-specific personas**, not one shared id reused across products (topic `product` → Audience ownership).
 
 **Partial edits:** if only `funnel.stage` or only `funnel.products` moves, still re-check the **full** cascade against live + proposed — the untouched half must still fit.
 
@@ -50,7 +52,7 @@ Score **each entry row** in the proposal. Soft prefer ≤10 related posts per pa
 |---|---|
 | `funnel.stage` and/or `funnel.products` only | Mix `content` or `meta.page_title` / `meta.description` in the same proposal |
 | `{ product, persona? }` when a persona fits | Invent a persona id that is not on `_product.yml` |
-| Multiple product rows when two real personas fit | Default to `all` because the title says “report” or “outcomes” |
+| Multiple product rows when two real **product-owned** personas fit (each on its own product) | Default to `all` because the title says “report” or “outcomes”; reuse one persona id across two products “because it’s the same buyer” |
 | Pick the persona from who **this page** talks to (title, hero, CTAs) | Copy the persona most sibling pages use — how common a persona is says nothing about this page |
 | Soft batch ≤10 related posts | Megabatch without per-row rationale |
 | Summary names intent + cascade rationale | “Improve funnel” with no buyer story |
@@ -138,7 +140,7 @@ When an op binds `{ product, persona }`, `propose_change` and `revise_entries` r
 ### 2c. Where the funnel lives (drafts, `_common.yml`, language files)
 
 - The page funnel lives only in `_common.yml`. Language files (`en.yml`, `es.yml`) never carry `funnel:`; live saves that add or change it fail with `funnel_in_language_file`.
-- Proposals stage `funnel.*` in the **draft** (`draft.{locale}.yml`). That is not a `_common.yml` write: nothing changes for visitors until a person publishes, and publishing moves the draft funnel to `_common.yml` and strips `funnel:` from every language file. A rule like "bots must not write `_common.yml`" does not forbid proposing a funnel in a draft — send the `funnel.*` ops.
+- Proposals stage `funnel.*` in the **draft** (`draft.{locale}.yml`). That is not a `_common.yml` write: nothing changes for visitors until the proposal is approved (by staff or a reviewer agent), and that apply moves the draft funnel to `_common.yml` and strips `funnel:` from every language file. Always send the `funnel.*` ops; page-level does not mean staff-only.
 - Warning **`funnel_carried_from_language_file`** (on `propose_change` / `revise_entries` when the draft is created or reset, and on create-variant): the live language file still had a legacy `funnel:` that differs from `_common.yml`, so the draft keeps it (as visitors see it) instead of dropping it. Publishing makes it the page funnel for **every** language. Keep it if it is right; otherwise send `funnel.*` ops with the correct cascade. Do not ask staff to hand-edit `_common.yml` for this.
 - Legacy copies are moved by data migration `010_funnel_to_common` (staff run it): invalid product/persona copies never win, a persona on every product (or `all`) beats bare products, then the newest copy wins; drafts keep a valid persona funnel until published.
 
@@ -163,6 +165,7 @@ If body or SERP is also pending: mixed packet. Score each pack; do not apply the
 | Situation | Action |
 |---|---|
 | Cascade pass on every row; no same-field funnel churn | Claim → apply |
+| Requested `funnel.*` publishes to `_common.yml` (every language) | Normal — apply. Page-level is not a staff handoff. Apply refuses agents only for unrequested page-level fields (`agent_apply_unrequested_page_fields`) or dropped live values (`agent_apply_drops_live_values`) → `add_blocker` for the author |
 | Wrong persona / product / stage | `add_blocker` (cite step + fixed binding). Default is not reject |
 | Breadth-only “should be all / Flex” with cascade otherwise sound | Leave live or block; do **not** reject |
 | Incomplete audience; honest product-only bind | Apply with warn — do not invent persona |

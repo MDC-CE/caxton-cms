@@ -8,7 +8,7 @@ import { ClusterHubPathRewriteJob } from "./definitions/cluster-hub-path-rewrite
 import { AiImageGcJob } from "./definitions/ai-image-gc";
 import { SeoIndexRefreshJob } from "./definitions/seo-index-refresh";
 import { EventWebhookDeliveryJob } from "./definitions/event-webhook-delivery";
-import { DraftLinkCheckJob, ProposalStaleSweepJob } from "./definitions/proposal-maintenance";
+import { DraftCleanupJob, DraftLinkCheckJob, ProposalStaleSweepJob } from "./definitions/proposal-maintenance";
 import { MetaAdsSyncJob } from "./definitions/meta-ads-sync";
 import { AdsSyncJob } from "./definitions/ads-sync";
 import { AdsRecheckJob } from "./definitions/ads-recheck";
@@ -25,6 +25,7 @@ import { EvidenceArchiveJob } from "./definitions/evidence-archive";
 import { EvidenceArchiveSweepJob } from "./definitions/evidence-archive-sweep";
 import { PublicUrlChangesScanJob } from "./definitions/public-url-changes-scan";
 import { IndexNowSubmitJob } from "./definitions/indexnow-submit";
+import { LlmsTxtRegenerateJob } from "./definitions/llms-txt-regenerate";
 
 export function registerAllJobs(): void {
   registerJobClass("index_refresh", IndexRefreshJob);
@@ -38,6 +39,7 @@ export function registerAllJobs(): void {
   registerJobClass("event_webhook_delivery", EventWebhookDeliveryJob);
   registerJobClass("proposal_stale_sweep", ProposalStaleSweepJob);
   registerJobClass("draft_link_check", DraftLinkCheckJob);
+  registerJobClass("draft_cleanup", DraftCleanupJob);
   registerJobClass("ads_sync", AdsSyncJob);
   registerJobClass("ads_recheck", AdsRecheckJob);
   registerJobClass("ads_daily_sync", AdsDailySyncJob);
@@ -54,4 +56,5 @@ export function registerAllJobs(): void {
   registerJobClass("evidence_archive_sweep", EvidenceArchiveSweepJob);
   registerJobClass("public_url_changes_scan", PublicUrlChangesScanJob);
   registerJobClass("indexnow_submit", IndexNowSubmitJob);
+  registerJobClass("llms_txt_regenerate", LlmsTxtRegenerateJob);
 }

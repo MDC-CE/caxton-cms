@@ -1130,7 +1130,7 @@ export const featureQuadCtaSchema = commonCtaButtonSchema;
 export const featureQuadSectionSchema = z.object({
   type: z.literal("features_quad"),
   version: z.string().optional(),
-  variant: z.enum(["default", "laptopEdge"]).optional(),
+  variant: z.enum(["default", "laptopEdge", "bulletLaptop"]).optional(),
   compact: z.boolean().optional(),
   heading: z.string().optional(),
   description: z.string().optional(),
@@ -1165,6 +1165,18 @@ export const featureQuadSectionSchema = z.object({
     image_id: z.string(),
     alt: z.string().optional(),
   }).optional(),
+  // bulletLaptop variant
+  heading_highlight: z.string().optional(),
+  screen_image: z.object({
+    image_id: z.string(),
+    alt: z.string().optional(),
+  }).optional(),
+  laptop_badges: z.array(z.object({
+    text: z.string(),
+    dot: z.enum(["primary", "green"]).optional(),
+    image_id: z.string().optional(),
+    alt: z.string().optional(),
+  })).optional(),
 });
 
 export type FeatureQuadCard = z.infer<typeof featureQuadCardSchema>;
@@ -1600,6 +1612,8 @@ export const versioningUpdateSchema = z.object({
   /** Completed traffic-check job. The save applies its result only when it matches this variant. */
   validation_job_id: z.string().optional(),
   validation_job_ids: z.array(z.string()).optional(),
+  /** Goal for a test this save starts (0% → traffic). Ignored when a test is already running. */
+  test_goal: z.enum(["leads", "enrollment_clicks", "both", "micro_actions"]).optional(),
 }).strict();
 
 export type VersioningUpdate = z.infer<typeof versioningUpdateSchema>;
